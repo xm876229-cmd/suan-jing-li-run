@@ -247,7 +247,22 @@ class OrderLine:
 
     @property
     def is_paid(self) -> bool:
-        return self.order_amount > 0
+        """这一行是否算作有效订单（影响订单数、成本、买家实付）。
+
+        不能只看金额。赠品、换货补发、纯运费单这类 0 元单金额为 0，
+        但已经发货，同样会产生发单费（按单收）和成本。
+        只按金额判断会把它们整行排除，店铺总净利因此偏高。
+
+        所以以状态为准：只要进入履约流程就算有效，明确失效的才排除。
+        """
+        if self.order_amount > 0:
+            return True
+
+        s = (self.status or "").strip()
+        if not s:
+            return False          # 状态缺失时保守处理，不擅自计入
+        dead = ("未支付", "待付款", "已取消", "已关闭", "已退款", "取消", "失败")
+        return not any(k in s for k in dead)
 
     @property
     def gmv(self) -> float:
