@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -340,6 +341,62 @@ def parse_mapping(rows: list[tuple]) -> SkuIndex:
     return idx
 
 
+def _norm_key(k) -> str:
+    """键名归一化：product_id / productId / Product ID 都变成 productid。"""
+    return re.sub(r"[^a-z0-9]", "", str(k).lower())
+
+
+def parse_mapping_json(path: Path) -> SkuIndex:
+    """解析扩展直接抓下来的商品 SKU JSON（sku_list_*.json）。
+
+    平台这个接口返回的 item 结构层级较深（items[].meta.xxx），而且字段名
+    随版本会变，所以不写死路径：把每个 item 递归摊平，再按键名归一化匹配。
+    """
+    idx = SkuIndex()
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return idx
+
+    items = (raw.get("data") or {}).get("items") or raw.get("items") or []
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        flat: dict[str, str] = {}
+
+        def walk(o):
+            if isinstance(o, dict):
+                for k, v in o.items():
+                    if isinstance(v, (dict, list)):
+                        walk(v)
+                    elif isinstance(v, (str, int)) and not isinstance(v, bool):
+                        flat.setdefault(_norm_key(k), str(v))
+            elif isinstance(o, list):
+                for v in o[:3]:      # 变体数组只取前几个，避免同 item 反复覆盖
+                    walk(v)
+
+        walk(it)
+
+        pid = flat.get("productid", "")
+        if not pid:
+            continue
+        item = {
+            "product_id": pid,
+            "style_code": flat.get("stylecode", "") or flat.get("sellerstylecode", ""),
+            "product_name": flat.get("productname", ""),
+        }
+        sid = flat.get("skuid", "")
+        if sid:
+            idx.by_sku_id.setdefault(sid, item)
+        ssk = flat.get("sellersku", "") or flat.get("skuname", "") or flat.get("sku", "")
+        if ssk:
+            bucket = idx.by_seller_sku[ssk]
+            if item not in bucket:
+                bucket.append(item)
+    return idx
+
+
 def parse_orders(rows: list[tuple]) -> list[OrderLine]:
     hidx, cm = find_header_row(rows, ("order_id", "sku_id", "seller_sku", "qty"))
     if hidx < 0:
@@ -610,11 +667,19 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
         "order": [], "ads": [], "affiliate": [], "mapping": []
     }
     skipped: list[str] = []
+    json_maps: list[tuple[Path, SkuIndex]] = []   # 扩展直接抓的 sku_list_*.json
 
     for f in sorted(folder.iterdir()):
-        if not f.is_file() or f.suffix.lower() not in (".xlsx", ".xls", ".csv", ".txt"):
+        if not f.is_file() or f.suffix.lower() not in (".xlsx", ".xls", ".csv", ".txt", ".json"):
             continue
         if f.name.startswith("~$"):
+            continue
+        if f.suffix.lower() == ".json":
+            jm = parse_mapping_json(f)
+            if len(jm):
+                json_maps.append((f, jm))
+            else:
+                skipped.append(f.name)
             continue
         try:
             rows = read_table(f)
@@ -646,11 +711,17 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
 
     sku_index = SkuIndex()
     m = newest("mapping")
+    # 表格映射（人工导的链接资料）与 JSON 映射（扩展抓的）都认，取更新的那份
     if m:
         sku_index = parse_mapping(m[1])
         sources["映射"] = m[0].name
         if not len(sku_index):
             issues.append(f"映射表里没识别出 SKU ID / Product ID 列：{m[0].name}")
+    if json_maps:
+        jf, jidx = max(json_maps, key=lambda x: x[0].stat().st_mtime)
+        if not m or jf.stat().st_mtime > m[0].stat().st_mtime:
+            sku_index = jidx
+            sources["映射"] = jf.name
 
     costs: dict[str, float] = {}
     if costs_file and Path(costs_file).exists():

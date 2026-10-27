@@ -358,91 +358,80 @@ function dstr(d) {
 
 // ---------------- 任务：商品 SKU 统计 ----------------
 
-async function runSkuStats({ startDate, endDateExclusive }, log) {
+async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
+  // 商品SKU 的用途是「SKU ID → 商品ID」映射，一个月才可能变一次。
+  // 一键取全部时如果缓存还新，直接跳过，省掉几十页请求。
+  // 单独点「商品 SKU」按钮视为强制更新。
+  const SKU_TTL = 30 * 86400000;
+  const { skuCache } = await chrome.storage.local.get({ skuCache: null });
+  if (!opts.force && skuCache && Date.now() - skuCache.at < SKU_TTL) {
+    const days = Math.floor((Date.now() - skuCache.at) / 86400000);
+    log(`映射已是最新（${days} 天前取过，${skuCache.items} 条），跳过。要更新请单独点「商品 SKU」`);
+    return { cached: true, saved: skuCache.file, items: skuCache.items };
+  }
+
   const host = await ensureHost("seller", log);
 
-  // 优先走 JSON 数据接口：数据立刻返回，不用等平台生成文件
-  const reqBody = {
-    request: {
-      list_control: {
-        rules: [{ direction: 2, field: "sku_gmv" }],
-        pagination: { size: 5000, page: 0 },
-      },
-      filter: {},
-      time_descriptor: { start: startDate, end: endDateExclusive },
-      search: {},
-    },
-  };
+  // 走 JSON 数据接口分页拉全量。
+  // 之前试过「创建导出任务 → 等文件」那条路：任务列表永远 total_files=0，
+  // 文件路径也取不出二进制，白等三分钟。JSON 接口才是正路。
+  //
+  // 分页尺寸不能贪：真实页面用的是 10，直接给 5000 会返回
+  // code=98001021 call downstream server error（后端聚合超时）。
+  // 这里从 100 开始试，失败就退回 10。
+  const SIZES = [{ size: 100, maxPages: 60 }, { size: 10, maxPages: 400 }];
 
-  log("拉取商品SKU数据（JSON）…");
-  try {
-    const j = await apiPost(await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list"), reqBody);
-    const items = j?.data?.items || [];
-    if (items.length) {
-      const bytes = new TextEncoder().encode(JSON.stringify(j));
+  for (const { size, maxPages } of SIZES) {
+    const all = [];
+    let page = 0;
+    let ok = true;
+
+    log(`拉取商品SKU（每页 ${size} 条）…`);
+    for (let i = 0; i < maxPages; i++) {
+      const body = {
+        request: {
+          time_descriptor: { start: startDate, end: endDateExclusive },
+          search: {},
+          filter: {},
+          list_control: {
+            rules: [{ direction: 2, field: "sku_gmv" }],
+            pagination: { size, page },
+          },
+        },
+      };
+      try {
+        const j = await apiPost(await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list"), body);
+        const items = j?.data?.items || [];
+        all.push(...items);
+        log(`第 ${page + 1} 页：${items.length} 条，累计 ${all.length} 条`);
+        if (items.length < size) break;      // 最后一页
+        page += 1;
+      } catch (e) {
+        log(`每页 ${size} 时失败（${e.message}）`);
+        ok = false;
+        break;
+      }
+    }
+
+    if (ok && all.length) {
+      const payload = JSON.stringify({ data: { items: all } });
+      const bytes = new TextEncoder().encode(payload);
+      const name = `sku_list_${startDate}_${endDateExclusive}.json`;
+      const saved = await uploadToBridge(name, bytes.buffer);
+      await chrome.storage.local.set({ skuCache: { at: Date.now(), file: saved.path, items: all.length } });
+      log(`已保存：${saved.path}（${all.length} 条 SKU），30 天内不再重复取`);
+      return { saved: saved.path, items: all.length };
+    }
+    if (!ok && !all.length) continue;      // 换小尺寸再试
+    if (all.length) {
+      const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
       const saved = await uploadToBridge(`sku_list_${startDate}_${endDateExclusive}.json`, bytes.buffer);
-      log(`已保存：${saved.path}（${items.length} 条）`);
-      return { saved: saved.path, items: items.length };
+      log(`部分成功：${all.length} 条（中途失败）`);
+      return { saved: saved.path, items: all.length, partial: true };
     }
-    log("JSON 接口返回 0 条，改走导出文件");
-  } catch (e) {
-    log(`JSON 接口失败（${e.message}），改走导出文件`);
   }
 
-  log("提交商品SKU导出…");
-  const r = await apiPost(
-    await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list/export"),
-    reqBody
-  );
-  const file = r?.data?.file;
-  if (!file) throw new Error("没拿到文件路径（data.file 为空）");
-  log(`文件路径：${file}`);
-
-  const name = `product_sku_list-${startDate}_${endDateExclusive}.xlsx`;
-  const direct = file.startsWith("http") ? file : `https://${host}${file}`;
-
-  for (let i = 0; i < 18; i++) {
-    // 路子一：查导出任务列表，里面通常带可下载地址
-    try {
-      const tl = await apiPost(
-        await buildUrl(host, "/api/v2/insights/seller/shop/export/task/list"),
-        { sub_modules: [80] }
-      );
-      let url = findUrl(tl);
-      const n = tl?.total_files ?? 0;
-      if (i === 0 || url) log(`任务列表：total_files=${n}${url ? "，已拿到下载地址" : ""}`);
-      if (url) {
-        if (url.startsWith("/")) url = `https://${host}${url}`;
-        return downloadAndUpload(url, name, log);
-      }
-    } catch (e) {
-      log(`查任务列表出错：${e.message}`);
-    }
-
-    // 路子二：直接取文件路径
-    try {
-      const resp = await fetch(direct, { credentials: "include" });
-      const ct = resp.headers.get("content-type") || "";
-      if (resp.ok && !ct.includes("json")) {
-        const buf = await resp.arrayBuffer();
-        if (buf.byteLength > 512) {
-          const saved = await uploadToBridge(name, buf);
-          log(`已保存：${saved.path}`);
-          return { saved: saved.path, bytes: buf.byteLength };
-        }
-      } else {
-        let body = "";
-        try { body = (await resp.text()).slice(0, 150); } catch (e) { /* 忽略 */ }
-        log(`直取返回 ${resp.status} ${ct.split(";")[0]} ${body.replace(/\s+/g, " ")}`);
-      }
-    } catch (e) {
-      log(`直取出错：${e.message}`);
-    }
-
-    log(`等待文件生成…（${(i + 1) * 5}s）`);
-    await sleep(5000);
-  }
-  throw new Error("等了约 3 分钟仍取不到文件，日志里有每次返回的状态供排查");
+  throw new Error("商品SKU取数失败：JSON 接口在两种分页尺寸下都没返回数据");
 }
 
 // ---------------- 任务：联盟佣金 ----------------
@@ -829,7 +818,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "runTask") {
     const log = (m) => appendTaskLog(`[${msg.task}] ${m}`);
-    runTask(msg.task, msg.range || {}, log)
+    runTask(msg.task, msg.range || {}, log, { force: !!msg.force })
       .then((r) => {
         bridgeLog(`[${msg.task}] 完成`);
         sendResponse({ ok: true, result: r });
