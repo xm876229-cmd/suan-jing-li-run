@@ -12,6 +12,7 @@ output/*
 data/capture/*.jsonl
 data/exports/*
 !data/.gitkeep
+!data/exports/README.md
 !data/capture/endpoints.json
 *.out.xlsx
 *.out.csv
