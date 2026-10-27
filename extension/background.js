@@ -570,6 +570,24 @@ async function runTask(task, range, log, opts = {}) {
   }
 }
 
+const LOG_KEY = "taskLogs";
+const LOG_MAX = 300;
+
+/** 任务日志同时写三处：本地桥、扩展存储（面板重开可恢复）、控制台 */
+async function appendTaskLog(msg) {
+  const line = `${new Date().toLocaleTimeString("zh-CN", { hour12: false })}  ${msg}`;
+  bridgeLog(msg);
+  try {
+    const { [LOG_KEY]: old = [] } = await chrome.storage.local.get({ [LOG_KEY]: [] });
+    old.push(line);
+    if (old.length > LOG_MAX) old.splice(0, old.length - LOG_MAX);
+    await chrome.storage.local.set({ [LOG_KEY]: old });
+  } catch (e) { /* 存储失败不影响任务 */ }
+  try {
+    chrome.runtime.sendMessage({ type: "taskLog", msg }).catch(() => {});
+  } catch (e) { /* 面板没开 */ }
+}
+
 function bridgeLog(msg) {
   fetch(`${BRIDGE}/log`, {
     method: "POST",
@@ -645,7 +663,7 @@ async function checkSchedule() {
   if (!jobs.length) return null;
 
   for (const [mode, r] of jobs) {
-    const log = (m) => bridgeLog(`[auto-${mode}] ${m}`);
+    const log = (m) => appendTaskLog(`[auto-${mode}] ${m}`);
     log(`开始自动取数：${r.startDate} ~ ${r.to}`);
     try {
       await runTask("all", toRangeObj(r), log);
@@ -770,10 +788,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "deepCapture") {
-    const log = (m) => bridgeLog(`[debug] ${m}`);
+    const log = (m) => appendTaskLog(`[debug] ${m}`);
     deepCapture(msg.seconds || 120, log)
       .then((r) => sendResponse({ ok: true, result: r }))
       .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
+    return true;
+  }
+
+  if (msg.type === "getLog") {
+    chrome.storage.local.get({ [LOG_KEY]: [] }, (s) => sendResponse({ ok: true, logs: s[LOG_KEY] }));
+    return true;
+  }
+
+  if (msg.type === "clearLog") {
+    chrome.storage.local.set({ [LOG_KEY]: [] }, () => sendResponse({ ok: true }));
     return true;
   }
 
@@ -800,14 +828,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "runTask") {
-    const log = (m) => {
-      bridgeLog(`[${msg.task}] ${m}`);
-      // 面板没打开时 sendMessage 会抛，别让日志影响任务本身
-      try {
-        const p = chrome.runtime.sendMessage({ type: "taskLog", msg: m });
-        if (p && typeof p.catch === "function") p.catch(() => {});
-      } catch (e) { /* 无接收方，忽略 */ }
-    };
+    const log = (m) => appendTaskLog(`[${msg.task}] ${m}`);
     runTask(msg.task, msg.range || {}, log)
       .then((r) => {
         bridgeLog(`[${msg.task}] 完成`);

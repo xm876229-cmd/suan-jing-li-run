@@ -108,6 +108,21 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "taskLog") log(msg.msg);
 });
 
+// 面板关掉会丢日志，这里从扩展存储里把上次的记录捞回来
+chrome.runtime.sendMessage({ type: "getLog" }, (r) => {
+  if (!r || !r.ok || !r.logs || !r.logs.length) return;
+  const head = document.createElement("div");
+  head.textContent = "—— 上次的记录 ——";
+  head.style.color = "#8A99A8";
+  logEl.appendChild(head);
+  r.logs.slice(-60).forEach((line) => {
+    const d = document.createElement("div");
+    d.textContent = line;
+    logEl.appendChild(d);
+  });
+  logEl.scrollTop = logEl.scrollHeight;
+});
+
 $("toggle").addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "state" }, (s) => {
     const next = !(s && s.enabled);
