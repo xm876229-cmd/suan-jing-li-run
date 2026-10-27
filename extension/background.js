@@ -31,6 +31,46 @@ try {
     reportCrash("未处理的 Promise 拒绝", (r && (r.stack || r.message)) || String(r));
   });
 } catch (e) { /* 环境不支持，忽略 */ }
+
+// ---------------- 日志 ----------------
+// 这两个函数（连同 LOG_KEY）曾经只有引用没有定义——v0.3.6 加日志落盘时
+// 一次字符串替换没匹配上，之后所有任务在写第一行日志时就抛
+// ReferenceError: appendTaskLog is not defined，
+// 而且抛错位置在异步链的最外层，表现为「点了没反应、日志空白」。
+
+const LOG_KEY = "taskLogs";
+const LOG_MAX = 300;
+
+/** 只送到本地桥（黑窗口 + task.log），不落扩展存储。 */
+function bridgeLog(msg) {
+  try {
+    fetch(`${BRIDGE}/log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ msg: String(msg) }),
+    }).catch(() => {});
+  } catch (e) { /* 桥没开 */ }
+}
+
+/** 任务日志：桥 + 扩展存储（面板重开可恢复）+ 实时推给面板。 */
+async function appendTaskLog(msg) {
+  const line = `${new Date().toLocaleTimeString("zh-CN", { hour12: false })}  ${msg}`;
+  bridgeLog(msg);
+
+  try {
+    const cur = await skGet({ [LOG_KEY]: [] });
+    const arr = Array.isArray(cur[LOG_KEY]) ? cur[LOG_KEY] : [];
+    arr.push(line);
+    if (arr.length > LOG_MAX) arr.splice(0, arr.length - LOG_MAX);
+    await skSet({ [LOG_KEY]: arr });
+  } catch (e) { /* 存储失败不影响任务 */ }
+
+  try {
+    const p = chrome.runtime.sendMessage({ type: "taskLog", msg });
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch (e) { /* 面板没开 */ }
+}
+
 const MAX_BUFFER = 500;
 
 let buffer = [];
@@ -961,6 +1001,60 @@ async function consumePending() {
   const log = (m) => appendTaskLog(`[${p.task}] ${m}`);
   log("从待办队列领取任务");
   return executeTask(p.task, p.range || {}, log, { force: !!p.force, withCalc: p.withCalc });
+}
+
+// ---------------- 任务调度 ----------------
+// 这个调度器在一次重构里被误删，只留下调用（runTaskThenCalc / executeTask），
+// 后果是所有取数任务在第一步就抛 ReferenceError: runTask is not defined。
+// 现在补回来：按任务名分派、一键全跑、失败时自愈重试一次。
+
+const TASK_IMPL = {
+  orders: runOrders,
+  sku: runSkuStats,
+  affiliate: runAffiliate,
+  ads: runAds,
+};
+const TASK_HINT = { orders: "seller", sku: "seller", affiliate: "affiliate", ads: "seller" };
+
+async function runTask(task, range, log, opts = {}) {
+  if (task === "all") {
+    const out = {};
+    // 广告排在最后：它只查已完成任务，不会阻塞前面的取数；
+    // 剩下三个是算净利必需的，任何一个失败都不影响其余继续跑。
+    for (const t of ["orders", "sku", "affiliate", "ads"]) {
+      try {
+        log(`—— 开始：${t} ——`);
+        out[t] = await runTask(
+          t, range, log,
+          t === "ads" ? { quick: true } : { force: !!opts.force },
+        );
+      } catch (e) {
+        log(`—— ${t} 失败：${e.message}`);
+        out[t] = { error: String(e.message || e) };
+      }
+    }
+    return out;
+  }
+
+  const impl = TASK_IMPL[task];
+  if (!impl) throw new Error(`不支持的取数任务：${task}`);
+
+  try {
+    return await impl(range, log, opts);
+  } catch (e) {
+    const msg = String(e.message || e);
+    // 登录态或风控参数失效是最常见的失败原因：刷新一次参数再试，别直接甩给用户
+    if (/40[123]|风控|登录|code=|参数|学不到/.test(msg)) {
+      log("可能登录态或风控参数失效，刷新页面后重试一次…");
+      try {
+        await ensureHost(TASK_HINT[task], log, true);
+      } catch (e2) {
+        throw new Error(`${msg}（自愈失败：${e2.message}）`);
+      }
+      return await impl(range, log, opts);
+    }
+    throw e;
+  }
 }
 
 async function runTaskThenCalc(task, range, log, opts = {}) {
