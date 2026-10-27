@@ -389,5 +389,21 @@ def build_report(res: CalcResult, lines: list[OrderLine], out_path: Path,
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(out_path)
-    return out_path
+
+    # 目标文件可能正被 Excel/WPS 打开（Windows 下会独占锁），
+    # 直接写会抛 PermissionError 让整次核算白跑。这里逐级换个名字再存。
+    try:
+        wb.save(out_path)
+        return out_path
+    except PermissionError:
+        pass
+
+    for i in range(2, 10):
+        alt = out_path.with_name(f"{out_path.stem}_v{i}{out_path.suffix}")
+        try:
+            wb.save(alt)
+            print(f"提示：{out_path.name} 正被占用，已改存为 {alt.name}")
+            return alt
+        except PermissionError:
+            continue
+    raise PermissionError(f"无法写入报表：{out_path}（该文件可能被 Excel 打开，请关闭后重试）")

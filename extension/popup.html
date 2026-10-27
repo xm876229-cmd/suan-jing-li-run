@@ -46,6 +46,12 @@
                                  font-size: 12px; color: #1F3B4D; }
   .srow input.num { width: 42px; }
   .hint2 { color: #8A99A8; font-size: 11px; }
+  .result { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: #F1F8F3;
+            border: 1px solid #CFE6D6; font-size: 12px; line-height: 1.7; }
+  .result.bad { background: #FCF3F2; border-color: #F0D2CE; }
+  .result.hidden { display: none; }
+  .result b { font-size: 14px; }
+  .result .lbl { color: #6B7B8C; }
   #log { margin-top: 8px; max-height: 120px; overflow: auto; font-size: 11px;
          background: #F7FAFC; border-radius: 6px; padding: 6px 8px; color: #44576B;
          white-space: pre-wrap; line-height: 1.5; }
@@ -67,6 +73,10 @@
     <div><label>起始日期</label><input type="text" id="dfrom" placeholder="2026-10-01" /></div>
     <div><label>结束日期（含）</label><input type="text" id="dto" placeholder="2026-10-15" /></div>
   </div>
+  <div class="dates" style="margin-top:6px">
+    <div><label>核算国家</label><input type="text" id="country" placeholder="马来西亚" /></div>
+    <div><label>&nbsp;</label><button id="calcOnly" class="ghost" style="margin:0;padding:6px;font-size:12px">只算净利（不取数）</button></div>
+  </div>
   <div id="cal" class="cal hidden"></div>
   <div class="presets">
     <button data-preset="month">本月</button>
@@ -75,7 +85,8 @@
     <button data-preset="yesterday">昨天</button>
   </div>
 
-  <button id="runAll">一键取全部（订单+商品+联盟+广告）</button>
+  <button id="runAll">立即运行：取数 + 算净利</button>
+  <div id="result" class="result hidden"></div>
   <div class="grid">
     <button class="ghost" data-task="orders">订单</button>
     <button class="ghost" data-task="sku">商品 SKU</button>

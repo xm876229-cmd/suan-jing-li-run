@@ -16,6 +16,59 @@ function render(state) {
   const hosts = state.learnedHosts || [];
   $("hosts").textContent = hosts.length ? hosts.length + " 个域名" : "还没学到";
   $("hosts").title = hosts.join("\n");
+
+  renderResult(state);
+}
+
+/** 结果区：正在跑什么、上次算出来多少。这两个都从扩展存储读，
+ *  所以面板关掉再打开也能看到上次的结果，不依赖消息响应。 */
+function renderResult(state) {
+  const box = $("result");
+  if (!box) return;
+
+  const run = state.running;
+  if (run) {
+    const secs = Math.round((Date.now() - (run.at || Date.now())) / 1000);
+    box.className = "result";
+    box.innerHTML = `<span class="lbl">正在运行</span> <b>${taskName(run.task)}</b> <span class="lbl">已 ${secs} 秒</span>`;
+    return;
+  }
+
+  const res = state.lastResult;
+  const calc = state.lastCalc;
+  if (res && res.ok === false) {
+    box.className = "result bad";
+    box.innerHTML = `<span class="lbl">${taskName(res.task)}失败</span><br>${escapeHtml(res.error || "")}`;
+    return;
+  }
+  if (calc) {
+    const margin = (calc.net_margin * 100).toFixed(2);
+    box.className = "result";
+    box.innerHTML =
+      `<span class="lbl">净利（${escapeHtml(calc.country)} ${escapeHtml(calc.period)}）</span><br>` +
+      `<b>${fmtNum(calc.net_local)}</b> <span class="lbl">${escapeHtml(calc.country)}</span>` +
+      `　<span class="lbl">人民币</span> <b>${fmtNum(calc.net_cny)}</b><br>` +
+      `<span class="lbl">GMV</span> ${fmtNum(calc.gmv)}　` +
+      `<span class="lbl">净利率</span> ${margin}%　` +
+      `<span class="lbl">商品</span> ${calc.products}　` +
+      `<span class="lbl">异常</span> ${calc.issues}`;
+    box.title = calc.file || "";
+    return;
+  }
+
+  box.className = "result hidden";
+}
+
+function taskName(t) {
+  return ({ all: "取数+核算", orders: "订单取数", sku: "商品SKU", affiliate: "联盟佣金", ads: "广告", calc: "核算" })[t] || t;
+}
+
+function fmtNum(v) {
+  return (v == null ? 0 : Number(v)).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
 function checkBridge() {
@@ -103,13 +156,46 @@ function runTasks(task, btn) {
   if (btn) btn.disabled = true;
   log(`=== 开始取数：${label}（${range.startDate} ~ ${$("dto").value}）===`);
 
+  // 后台收到就立刻回执，任务在它自己的上下文里跑完为止。
+  // 以前是等任务结束才回，任务一跑几分钟，面板一关消息通道就断了，
+  // 用户看到的是「没有响应」——那不是任务失败，是回执方式错了。
+  saveCountry();
   chrome.runtime.sendMessage({ type: "runTask", task, range }, (resp) => {
     if (btn) btn.disabled = false;
-    if (!resp) { log("没有响应，检查扩展是否被重新加载"); return; }
-    if (resp.ok) log(`=== ${label} 完成 ===`);
-    else log(`=== ${label} 失败：${resp.error} ===`);
+    if (chrome.runtime.lastError) {
+      log(`后台未响应：${chrome.runtime.lastError.message}（刷新扩展后重开面板）`);
+      return;
+    }
+    if (resp && resp.started) log(`已启动：${label}，进度看下方日志`);
+    else if (!resp) log("后台未响应，请刷新扩展后重开面板");
   });
 }
+
+function saveCountry() {
+  const country = ($("country").value || "").trim() || "马来西亚";
+  chrome.storage.local.get({ settings: {} }, (s) => {
+    chrome.storage.local.set({ settings: { ...(s.settings || {}), country } });
+  });
+}
+
+chrome.storage.local.get({ settings: {} }, (s) => {
+  $("country").value = (s.settings && s.settings.country) || "马来西亚";
+});
+$("country") && $("country").addEventListener("change", saveCountry);
+
+$("calcOnly") && $("calcOnly").addEventListener("click", (e) => {
+  const range = buildRange();
+  if (!range) { log("请先选日期"); return; }
+  saveCountry();
+  const country = ($("country").value || "").trim() || "马来西亚";
+  e.target.disabled = true;
+  log(`=== 只算净利：${country} ${range.startDate} ~ ${$("dto").value} ===`);
+  chrome.runtime.sendMessage({ type: "calcNow", range, country }, (resp) => {
+    e.target.disabled = false;
+    if (chrome.runtime.lastError) { log(`后台未响应：${chrome.runtime.lastError.message}`); return; }
+    if (resp && resp.started) log("已开始核算，用现有导出文件算，不重新取数");
+  });
+});
 
 chrome.runtime.sendMessage({ type: "state" }, (s) => { if (s) render(s); });
 checkBridge();

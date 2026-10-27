@@ -674,7 +674,7 @@ async function checkSchedule() {
     const log = (m) => appendTaskLog(`[auto-${mode}] ${m}`);
     log(`开始自动取数：${r.startDate} ~ ${r.to}`);
     try {
-      await runTask("all", toRangeObj(r), log);
+      await runTaskThenCalc("all", toRangeObj(r), log);
       s.lastRun[mode] = today;
       await chrome.storage.local.set({ schedule: s });
       log(`完成`);
@@ -807,6 +807,50 @@ async function deepCapture(seconds, log) {
   return { ok: true, tabs: ids.size, seconds };
 }
 
+
+// ---------------- 核算 ----------------
+// 取数完成后让本地桥跑一次核算（Python 子进程），点一下就能看到净利，
+// 不用再切到命令行。核算是同步阻塞的，通常十几秒到一两分钟。
+
+async function calcNow(range, log, opts = {}) {
+  const { settings = {} } = await chrome.storage.local.get({ settings: {} });
+  const country = opts.country || settings.country || "马来西亚";
+  const from = range.startDate;
+  const to = range.to || (range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : "");
+
+  log(`开始核算：${country} ${from} ~ ${to}`);
+  let resp;
+  try {
+    resp = await fetch(`${BRIDGE}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ country, from, to }),
+    });
+  } catch (e) {
+    throw new Error(`连不上本地桥（${e.message}），请确认 scripts\\start_bridge.bat 在跑`);
+  }
+
+  let j;
+  try { j = await resp.json(); } catch (e) { throw new Error(`核算接口返回异常（HTTP ${resp.status}）`); }
+  if (!j.ok) throw new Error(j.error || "核算失败");
+
+  log(`报表：${j.file}`);
+  log(`GMV ${j.gmv}｜净利 ${j.net_local}（人民币 ${j.net_cny}）｜净利率 ${(j.net_margin * 100).toFixed(2)}%`);
+  log(`商品 ${j.products}｜订单 ${j.orders}｜异常 ${j.issues} 条`);
+  await chrome.storage.local.set({ lastCalc: { at: Date.now(), ...j } });
+  return j;
+}
+
+async function runTaskThenCalc(task, range, log, opts = {}) {
+  const r = await runTask(task, range, log, opts);
+  try {
+    return { fetch: r, calc: await calcNow(range, log, opts) };
+  } catch (e) {
+    log(`核算失败：${e.message}（取数已成功，数据在 data/exports/_inbox）`);
+    return { fetch: r, calcError: String(e.message || e) };
+  }
+}
+
 // ---------------- 消息路由 ----------------
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -819,12 +863,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "state") {
-    chrome.storage.local.get({ stats, params: {} }, (s) => {
+    chrome.storage.local.get({ stats, params: {}, running: null, lastResult: null, lastCalc: null }, (s) => {
       sendResponse({
         enabled,
         buffered: buffer.length,
         stats: s.stats,
         learnedHosts: Object.keys(s.params || {}),
+        running: s.running,
+        lastResult: s.lastResult,
+        lastCalc: s.lastCalc,
       });
     });
     return true;
@@ -879,17 +926,54 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "runTask") {
-    const log = (m) => appendTaskLog(`[${msg.task}] ${m}`);
-    runTask(msg.task, msg.range || {}, log, { force: !!msg.force })
-      .then((r) => {
-        bridgeLog(`[${msg.task}] 完成`);
-        sendResponse({ ok: true, result: r });
-      })
-      .catch((e) => {
-        bridgeLog(`[${msg.task}] 失败：${e.message}`);
-        sendResponse({ ok: false, error: String(e.message || e) });
-      });
-    return true;  // 异步响应
+    // 任务可能跑好几分钟（广告要等导出、SKU 要撤日期重试）。
+    // 等它结束再 sendResponse，面板一关或扩展一重载消息通道就断了，
+    // 用户看到的是"没有响应"——所以先回执，任务在后台继续，结果写 storage 让面板自己取。
+    sendResponse({ ok: true, started: true, task: msg.task });
+
+    (async () => {
+      const task = msg.task;
+      const log = (m) => appendTaskLog(`[${task}] ${m}`);
+      await chrome.storage.local.set({ running: { task, at: Date.now() } });
+      try {
+        log(`开始（${msg.range?.startDate} ~ ${msg.range?.to || msg.range?.endDateExclusive}）`);
+        const withCalc = msg.withCalc !== false && task !== "ads";
+        const result = withCalc
+          ? await runTaskThenCalc(task, msg.range || {}, log, { force: !!msg.force })
+          : await runTask(task, msg.range || {}, log, { force: !!msg.force });
+        await chrome.storage.local.set({
+          lastResult: { task, ok: true, at: Date.now(), result },
+        });
+        log("完成");
+      } catch (e) {
+        const err = String(e.message || e);
+        log(`失败：${err}`);
+        await chrome.storage.local.set({ lastResult: { task, ok: false, at: Date.now(), error: err } });
+      } finally {
+        // 清掉 running 前留一点余量，避免面板刚好在中间轮询到空
+        setTimeout(() => chrome.storage.local.set({ running: null }), 1500);
+      }
+    })();
+    return false;
+  }
+
+  if (msg.type === "calcNow") {
+    sendResponse({ ok: true, started: true });
+    (async () => {
+      const log = (m) => appendTaskLog(`[calc] ${m}`);
+      await chrome.storage.local.set({ running: { task: "calc", at: Date.now() } });
+      try {
+        await calcNow(msg.range || {}, log, { country: msg.country });
+        await chrome.storage.local.set({ lastResult: { task: "calc", ok: true, at: Date.now() } });
+      } catch (e) {
+        const err = String(e.message || e);
+        log(`失败：${err}`);
+        await chrome.storage.local.set({ lastResult: { task: "calc", ok: false, at: Date.now(), error: err } });
+      } finally {
+        setTimeout(() => chrome.storage.local.set({ running: null }), 1500);
+      }
+    })();
+    return false;
   }
 
   return false;

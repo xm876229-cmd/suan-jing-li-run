@@ -17,6 +17,9 @@ from __future__ import annotations
 import base64
 import json
 import re
+import subprocess
+import sys
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +33,7 @@ LOG_FILE = ROOT / "data" / "capture" / "task.log"
 PORT = 8765
 
 TASK_LOG: list[str] = []
+_RUN_LOCK = threading.Lock()
 
 
 def _append_log(msg: str) -> None:
@@ -148,6 +152,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_upload()
         elif self.path.startswith("/log"):
             self._post_log()
+        elif self.path.startswith("/run"):
+            self._post_run()
         else:
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
@@ -216,6 +222,80 @@ class Handler(BaseHTTPRequestHandler):
             _append_log(msg)
             print(msg, flush=True)
         _json(self, {"ok": True})
+
+    def _post_run(self):
+        """跑一次核算：取 _inbox 里的导出文件 → 算净利 → 出 Excel。
+
+        扩展点一下「立即运行」时会调这里。核算在本机以子进程执行，
+        不占扩展，也不受浏览器生命周期影响。
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+
+        if not _RUN_LOCK.acquire(blocking=False):
+            _json(self, {"ok": False, "error": "已有核算任务在进行，请稍候"})
+            return
+
+        try:
+            country = str(payload.get("country") or "马来西亚")
+            dfrom = payload.get("from") or None
+            dto = payload.get("to") or None
+
+            stamp = f"{dfrom or 'all'}_{dto or 'all'}".replace("-", "")
+            out = ROOT / "output" / f"净利报表_{country}_{stamp}.xlsx"
+
+            cmd = [
+                sys.executable, "-m", "src.cli",
+                "--dir", str(INBOX_DIR),
+                "--country", country,
+                "--out", str(out),
+                "--json",
+            ]
+            if dfrom:
+                cmd += ["--from", str(dfrom)]
+            if dto:
+                cmd += ["--to", str(dto)]
+
+            _append_log(f"[run] 开始核算 {country} {dfrom or '全量'}~{dto or '全量'}")
+            proc = subprocess.run(
+                cmd, cwd=str(ROOT), capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=900,
+            )
+            stdout = proc.stdout or ""
+            stderr = proc.stderr or ""
+
+            summary = None
+            for line in reversed(stdout.strip().splitlines()):
+                line = line.strip()
+                if line.startswith("{") and line.endswith("}"):
+                    try:
+                        summary = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    break
+
+            if proc.returncode == 0 and summary:
+                _append_log(
+                    f"[run] 完成：GMV {summary.get('gmv')} 净利 {summary.get('net_local')} "
+                    f"（人民币 {summary.get('net_cny')}）"
+                )
+                _json(self, {"ok": True, **summary})
+            else:
+                tail = "\n".join((stdout + "\n" + stderr).strip().splitlines()[-12:])
+                _append_log(f"[run] 失败：{tail.splitlines()[-1] if tail else 'unknown'}")
+                _json(self, {"ok": False, "error": tail or "核算失败", "returncode": proc.returncode})
+        except subprocess.TimeoutExpired:
+            _append_log("[run] 失败：核算超时")
+            _json(self, {"ok": False, "error": "核算超过 15 分钟未完成"})
+        except Exception as e:  # noqa: BLE001
+            _append_log(f"[run] 异常：{e}")
+            _json(self, {"ok": False, "error": str(e)})
+        finally:
+            _RUN_LOCK.release()
 
 
 def main() -> int:

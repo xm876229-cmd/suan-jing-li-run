@@ -160,6 +160,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--date-field", choices=["created", "paid"], default="created",
                     help="按哪个时间字段筛选区间（默认订单创建时间）")
     ap.add_argument("--out", type=Path, help="输出 Excel 路径；不填则自动命名到 output/")
+    ap.add_argument("--json", action="store_true", help="只输出一行 JSON 摘要（供本地桥调用）")
     ap.add_argument("--rates", type=Path, default=ROOT / "config" / "rates.json")
     ap.add_argument("--stores", type=Path, default=ROOT / "config" / "stores.json")
     return ap
@@ -259,6 +260,24 @@ def main(argv: list[str] | None = None) -> int:
     path = build_report(res, res.lines, out, switches, subtitle, extra)
 
     t = res.total
+
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "ok": True,
+            "file": str(path),
+            "country": country,
+            "period": period,
+            "gmv": round(t.gmv, 2),
+            "net_local": round(t.net_local, 2),
+            "net_cny": round(res.net_cny_total, 2),
+            "net_margin": round(t.net_margin, 6),
+            "products": len(res.products),
+            "orders": res.order_count,
+            "lines": res.line_count,
+            "issues": len(res.issues),
+        }, ensure_ascii=False))
+        return 0
+
     print(f"已生成：{path}")
     print(f"  GMV        {t.gmv:>12,.2f} {country[:2]}")
     print(f"  净利        {t.net_local:>12,.2f}  （人民币 {res.net_cny_total:,.2f}）")
