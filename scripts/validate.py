@@ -47,7 +47,9 @@ def main() -> int:
         return 2
 
     print(f"校验对象：{wb_path.name}")
-    data = load_from_workbook(wb_path)
+    rates, switches = load_rates(ROOT / "config" / "rates.json")
+    params = rates["马来西亚"]
+    data = load_from_workbook(wb_path, params.usd_to_local)
     print(f"订单行数 {len(data.orders)}｜成本编码 {len(data.costs)}｜SKU 索引 {len(data.sku_index)}｜"
           f"广告商品 {len(data.ads)}｜联盟商品 {len(data.commissions)}")
 
@@ -121,8 +123,6 @@ def main() -> int:
         print(f"   涉及 SKU（前 10）：{diff_skus[:10]}")
 
     # ---------- 5. 净利 ----------
-    rates, switches = load_rates(ROOT / "config" / "rates.json")
-    params = rates["马来西亚"]
     result = compute(data, params, switches)
 
     sheet = wb["净利润"]

@@ -18,12 +18,32 @@ python -m src.cli --workbook "V1-净利  -15.xlsx" --country 马来西亚
 # 指定区间（任意起止，哪怕只算两天）
 python -m src.cli --workbook "V1-净利  -15.xlsx" --from 2026-10-01 --to 2026-10-15
 
-# 读导出目录（自动化产线用）
-python -m src.cli --dir data/exports/my-202610 --costs data/exports/成本.xlsx --country 马来西亚
+# 读导出目录（推荐：手工导出后放到一个文件夹即可）
+python -m src.cli --dir data/exports/demo-my/20261001-20261015 --costs "V1-净利  -15.xlsx"
+
+# 分别指定四个文件（更精确）
+python -m src.cli --orders 订单.xlsx --ads 广告.xlsx \
+                  --commissions 联盟佣金.xlsx --mapping 找id用的.xlsx \
+                  --costs "V1-净利  -15.xlsx" --country 马来西亚
 
 # 按店铺清单跑（店铺配置见 config/stores.json）
 python -m src.cli --workbook "V1-净利  -15.xlsx" --store demo-my
 ```
+
+### 解析层是按表头名识别，不认列号
+
+平台导出模板会变、人工会在前面插列，写死列号必然错位。所以：
+
+- 表头在哪一行自动找（前 8 行里挑最像表头的）
+- 中文/英文表头都认（`Sku Subtotal Before Discount`、`商品 ID`、`Est. commission`…）
+- 第 2 行的英文说明行自动跳过
+- `RM2,678.75` 这类带货币符号的值能正确转成数字
+- 广告按「货币」列自动换算（USD → 本地），**不会再乘两次汇率**
+- `Order Amount` 是订单级金额，按订单内行数平分（与旧表口径一致）
+
+> **GMV 口径提示**：报表沿用旧表的「折扣前小计 − 卖家折扣」，而平台后台统计的 GMV 是买家实付口径。
+> 同一期间两者会差 1.8 倍左右（例：2026-10-01~10-15，本引擎 13,074.78，平台统计 14,770.66，买家实付 15,219.88）。
+> 这个口径待定，切换只需要改 `calc.py` 里 `OrderLine.gmv` 一处。
 
 ### 方式二：双击 `scripts\run.bat`
 

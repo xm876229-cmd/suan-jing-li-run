@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.calc import compute, load_rates  # noqa: E402
-from src.loader import load_from_dir, load_from_workbook  # noqa: E402
+from src.loader import load_from_dir, load_from_files, load_from_workbook  # noqa: E402
 from src.report import build_report  # noqa: E402
 
 
@@ -49,10 +49,14 @@ def build_argparser() -> argparse.ArgumentParser:
         prog="suan-jing-li-run",
         description="按商品（链接）核算净利润，输出 Excel 报表",
     )
-    src = ap.add_argument_group("数据来源（二选一）")
-    src.add_argument("--workbook", type=Path, help="主工作簿路径（读其中的原始工作表）")
-    src.add_argument("--dir", type=Path, help="导出文件目录（含订单/商品/广告/联盟四类文件）")
-    src.add_argument("--costs", type=Path, help="成本表路径（配合 --dir 使用）")
+    src = ap.add_argument_group("数据来源（三选一）")
+    src.add_argument("--workbook", type=Path, help="主工作簿路径（旧版，读其中的原始工作表）")
+    src.add_argument("--dir", type=Path, help="导出文件目录（含订单/广告/联盟/映射四类文件）")
+    src.add_argument("--orders", type=Path, help="订单导出文件")
+    src.add_argument("--ads", type=Path, help="广告花费导出文件")
+    src.add_argument("--commissions", type=Path, help="联盟佣金导出文件")
+    src.add_argument("--mapping", type=Path, help="SKU→商品ID 映射表（如「找id用的.xlsx」）")
+    src.add_argument("--costs", type=Path, help="成本表（编码/成本两列的表，或含「成本」工作表的工作簿）")
 
     ap.add_argument("--country", default=None, help="核算国家：马来西亚 / 菲律宾 / 泰国")
     ap.add_argument("--store", default=None, help="店铺 id（读取 config/stores.json）")
@@ -69,8 +73,8 @@ def build_argparser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_argparser().parse_args(argv)
 
-    if not args.workbook and not args.dir:
-        print("请用 --workbook 或 --dir 指定数据来源")
+    if not args.workbook and not args.dir and not args.orders:
+        print("请用 --workbook、--dir 或 --orders 指定数据来源")
         return 2
 
     # 国家 / 店铺
@@ -99,14 +103,25 @@ def main(argv: list[str] | None = None) -> int:
         if not args.workbook.exists():
             print(f"找不到工作簿：{args.workbook}")
             return 2
-        data = load_from_workbook(args.workbook)
+        data = load_from_workbook(args.workbook, params.usd_to_local)
         source = args.workbook.name
+    elif args.orders:
+        if not args.orders.exists():
+            print(f"找不到订单文件：{args.orders}")
+            return 2
+        data = load_from_files(args.orders, args.ads, args.commissions,
+                               args.mapping, args.costs, params.usd_to_local)
+        source = "、".join(data.sources.values()) or args.orders.name
     else:
         if not args.dir.exists():
             print(f"找不到目录：{args.dir}")
             return 2
-        data = load_from_dir(args.dir, args.costs)
+        data = load_from_dir(args.dir, args.costs, params.usd_to_local)
         source = args.dir.name
+
+    if not data.orders:
+        print("没有解析出任何订单行，请检查订单文件的表头（需要 Order ID / Seller SKU / Quantity 等列）")
+        return 1
 
     res = compute(data, params, switches, args.dfrom, args.dto, args.date_field)
     if not res.products:

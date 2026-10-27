@@ -160,17 +160,23 @@ class ProductMetrics:
         return (self.gmv - self.cost_local) / self.gmv if self.gmv else ZERO
 
     @property
-    def net_margin(self) -> float:
-        if not self.gmv:
-            return ZERO
-        fees = (self.dispatch_fee + self.platform_commission + self.tx_fee + self.cashback
+    def fee_total(self) -> float:
+        return (self.dispatch_fee + self.platform_commission + self.tx_fee + self.cashback
                 + self.super_coupon + self.growth_fee + self.logistics
                 + self.creator_commission + self.ad_spend)
-        return self.gross_profit - fees / self.gmv
+
+    @property
+    def net_margin(self) -> float:
+        return self.net_local / self.gmv if self.gmv else ZERO
 
     @property
     def net_local(self) -> float:
-        return self.gmv * self.net_margin
+        """绝对额口径：(GMV − 成本) − 各项费用。
+
+        用绝对额而不是「GMV × 净利率」，这样零 GMV 但有广告花费的链接
+        也能正确算出亏损，而不是被算成 0。
+        """
+        return (self.gmv - self.cost_local) - self.fee_total
 
     def net_cny(self, cny_to_local: float) -> float:
         return self.net_local / cny_to_local if cny_to_local else ZERO
@@ -277,6 +283,14 @@ def compute(data: RawData, params: Params, switches: Switches,
             else:
                 m.cost_local += l.cost_total_cny * params.cny_to_local
 
+    # 有广告花费或达人佣金、但本期没有订单的商品
+    # 钱已经花了，不能因为"没出单"就从报表里消失，否则总成本被低估
+    orphans: list[str] = []
+    for pid in set(data.ads) | set(data.commissions):
+        if pid and pid not in buckets:
+            buckets[pid] = ProductMetrics(product_id=pid)
+            orphans.append(pid)
+
     # 费用项
     for pid, m in buckets.items():
         m.product_name = names.get(pid, "")
@@ -289,7 +303,8 @@ def compute(data: RawData, params: Params, switches: Switches,
         m.growth_fee = m.gmv * params.growth_fee
         m.logistics = m.gmv * params.logistics
         m.creator_commission = data.commissions.get(pid, ZERO)
-        m.ad_spend = data.ads.get(pid, ZERO) * params.usd_to_local
+        # data.ads 在解析层已按「货币」列换算成本地货币，这里直接用，不能再乘汇率
+        m.ad_spend = data.ads.get(pid, ZERO)
 
     products = sorted(buckets.values(), key=lambda x: x.gmv, reverse=True)
 
@@ -299,6 +314,9 @@ def compute(data: RawData, params: Params, switches: Switches,
         issues.append(f"{missing_cost_lines} 行订单缺成本，按 0 计，这些行的净利会偏高")
     if untimed:
         issues.append(f"{untimed} 行订单缺少可解析的时间字段，未按日期过滤，已全部计入")
+    if orphans:
+        cost = sum(data.ads.get(p, 0) + data.commissions.get(p, 0) for p in orphans)
+        issues.append(f"{len(orphans)} 个商品本期无订单但有广告/佣金支出（合计 {cost:.2f}），已单列，净利为负")
 
     order_ids = {l.order_id for l in lines if l.order_id}
     return CalcResult(params=params, products=products, issues=issues,

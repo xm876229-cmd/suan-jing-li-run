@@ -1,10 +1,14 @@
 """原始数据读取与标准化。
 
-支持两种输入：
-1. 主工作簿（V1-净利.xlsx）里的原始工作表 —— 用于历史数据与口径校验
-2. 独立导出文件（订单/商品/广告/联盟各一份 xlsx 或 csv）—— 用于自动化产线
+设计原则：**按表头名定位，不按列号**。
+平台导出模板会变、人工会在前面插列，写死列号必然错位；只有表头名相对稳定。
 
-统一输出 OrderLine 列表与各类索引，后续模块不关心数据从哪来。
+支持三类输入：
+    1. 独立导出文件（订单 / 广告 / 联盟佣金 / SKU 映射），自动化产线与手工导出都走这条
+    2. 一个装满导出文件的目录，按文件名关键字自动识别
+    3. 主工作簿（旧版，前面插了人工列），用于历史数据与口径校验
+
+统一输出 OrderLine 列表 + SKU 映射索引 + 成本表，后续模块不关心数据从哪来。
 """
 
 from __future__ import annotations
@@ -19,56 +23,121 @@ from typing import Iterable, Optional
 
 import openpyxl
 
-# ---------- 订单导出表的列约定（按平台导出模板的列字母，0 基） ----------
-COL = {
-    "order_id": 4,        # E  Order ID
-    "status": 5,          # F  Order Status
-    "substatus": 6,       # G  Order Substatus
-    "cancel": 7,          # H  Cancelation/Return Type（非空 = 取消或退货）
-    "sku_id": 9,          # J  SKU ID
-    "seller_sku": 10,     # K  Seller SKU
-    "product_name": 11,   # L  Product Name
-    "variation": 12,      # M  Variation
-    "qty": 13,            # N  Quantity
-    "subtotal_before": 16,  # Q  SKU Subtotal Before Discount
-    "seller_discount": 18,  # S  SKU Seller Discount
-    "order_amount": 26,   # AA Order Amount（订单级，逐行重复）
-    "refund_amount": 27,  # AB Order Refund Amount
-    "created": 28,        # AC Created Time
-    "paid": 29,           # AD Paid Time
-}
 
-MULTIPACK_RE = re.compile(r"^(?P<base>.+?)[-\s](?P<n>\d+)\s*[Pp][Cc][Ss]$")
+# ---------------- 基础转换 ----------------
+
+_CURRENCY_RE = re.compile(r"[^\d.\-,]")
 
 
 def to_num(v, default: float = 0.0) -> float:
+    """宽容解析数字：处理 'RM1,498.68'、'1 234.5'、'12.3%'、空值、None。"""
     if v is None or v == "":
         return default
     if isinstance(v, Number):
         return float(v)
-    s = str(v).strip().replace(",", "")
+    s = str(v).strip()
+    if not s:
+        return default
+    neg = s.startswith("(") and s.endswith(")")
+    s = _CURRENCY_RE.sub("", s)
+    if s in ("", "-", ".", ","):
+        return default
     try:
-        return float(s)
+        val = float(s.replace(",", ""))
     except ValueError:
         return default
+    return -val if neg else val
 
 
 def to_str(v) -> str:
     if v is None:
         return ""
     s = str(v).strip()
-    # Excel 把 18 位 ID 存成浮点会带 .0 或丢精度，这里尽量还原成纯整数字符串
     if re.fullmatch(r"\d+\.0", s):
         s = s[:-2]
     return s
 
 
+def norm_header(s) -> str:
+    """表头归一：去掉所有空白、全角转半角、小写，便于稳定匹配。"""
+    s = to_str(s)
+    s = s.replace("\u3000", " ")
+    s = s.translate(str.maketrans("　（）／", " ()/"))
+    return re.sub(r"\s+", "", s).lower()
+
+
+# ---------------- 表头定位 ----------------
+
+# 每个逻辑字段的可接受表头名（都会先做 norm_header）
+ALIASES: dict[str, list[str]] = {
+    "order_id": ["orderid", "订单号", "订单id", "平台订单号"],
+    "status": ["orderstatus", "订单状态"],
+    "substatus": ["ordersubstatus", "订单子状态"],
+    "cancel": ["cancelation/returntype", "cancellation/returntype", "取消/退货类型", "取消退货类型"],
+    "sku_id": ["skuid", "sku id"],
+    "seller_sku": ["sellersku", "卖家sku", "商家sku"],
+    "product_id": ["productid", "商品id", "商品id"],
+    "product_name": ["productname", "商品名称", "商品名", "商品"],
+    "variation": ["variation", "规格"],
+    "qty": ["quantity", "数量", "购买数量"],
+    "subtotal_before": ["skusubtotalbeforediscount", "折扣前小计", "sku折扣前小计"],
+    "seller_discount": ["skusellerdiscount", "卖家折扣", "sku卖家折扣"],
+    "order_amount": ["orderamount", "订单金额", "买家实付"],
+    "refund_amount": ["orderrefundamount", "退款金额"],
+    "created": ["createdtime", "创建时间", "下单时间"],
+    "paid": ["paidtime", "付款时间", "支付时间"],
+    # 广告
+    "ad_cost": ["成本", "cost", "spend", "花费", "广告花费"],
+    "ad_currency": ["货币", "currency"],
+    # 联盟佣金
+    "commission": ["est.commission", "estcommission", "预估佣金", "佣金"],
+    "commission_refund": ["refunds", "退款"],
+    # 统计表 / 映射表
+    "style_code": ["款式编码", "款式", "stylecode"],
+}
+
+
+def build_colmap(header_row: Iterable) -> dict[str, int]:
+    """把表头行映射成 {逻辑字段: 列号}。同名字段取最左一列。"""
+    norm = [norm_header(c) for c in header_row]
+    colmap: dict[str, int] = {}
+    for key, names in ALIASES.items():
+        for want in names:
+            w = norm_header(want)
+            hit = next((i for i, h in enumerate(norm) if h == w), None)
+            if hit is None:
+                hit = next((i for i, h in enumerate(norm) if w and w in h), None)
+            if hit is not None and key not in colmap:
+                colmap[key] = hit
+                break
+    return colmap
+
+
+def find_header_row(rows: list[tuple], required: tuple[str, ...], max_scan: int = 8) -> tuple[int, dict[str, int]]:
+    """在前若干行里找最像表头的那一行：包含 required 字段最多者。
+
+    平台导出常见套路：第 1 行英文表头 + 第 2 行英文说明；或第 1 行标题、第 3 行才是表头。
+    """
+    best = (-1, -1, {})
+    for i, row in enumerate(rows[:max_scan]):
+        cm = build_colmap(row)
+        score = sum(1 for k in required if k in cm)
+        if score > best[0] or (score == best[0] and len(cm) > len(best[2])):
+            best = (score, i, cm)
+    score, idx, cm = best
+    if score < max(1, len(required) // 2):
+        return -1, {}
+    return idx, cm
+
+
+# ---------------- 数据结构 ----------------
+
 @dataclass
 class SkuIndex:
-    """SKU 到商品的映射。
+    """SKU → 商品 的映射。
 
-    by_sku_id 优先：平台 SKU ID 全局唯一，一个 SKU ID 只对应一个商品。
-    by_seller_sku 兜底：卖家自定义 SKU 可能被多个商品复用，需要消歧。
+    by_sku_id 优先：平台 SKU ID 全局唯一。
+    by_seller_sku 兜底：卖家自定义 SKU 可能被多个商品复用，需按商品名消歧。
     """
     by_sku_id: dict[str, dict] = field(default_factory=dict)
     by_seller_sku: dict[str, list[dict]] = field(default_factory=lambda: defaultdict(list))
@@ -77,10 +146,6 @@ class SkuIndex:
         return len(self.by_sku_id) + len(self.by_seller_sku)
 
     def lookup(self, sku_id: str, seller_sku: str, product_name: str) -> tuple[str, str]:
-        """返回 (商品ID, 款式编码)。
-
-        解析顺序：平台 SKU ID → 卖家 SKU → 多件装/组合装拆解后的基座 SKU。
-        """
         hit = self.by_sku_id.get(sku_id) if sku_id else None
         if hit:
             return hit["product_id"], hit["style_code"]
@@ -96,7 +161,7 @@ class SkuIndex:
             if found:
                 return found
 
-        # 组合装：任一组件能定位就用它（组合装通常挂在主商品下）
+        # 组合装：任一组件能定位就用它
         if "+" in (seller_sku or ""):
             for part in (p.strip() for p in seller_sku.split("+")):
                 m = MULTIPACK_RE.match(part)
@@ -118,6 +183,9 @@ class SkuIndex:
                 if re.sub(r"\s+", "", c["product_name"]).lower() == norm:
                     return c["product_id"], c["style_code"]
         return cands[0]["product_id"], cands[0]["style_code"]
+
+
+MULTIPACK_RE = re.compile(r"^(?P<base>.+?)[-\s](?P<n>\d+)\s*[Pp][Cc][Ss]$")
 
 
 @dataclass
@@ -149,17 +217,14 @@ class OrderLine:
 
     @property
     def gmv(self) -> float:
-        """GMV 口径：折扣前小计 − 卖家折扣（不含平台补贴）。"""
         return self.subtotal_before - self.seller_discount
 
     @property
     def allocated_orders(self) -> float:
-        """分配到的订单数：订单级计数按行数平分，与人工表口径一致。"""
         return 1.0 / self.order_line_count if self.order_line_count else 0.0
 
     @property
     def allocated_paid(self) -> float:
-        """分配到的买家实付：订单实付按行数平分，与人工表口径一致。"""
         return self.order_amount / self.order_line_count if self.order_line_count else 0.0
 
     @property
@@ -174,221 +239,240 @@ class RawData:
     orders: list[OrderLine]
     costs: dict[str, float]
     sku_index: SkuIndex
-    ads: dict[str, float]          # product_id -> 广告花费（美金）
-    commissions: dict[str, float]  # product_id -> 达人佣金（本地货币）
-    issues: list[str]
+    ads: dict[str, float]      # product_id -> 广告花费（已换算成本地货币）
+    commissions: dict[str, float]
+    issues: list[str] = field(default_factory=list)
+    sources: dict[str, str] = field(default_factory=dict)
 
 
-# ---------------- 通用小工具 ----------------
+# ---------------- 文件读取 ----------------
 
-def _read_sheet(path: Path, sheet: str):
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    if sheet not in wb.sheetnames:
-        wb.close()
-        return None
-    ws = wb[sheet]
+def read_table(path: Path, sheet: Optional[str] = None) -> list[tuple]:
+    path = Path(path)
+    if path.suffix.lower() in (".csv", ".txt"):
+        for enc in ("utf-8-sig", "gbk", "utf-8"):
+            try:
+                with path.open("r", encoding=enc, newline="") as f:
+                    return [tuple(r) for r in csv.reader(f)]
+            except UnicodeDecodeError:
+                continue
+        return []
+    wb = openpyxl.load_workbook(path, data_only=True, read_only=False)
+    ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb[wb.sheetnames[0]]
     rows = [tuple(r) for r in ws.iter_rows(values_only=True)]
     wb.close()
     return rows
 
 
-def _norm_header(s) -> str:
-    return re.sub(r"\s+", "", to_str(s)).lower()
-
-
-def _find_col(header_row: Iterable, candidates: Iterable[str]) -> Optional[int]:
-    norm = [_norm_header(c) for c in header_row]
-    for want in candidates:
-        w = _norm_header(want)
-        for i, h in enumerate(norm):
-            if h == w:
-                return i
-    for want in candidates:
-        w = _norm_header(want)
-        for i, h in enumerate(norm):
-            if w and w in h:
-                return i
-    return None
-
-
 # ---------------- 各类数据解析 ----------------
 
-def parse_costs(rows) -> dict[str, float]:
-    """成本表：第 1 列编码，第 2 列成本（人民币）。"""
+def parse_costs(rows: list[tuple]) -> dict[str, float]:
+    """成本表：编码 → 成本（人民币）。表头可有可无。"""
     out: dict[str, float] = {}
-    for r in rows:
-        if len(r) < 2:
+    start = 0
+    if rows:
+        cm = build_colmap(rows[0])
+        if "seller_sku" in cm or "product_id" in cm:
+            start = 1
+            sku_col = cm.get("seller_sku", 0)
+            cost_col = next((c for c in range(len(rows[0])) if c != sku_col), 1)
+        else:
+            sku_col, cost_col = 0, 1
+    else:
+        sku_col, cost_col = 0, 1
+
+    for r in rows[start:]:
+        if len(r) <= max(sku_col, cost_col):
             continue
-        code, val = to_str(r[0]), r[1]
-        if not code or val is None:
+        code = to_str(r[sku_col])
+        if not code:
             continue
-        try:
-            out[code] = float(val)
-        except (TypeError, ValueError):
+        val = r[cost_col]
+        if val is None or to_str(val) == "":
             continue
+        out[code] = to_num(val)
     return out
 
 
-def parse_sku_index(rows) -> SkuIndex:
-    """链接资料：款式编码 / 商品ID / 商品名 / SKU ID / Seller SKU。
+def parse_mapping(rows: list[tuple]) -> SkuIndex:
+    """解析 SKU→商品 映射表。
 
-    表头在第 5 行、数据从第 6 行开始（前 4 行是平台模板说明）。
-    这里按列名定位，模板行数变了也能认。
+    兼容两种形态：
+      · 链接资料模板：款式编码 | product_id | ... | sku_id | ... | seller_sku
+      · SKU 统计表  ：SKU ID | Product ID | 商品 | GMV | 订单数 | 件数（表头可能在第 3 行）
     """
     idx = SkuIndex()
-    if not rows:
+    hidx, cm = find_header_row(rows, ("sku_id", "product_id"))
+    if hidx < 0:
         return idx
-    header_idx = 0
-    for i, r in enumerate(rows[:10]):
-        if _find_col(r, ["product_id"]) is not None:
-            header_idx = i
-            break
-    header = rows[header_idx]
-    c_prod = _find_col(header, ["product_id"])
-    c_sku = _find_col(header, ["seller_sku"])
-    c_skuid = _find_col(header, ["sku_id"])
-    c_name = _find_col(header, ["product_name"])
-    c_style = 0  # 第 1 列固定是卖家自己的款式编码
-    if c_prod is None or c_sku is None:
+    c_prod = cm.get("product_id")
+    if c_prod is None:
         return idx
+    c_skuid = cm.get("sku_id")
+    c_sku = cm.get("seller_sku")
+    c_name = cm.get("product_name")
+    c_style = cm.get("style_code")
 
-    for r in rows[header_idx + 1:]:
-        if len(r) <= max(c_prod, c_sku):
+    for r in rows[hidx + 1:]:
+        if len(r) <= c_prod:
             continue
-        sku = to_str(r[c_sku])
         pid = to_str(r[c_prod])
-        if not sku or not pid:
+        if not pid:
             continue
         item = {
             "product_id": pid,
-            "style_code": to_str(r[c_style]) if c_style < len(r) else "",
+            "style_code": to_str(r[c_style]) if c_style is not None and c_style < len(r) else "",
             "product_name": to_str(r[c_name]) if c_name is not None and c_name < len(r) else "",
         }
-        sku_id = to_str(r[c_skuid]) if c_skuid is not None and c_skuid < len(r) else ""
-        if sku_id:
-            idx.by_sku_id[sku_id] = item
-        bucket = idx.by_seller_sku[sku]
-        if item not in bucket:
-            bucket.append(item)
+        sid = to_str(r[c_skuid]) if c_skuid is not None and c_skuid < len(r) else ""
+        if sid:
+            idx.by_sku_id.setdefault(sid, item)
+        if c_sku is not None and c_sku < len(r):
+            sku = to_str(r[c_sku])
+            if sku:
+                bucket = idx.by_seller_sku[sku]
+                if item not in bucket:
+                    bucket.append(item)
     return idx
 
 
-def parse_ads(rows) -> dict[str, float]:
-    """广告报表：按 商品ID 汇总花费（美金）。"""
-    if not rows:
-        return {}
-    header = rows[0]
-    c_prod = _find_col(header, ["商品 ID", "商品ID", "Product ID"])
-    c_cost = _find_col(header, ["成本", "Cost", "Spend"])
-    if c_prod is None or c_cost is None:
-        return {}
-    out: dict[str, float] = defaultdict(float)
-    for r in rows[1:]:
-        if len(r) <= max(c_prod, c_cost):
-            continue
-        pid = to_str(r[c_prod])
-        if pid:
-            out[pid] += to_num(r[c_cost])
-    return dict(out)
-
-
-def parse_commissions(rows) -> dict[str, float]:
-    """联盟佣金报表：按 商品ID 汇总预估佣金（本地货币）。"""
-    if not rows:
-        return {}
-    header = rows[0]
-    c_prod = _find_col(header, ["Product ID", "商品ID", "商品 ID"])
-    c_com = _find_col(header, ["Est. commission", "预估佣金", "Commission"])
-    if c_prod is None or c_com is None:
-        return {}
-    out: dict[str, float] = defaultdict(float)
-    for r in rows[1:]:
-        if len(r) <= max(c_prod, c_com):
-            continue
-        pid = to_str(r[c_prod])
-        if pid:
-            out[pid] += to_num(r[c_com])
-    return dict(out)
-
-
-def parse_orders(rows, issues: list[str]) -> list[OrderLine]:
-    """订单表：表头在第 1 行，第 2 行是列说明，数据从第 3 行开始。"""
-    if not rows:
+def parse_orders(rows: list[tuple]) -> list[OrderLine]:
+    hidx, cm = find_header_row(rows, ("order_id", "sku_id", "seller_sku", "qty"))
+    if hidx < 0:
         return []
+    need = ("order_id", "sku_id", "seller_sku", "qty", "subtotal_before")
+    if sum(1 for k in need if k in cm) < 3:
+        return []
+
+    def get(r, key, default=None):
+        i = cm.get(key)
+        if i is None or i >= len(r):
+            return default
+        return r[i]
+
+    # 旧版工作簿在订单表最左边插了一列人工填的「商品ID」，表头不叫 Product ID，
+    # 而是「这列常态保留 勿删和覆盖」。这里把它认出来，直接采信。
+    legacy_pid_col: Optional[int] = None
+    if "product_id" not in cm:
+        norm_hdr = [norm_header(c) for c in rows[hidx]]
+        for i, h in enumerate(norm_hdr):
+            if "常态保留" in h:
+                legacy_pid_col = i
+                break
+
+    def legacy_pid(r) -> str:
+        if legacy_pid_col is None or legacy_pid_col >= len(r):
+            return ""
+        raw = to_str(r[legacy_pid_col])
+        return raw if re.fullmatch(r"\d{6,}", raw) else ""  # 排除「无ID」这类手填占位
+
     lines: list[OrderLine] = []
-    for r in rows[2:]:
-        if len(r) <= COL["order_amount"]:
-            r = tuple(r) + (None,) * (COL["order_amount"] + 1 - len(r))
-        sku = to_str(r[COL["seller_sku"]])
-        if not sku:
+    for r in rows[hidx + 1:]:
+        sku = to_str(get(r, "seller_sku", ""))
+        sku_id = to_str(get(r, "sku_id", ""))
+        if not sku and not sku_id:
+            continue  # 说明行 / 空行
+
+        oid = to_str(get(r, "order_id", ""))
+        qty = to_num(get(r, "qty"), 1.0) or 1.0
+        before = to_num(get(r, "subtotal_before"))
+        amount = to_num(get(r, "order_amount"))
+
+        # 平台导出第 2 行是英文说明（"Platform unique order ID." 之类），
+        # 它同样落在 SKU 列上，必须排掉：既没有数字订单号，也没有任何金额
+        if not re.search(r"\d{6,}", oid) and qty <= 1 and before == 0 and amount == 0:
             continue
+
         lines.append(
             OrderLine(
-                order_id=to_str(r[COL["order_id"]]),
+                order_id=oid,
                 seller_sku=sku,
-                sku_id=to_str(r[COL["sku_id"]]),
-                product_name=to_str(r[COL["product_name"]]),
-                qty=to_num(r[COL["qty"]], 1.0) or 1.0,
-                subtotal_before=to_num(r[COL["subtotal_before"]]),
-                seller_discount=to_num(r[COL["seller_discount"]]),
-                order_amount=to_num(r[COL["order_amount"]]),
-                cancel=to_str(r[COL["cancel"]]),
-                status=to_str(r[COL["status"]]),
-                created=to_str(r[COL["created"]]),
-                paid=to_str(r[COL["paid"]]),
+                sku_id=sku_id,
+                product_name=to_str(get(r, "product_name", "")),
+                qty=qty,
+                subtotal_before=before,
+                seller_discount=to_num(get(r, "seller_discount")),
+                order_amount=amount,
+                cancel=to_str(get(r, "cancel", "")),
+                status=to_str(get(r, "status", "")),
+                created=to_str(get(r, "created", "")),
+                paid=to_str(get(r, "paid", "")),
+                product_id=to_str(get(r, "product_id", "")) or legacy_pid(r),
             )
         )
 
-    # 同一订单的行数 → 用于订单数/实付的平分
     per_order = Counter(l.order_id for l in lines)
     for l in lines:
         l.order_line_count = per_order.get(l.order_id, 1) or 1
     return lines
 
 
-# ---------------- 商品ID 解析 ----------------
+def parse_ads(rows: list[tuple], usd_to_local: float = 1.0) -> tuple[dict[str, float], list[str]]:
+    """广告报表：按 商品ID 汇总花费，并按货币换算成本地货币。"""
+    issues: list[str] = []
+    hidx, cm = find_header_row(rows, ("product_id", "ad_cost"))
+    if hidx < 0 or "product_id" not in cm or "ad_cost" not in cm:
+        return {}, ["广告表未识别出「商品 ID」与「成本」列，广告费按 0 计"]
 
-def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list[str]) -> None:
-    unresolved = Counter()
-    styles_by_product: dict[str, set[str]] = defaultdict(set)
-    for l in lines:
-        pid, style = sku_index.lookup(l.sku_id, l.seller_sku, l.product_name)
-        l.product_id, l.style_codes = pid, style
+    out: dict[str, float] = defaultdict(float)
+    currencies: Counter = Counter()
+    unknown = 0.0
+    for r in rows[hidx + 1:]:
+        pid = to_str(r[cm["product_id"]]) if cm["product_id"] < len(r) else ""
         if not pid:
-            unresolved[l.seller_sku] += 1
-        elif style:
-            styles_by_product[pid].add(style)
-    for sku, n in unresolved.most_common():
-        issues.append(f"SKU「{sku}」在链接资料里找不到商品ID（{n} 行），已归入「未识别商品」")
-    # 一个商品对应多个款式编码时，用 "/" 连接（与原表 TEXTJOIN("/") 一致）
-    for l in lines:
-        if l.product_id and not l.style_codes:
-            l.style_codes = "/".join(sorted(styles_by_product.get(l.product_id, [])))
+            continue
+        cost = to_num(r[cm["ad_cost"]]) if cm["ad_cost"] < len(r) else 0.0
+        cur = to_str(r[cm["ad_currency"]]).upper() if cm.get("ad_currency") is not None and cm["ad_currency"] < len(r) else ""
+        currencies[cur or "未标注"] += 1
+        if cur in ("", "USD", "US$", "$"):
+            out[pid] += cost * usd_to_local
+        elif cur in ("MYR", "RM"):
+            out[pid] += cost          # 已是本地货币
+        else:
+            unknown += cost
+    if unknown:
+        issues.append(f"广告表有 {unknown:.2f} 金额的货币未识别，已按原值计入")
+    detail = "、".join(f"{k}×{v}" for k, v in currencies.most_common(3))
+    if detail:
+        issues.append(f"广告表货币分布：{detail}（已按美金→本地汇率换算）")
+    return dict(out), issues
+
+
+def parse_commissions(rows: list[tuple]) -> tuple[dict[str, float], list[str]]:
+    """联盟佣金报表：按 商品ID 汇总预估佣金。值可能是 'RM2,678.75' 这类字符串。"""
+    hidx, cm = find_header_row(rows, ("product_id", "commission"))
+    if hidx < 0 or "product_id" not in cm or "commission" not in cm:
+        return {}, ["联盟佣金表未识别出「Product ID」与「Est. commission」列，达人佣金按 0 计"]
+
+    out: dict[str, float] = defaultdict(float)
+    for r in rows[hidx + 1:]:
+        pid = to_str(r[cm["product_id"]]) if cm["product_id"] < len(r) else ""
+        if not pid:
+            continue
+        out[pid] += to_num(r[cm["commission"]])
+    return dict(out), []
 
 
 # ---------------- 成本解析 ----------------
 
 def resolve_cost(sku: str, costs: dict[str, float]) -> tuple[Optional[float], str]:
-    """返回 (成本单价, 命中方式)。命中方式：exact / multipack / combo / miss。"""
+    """返回 (成本单价, 命中方式)。方式：exact / multipack / combo / miss。"""
     if sku in costs:
         return costs[sku], "exact"
 
-    # 多件装：V26-C-21cm-2Pcs = V26-C-21cm 单价 × 2
     m = MULTIPACK_RE.match(sku)
     if m:
         base, n = m.group("base"), int(m.group("n"))
         if base in costs:
             return costs[base] * n, "multipack"
 
-    # 组合装：A+B = 各自单价相加
     if "+" in sku:
         parts = [p.strip() for p in sku.split("+") if p.strip()]
         if parts and all(p in costs for p in parts):
             return sum(costs[p] for p in parts), "combo"
-        # 允许组内也是多件装
         vals = []
         for p in parts:
-            c, how = resolve_cost(p, costs)
+            c, _ = resolve_cost(p, costs)
             if c is None:
                 vals = []
                 break
@@ -397,6 +481,26 @@ def resolve_cost(sku: str, costs: dict[str, float]) -> tuple[Optional[float], st
             return sum(vals), "combo"
 
     return None, "miss"
+
+
+def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list[str]) -> None:
+    unresolved = Counter()
+    styles_by_product: dict[str, set[str]] = defaultdict(set)
+    for l in lines:
+        if l.product_id:
+            pid, style = l.product_id, sku_index.by_sku_id.get(l.sku_id, {}).get("style_code", "")
+        else:
+            pid, style = sku_index.lookup(l.sku_id, l.seller_sku, l.product_name)
+        l.product_id, l.style_codes = pid, style
+        if not pid:
+            unresolved[l.seller_sku or l.sku_id] += 1
+        elif style:
+            styles_by_product[pid].add(style)
+    for sku, n in unresolved.most_common():
+        issues.append(f"「{sku}」找不到商品ID（{n} 行），已归入「未识别商品」")
+    for l in lines:
+        if l.product_id and not l.style_codes:
+            l.style_codes = "/".join(sorted(styles_by_product.get(l.product_id, [])))
 
 
 def attach_costs(lines: list[OrderLine], costs: dict[str, float], issues: list[str]) -> None:
@@ -410,71 +514,77 @@ def attach_costs(lines: list[OrderLine], costs: dict[str, float], issues: list[s
         elif how != "exact":
             derived[f"{l.seller_sku}（{how}）"] += 1
     for sku, n in missing.most_common():
-        issues.append(f"SKU「{sku}」在成本表里查不到，且无法推导（{n} 行），成本按 0 计，净利会偏高")
+        issues.append(f"成本表查不到「{sku}」且无法推导（{n} 行），成本按 0 计，净利偏高")
     for sku, n in derived.most_common():
-        issues.append(f"SKU「{sku}」成本由规则推导（{n} 行），建议补录到成本表")
+        issues.append(f"「{sku}」成本由规则推导（{n} 行），建议补录成本表")
 
 
-# ---------------- 主入口 ----------------
+# ---------------- 对外入口 ----------------
 
-def load_from_workbook(path: Path) -> RawData:
-    """从主工作簿读取全部原始表。"""
-    path = Path(path)
+def load_from_files(order_file: Path, ads_file: Optional[Path] = None,
+                    commission_file: Optional[Path] = None,
+                    mapping_file: Optional[Path] = None,
+                    costs_file: Optional[Path] = None,
+                    usd_to_local: float = 1.0) -> RawData:
+    """从四个独立导出文件装配数据。"""
     issues: list[str] = []
+    sources: dict[str, str] = {}
 
-    cost_rows = _read_sheet(path, "成本") or []
-    link_rows = _read_sheet(path, "链接资料") or []
-    order_rows = _read_sheet(path, "订单") or []
-    ad_rows = _read_sheet(path, "广告") or []
-    com_rows = _read_sheet(path, "联盟佣金") or []
-
-    costs = parse_costs(cost_rows)
-    sku_index = parse_sku_index(link_rows)
-    orders = parse_orders(order_rows, issues)
-    ads = parse_ads(ad_rows)
-    commissions = parse_commissions(com_rows)
-
+    order_rows = read_table(order_file)
+    sources["订单"] = Path(order_file).name
+    orders = parse_orders(order_rows)
     if not orders:
-        issues.append("订单表为空，请确认工作表名称与列结构")
+        issues.append(f"订单文件解析不出数据行：{Path(order_file).name}")
+
+    sku_index = SkuIndex()
+    if mapping_file:
+        if Path(mapping_file).exists():
+            sku_index = parse_mapping(read_table(mapping_file))
+            sources["映射"] = Path(mapping_file).name
+            if not len(sku_index):
+                issues.append(f"映射文件里没有识别出 SKU ID / Product ID 列：{Path(mapping_file).name}")
+        else:
+            issues.append(f"映射文件不存在：{mapping_file}")
+
+    costs: dict[str, float] = {}
+    if costs_file and Path(costs_file).exists():
+        rows = read_table(costs_file, sheet="成本") if costs_file.suffix.lower() in (".xlsx", ".xls") else read_table(costs_file)
+        costs = parse_costs(rows)
+        sources["成本"] = Path(costs_file).name
+        if not costs:
+            issues.append(f"成本文件里没读到编码与成本：{Path(costs_file).name}")
+    elif costs_file:
+        issues.append(f"成本文件不存在：{costs_file}")
+
+    ads: dict[str, float] = {}
+    if ads_file and Path(ads_file).exists():
+        ads, ad_issues = parse_ads(read_table(ads_file), usd_to_local)
+        issues += ad_issues
+        sources["广告"] = Path(ads_file).name
+
+    commissions: dict[str, float] = {}
+    if commission_file and Path(commission_file).exists():
+        commissions, com_issues = parse_commissions(read_table(commission_file))
+        issues += com_issues
+        sources["联盟佣金"] = Path(commission_file).name
+
     attach_product_ids(orders, sku_index, issues)
     attach_costs(orders, costs, issues)
 
-    return RawData(orders=orders, costs=costs, sku_index=sku_index,
-                   ads=ads, commissions=commissions, issues=issues)
+    return RawData(orders=orders, costs=costs, sku_index=sku_index, ads=ads,
+                   commissions=commissions, issues=issues, sources=sources)
 
 
-def _read_table_file(path: Path) -> list[tuple]:
-    """读独立导出文件（xlsx 取第一个工作表，csv 按 utf-8-sig）。"""
-    path = Path(path)
-    if path.suffix.lower() in (".csv", ".txt"):
-        for enc in ("utf-8-sig", "gbk", "utf-8"):
-            try:
-                with path.open("r", encoding=enc, newline="") as f:
-                    return [tuple(r) for r in csv.reader(f)]
-            except UnicodeDecodeError:
-                continue
-        return []
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    ws = wb[wb.sheetnames[0]]
-    rows = [tuple(r) for r in ws.iter_rows(values_only=True)]
-    wb.close()
-    return rows
-
-
-def load_from_dir(folder: Path, costs_file: Optional[Path] = None) -> RawData:
-    """从导出目录读取：按文件名关键字识别四类文件。
-
-    约定文件名包含：订单 / order、商品|链接 / product|sku、广告 / ad、联盟|佣金 / affiliate
-    """
+def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
+                  usd_to_local: float = 1.0) -> RawData:
+    """从目录按文件名关键字识别四类文件。"""
     folder = Path(folder)
-    issues: list[str] = []
-    found: dict[str, Optional[Path]] = {"order": None, "product": None, "ad": None, "affiliate": None}
-
+    found: dict[str, Optional[Path]] = {"order": None, "map": None, "ad": None, "affiliate": None}
     rules = [
         ("order", ("订单", "order")),
-        ("product", ("商品", "链接", "product", "sku")),
-        ("ad", ("广告", "ad_", "ads", "advert")),
         ("affiliate", ("联盟", "佣金", "affiliate", "commission")),
+        ("ad", ("广告", "ads", "advert", "_ad")),
+        ("map", ("商品", "链接", "映射", "找id", "product", "sku")),
     ]
     for f in sorted(folder.iterdir()):
         if not f.is_file() or f.suffix.lower() not in (".xlsx", ".xls", ".csv", ".txt"):
@@ -485,26 +595,42 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None) -> RawData:
                 found[key] = f
                 break
 
-    for key, label in (("order", "订单"), ("product", "商品/链接资料"), ("ad", "广告"), ("affiliate", "联盟佣金")):
-        if found[key] is None:
-            issues.append(f"未找到{label}导出文件，相关字段按 0 计")
+    if found["order"] is None:
+        raise FileNotFoundError(f"目录里没找到订单导出文件：{folder}")
 
-    order_rows = _read_table_file(found["order"]) if found["order"] else []
-    link_rows = _read_table_file(found["product"]) if found["product"] else []
-    ad_rows = _read_table_file(found["ad"]) if found["ad"] else []
-    com_rows = _read_table_file(found["affiliate"]) if found["affiliate"] else []
+    return load_from_files(found["order"], found["ad"], found["affiliate"],
+                           found["map"], costs_file, usd_to_local)
 
-    costs = {}
-    if costs_file and Path(costs_file).exists():
-        costs = parse_costs(_read_table_file(Path(costs_file)))
-    elif costs_file:
-        issues.append(f"成本文件不存在：{costs_file}")
 
-    sku_index = parse_sku_index(link_rows)
-    orders = parse_orders(order_rows, issues)
+def load_from_workbook(path: Path, usd_to_local: float = 1.0) -> RawData:
+    """兼容旧版主工作簿（订单表前面插了四列人工列，链接资料是完整模板）。"""
+    path = Path(path)
+    issues: list[str] = []
+    wb = openpyxl.load_workbook(path, data_only=True, read_only=False)
+
+    def sheet_rows(name: str) -> list[tuple]:
+        if name not in wb.sheetnames:
+            return []
+        return [tuple(r) for r in wb[name].iter_rows(values_only=True)]
+
+    cost_rows = sheet_rows("成本")
+    link_rows = sheet_rows("链接资料")
+    order_rows = sheet_rows("订单")
+    ad_rows = sheet_rows("广告")
+    com_rows = sheet_rows("联盟佣金")
+    wb.close()
+
+    orders = parse_orders(order_rows)
+    sku_index = parse_mapping(link_rows)
+
+    costs = parse_costs(cost_rows)
+    ads, ad_issues = parse_ads(ad_rows, usd_to_local)
+    commissions, com_issues = parse_commissions(com_rows)
+    issues += ad_issues + com_issues
+
     attach_product_ids(orders, sku_index, issues)
     attach_costs(orders, costs, issues)
 
-    return RawData(orders=orders, costs=costs, sku_index=sku_index,
-                   ads=parse_ads(ad_rows), commissions=parse_commissions(com_rows),
-                   issues=issues)
+    return RawData(orders=orders, costs=costs, sku_index=sku_index, ads=ads,
+                   commissions=commissions, issues=issues,
+                   sources={"工作簿": path.name})
