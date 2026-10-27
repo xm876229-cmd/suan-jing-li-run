@@ -417,6 +417,11 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
         break;
       } catch (e) {
         const msg = String(e.message || e);
+        if (back === 0 && size === SIZES[0].size) {
+          const { params = {} } = await chrome.storage.local.get({ params: {} });
+          const p0 = params[host] || {};
+          log(`参数自检：fp=${p0.fp ? "有" : "缺"} bsid=${p0["X-Tts-Oec-Bsid"] ? "有" : "缺"} seller=${p0.oec_seller_id || "缺"}`);
+        }
         if (/98001021|downstream/.test(msg)) {
           // 数据未就绪，换日期比换分页尺寸有用，直接跳出内层
           log(`该截止日期暂无聚合数据（结束 ${shiftDate(endEx, -1)}），往前撤一天`);
@@ -426,7 +431,14 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
         log(`每页 ${size} 时失败：${msg}`);
       }
     }
-    if (!all) endEx = shiftDate(endEx, -1);
+    if (!all) {
+      endEx = shiftDate(endEx, -1);
+      if (back === 1) {
+        // 撤了一次日期还不行，说明可能不是日期问题：把风控参数重新学一遍再试
+        log("撤日期仍未成功，尝试刷新登录态与风控参数…");
+        try { await ensureHost("seller", log, true); } catch (e) { log(`刷新参数失败：${e.message}`); }
+      }
+    }
   }
 
   if (!all) throw new Error("商品SKU取数失败：连续 7 个截止日期都取不到数据，请确认店铺后台「商品分析」页能正常打开");
