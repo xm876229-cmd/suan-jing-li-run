@@ -31,8 +31,23 @@ function fmt(d) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-function initDates() {
-  applyPreset("month");
+const RANGE_KEY = "lastRange";
+
+/** 记忆上次选的区间：面板一关就重置很烦，尤其广告导出要反复核对日期 */
+function saveRange() {
+  const from = $("dfrom").value.trim();
+  const to = $("dto").value.trim();
+  if (from && to) chrome.storage.local.set({ [RANGE_KEY]: { from, to } });
+}
+
+async function initDates() {
+  const { [RANGE_KEY]: saved } = await chrome.storage.local.get({ [RANGE_KEY]: null });
+  if (saved && saved.from && saved.to) {
+    $("dfrom").value = saved.from;
+    $("dto").value = saved.to;
+  } else {
+    applyPreset("month");
+  }
 }
 
 /** 不用原生日期控件：它的语言跟随浏览器（马来店里会显示马来语），改用文本 + 预设。 */
@@ -52,6 +67,7 @@ function applyPreset(name) {
   }
   $("dfrom").value = fmt(from);
   $("dto").value = fmt(to);
+  saveRange();
 }
 
 function parseDate(s) {
@@ -234,6 +250,7 @@ function renderCal() {
       const d = new Date(calMonth.getFullYear(), calMonth.getMonth(), +b.dataset.day);
       if (calTarget) $(calTarget).value = fmt(d);
       closeCal();
+      saveRange();
     });
   });
 }
@@ -243,6 +260,8 @@ function renderCal() {
   if (!el) return;
   el.addEventListener("focus", () => openCal(id));
   el.addEventListener("click", () => openCal(id));
+  el.addEventListener("change", saveRange);
+  el.addEventListener("blur", saveRange);
 });
 
 // ---------------- 深度抓包 ----------------

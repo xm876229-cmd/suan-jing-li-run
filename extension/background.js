@@ -513,106 +513,97 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
 
 // ---------------- 任务：广告（只拉已完成的任务） ----------------
 
+const ADS_DONE_KEY = "adsDownloaded";
+
+async function getAdDone() {
+  const { [ADS_DONE_KEY]: v } = await chrome.storage.local.get({ [ADS_DONE_KEY]: [] });
+  return Array.isArray(v) ? v : [];
+}
+
+async function markAdDone(ids) {
+  const cur = await getAdDone();
+  const next = Array.from(new Set([...cur, ...ids])).slice(-200);
+  await chrome.storage.local.set({ [ADS_DONE_KEY]: next });
+}
+
+/** 拉一次广告导出任务列表，把所有「已完成且没下过」的任务下载回来。 */
+async function pullAdsTasks(host, log) {
+  const r = await apiPost(
+    await buildUrl(host, "/oec_ads/shopping/v1/oec/stat/download_task/query"),
+    { download_scene: "offline_export" }
+  );
+  const tasks = r?.offline_tasks || [];
+  const done = await getAdDone();
+
+  const ready = tasks.filter((x) => x && x.url && x.download_id && !done.includes(x.download_id));
+  const running = tasks.filter((x) => x && x.task_status && x.task_status !== "FINISHED");
+
+  const saved = [];
+  for (const tk of ready) {
+    const name = (tk.file_name || "creative data").replace(/[\\/:*?"<>|]/g, "_") + ".xlsx";
+    log(`下载广告导出：${name}`);
+    const one = await downloadAndUpload(tk.url, name, log);
+    saved.push({ ...one, id: tk.download_id });
+    await markAdDone([tk.download_id]);
+  }
+  return { saved, running: running.length, total: tasks.length, ready: ready.length };
+}
+
 async function runAds(range, log, opts = {}) {
   const quick = !!opts.quick;
   const host = await ensureHost("seller", log);
 
   log("查询广告导出任务…");
-  const maxRounds = quick ? 1 : 60;
+  const maxRounds = quick ? 1 : 20;      // 非快查模式最多等 5 分钟
   for (let i = 0; i < maxRounds; i++) {
-    const r = await apiPost(
-      await buildUrl(host, "/oec_ads/shopping/v1/oec/stat/download_task/query"),
-      { download_scene: "offline_export" }
-    );
-    const tasks = r?.offline_tasks || [];
-    const done = tasks.find((t) => t && t.url);
-    if (done) {
-      log(`发现已完成任务：${done.file_name || done.download_id}`);
-      return downloadAndUpload(done.url, `${done.file_name || "creative data"}.xlsx`, log);
+    const r = await pullAdsTasks(host, log);
+    if (r.saved.length) {
+      log(`已下载 ${r.saved.length} 个广告文件`);
+      return { saved: r.saved };
     }
-    const running = tasks.find((t) => t && t.task_status && t.task_status !== "FINISHED");
     if (quick) {
-      log(running ? `广告任务进行中（${running.task_status}），稍后可单独点「广告」拉取` : "暂无已完成的广告导出任务");
+      log(r.running
+        ? `广告任务进行中（${r.running} 个），完成后会自动下载，不用再管`
+        : "暂无已完成的广告导出任务（需要先在广告页面点一次导出）");
       return { skipped: true };
     }
-    log(`任务状态：${running ? running.task_status : "无进行中的任务"}（${(i + 1) * 10}s）`);
-    await sleep(10000);
+    log(`等待广告任务完成…（${(i + 1) * 15}s，进行中 ${r.running} 个）`);
+    await sleep(15000);
   }
-  throw new Error("十分钟内没有等到已完成的广告导出任务（广告导出需要先手工点一次）");
+  log("广告任务还没完成。它会在后台继续等待，好了自动下载，不用再点任何东西");
+  return { pending: true };
 }
 
-// ---------------- 任务调度 ----------------
+// ---------------- 广告任务后台守望 ----------------
+// 创建导出这一步走的是页面上的表单/SDK，三层监听都抓不到它的接口，
+// 所以换个思路：不接管"创建"，只盯着"结果"。
+// 用户点一次导出后，这里每 3 分钟查一次，任务一完成就自动下载落盘。
 
-const TASK_IMPL = {
-  orders: runOrders,
-  sku: runSkuStats,
-  affiliate: runAffiliate,
-  ads: runAds,
-};
-const TASK_HINT = { orders: "seller", sku: "seller", affiliate: "affiliate", ads: "seller" };
-
-async function runTask(task, range, log, opts = {}) {
-  if (task === "all") {
-    const out = {};
-    for (const t of ["orders", "sku", "affiliate", "ads"]) {
-      try {
-        log(`—— 开始：${t} ——`);
-        out[t] = await runTask(t, range, log, t === "ads" ? { quick: true } : {});
-      } catch (e) {
-        log(`—— ${t} 失败：${e.message}`);
-        out[t] = { error: String(e.message || e) };
-      }
-    }
-    return out;
-  }
-
-  const impl = TASK_IMPL[task];
-  if (!impl) throw new Error(`暂不支持的取数任务：${task}`);
-
+async function pollAdsQuiet() {
   try {
-    return await impl(range, log, opts);
+    const { params = {} } = await chrome.storage.local.get({ params: {} });
+    const host = pickHost(params, "seller-") || pickHost(params, "seller");
+    if (!host) return;
+    const log = (m) => appendTaskLog(`[ads-poll] ${m}`);
+    const r = await pullAdsTasks(host, log);
+    if (r.saved.length) {
+      log(`自动下载完成 ${r.saved.length} 个文件`);
+    }
   } catch (e) {
-    const msg = String(e.message || e);
-    // 登录态或风控参数过期是最常见的失败原因：自愈一次再试，别直接甩给用户
-    if (/40[123]|风控|登录|code=|参数|学不到/.test(msg)) {
-      log("可能登录态或风控参数失效，自动刷新页面后重试一次…");
-      try {
-        await ensureHost(TASK_HINT[task], log, true);
-      } catch (e2) {
-        throw new Error(`${msg}（自愈失败：${e2.message}）`);
-      }
-      return await impl(range, log, opts);
-    }
-    throw e;
+    // 静默：这里失败不打扰用户，用户主动点「广告」时才会报错
   }
 }
 
-const LOG_KEY = "taskLogs";
-const LOG_MAX = 300;
-
-/** 任务日志同时写三处：本地桥、扩展存储（面板重开可恢复）、控制台 */
-async function appendTaskLog(msg) {
-  const line = `${new Date().toLocaleTimeString("zh-CN", { hour12: false })}  ${msg}`;
-  bridgeLog(msg);
-  try {
-    const { [LOG_KEY]: old = [] } = await chrome.storage.local.get({ [LOG_KEY]: [] });
-    old.push(line);
-    if (old.length > LOG_MAX) old.splice(0, old.length - LOG_MAX);
-    await chrome.storage.local.set({ [LOG_KEY]: old });
-  } catch (e) { /* 存储失败不影响任务 */ }
-  try {
-    chrome.runtime.sendMessage({ type: "taskLog", msg }).catch(() => {});
-  } catch (e) { /* 面板没开 */ }
+try {
+  if (chrome.alarms) {
+    chrome.alarms.create("ads-poll", { periodInMinutes: 3, delayInMinutes: 2 });
+    chrome.alarms.onAlarm.addListener((a) => {
+      if (a.name === "ads-poll") pollAdsQuiet();
+    });
+  }
+} catch (e) {
+  console.warn("广告守望注册失败：", e);
 }
-
-function bridgeLog(msg) {
-  fetch(`${BRIDGE}/log`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ msg: String(msg) }),
-  }).catch(() => {});
-}
-
 
 // ---------------- 定时自动取数 ----------------
 // 扩展不能像 cron 那样精确定时，标准做法是：每 15 分钟醒一次，
@@ -743,6 +734,37 @@ async function deepCapture(seconds, log) {
   }
   if (!ids.size) throw new Error("没能挂上任何标签页的调试器（可能已有其它调试会话）");
   log(`已挂载 ${ids.size} 个标签页，${seconds} 秒内请完成要记录的操作`);
+
+  // 顺手扫一遍页面上的按钮文案：广告导出的创建接口抓不到，
+  // 那就改成"模拟点击导出按钮"。先要知道那个按钮到底叫什么。
+  for (const tb of tabs) {
+    try {
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId: tb.id },
+        func: () => {
+          const out = [];
+          const seen = new Set();
+          const nodes = document.querySelectorAll("button, [role=button], a, [class*=btn], [class*=Button]");
+          for (const el of nodes) {
+            const txt = (el.innerText || "").trim().replace(/\s+/g, " ");
+            if (!txt || txt.length > 24 || seen.has(txt)) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width < 20 || r.height < 10) continue;
+            seen.add(txt);
+            out.push(txt);
+          }
+          return out.slice(0, 60);
+        },
+      });
+      const list = (res && res.result) || [];
+      const hit = list.filter((x) => /导出|导出记录|Export|Eksport|Xuất|ส่งออก/i.test(x));
+      log(`页面按钮扫描（${(tb.url || "").split("?")[0].slice(-40)}）：共 ${list.length} 个`);
+      if (hit.length) log(`  含"导出"的按钮：${hit.join(" | ")}`);
+      log(`  全部：${list.slice(0, 25).join(" / ")}`);
+    } catch (e) {
+      // 页面可能还没加载完或不允许注入，忽略
+    }
+  }
 
   const onEvent = (source, method, params) => {
     if (!ids.has(source.tabId) || method !== "Network.requestWillBeSent") return;
