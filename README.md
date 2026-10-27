@@ -44,6 +44,25 @@ powershell -ExecutionPolicy Bypass -File scripts\install_scheduled_task.ps1
 注册每天 09:00 跑「昨天」，关机错过会开机补跑。卸载：
 `Unregister-ScheduledTask -TaskName "算净利润-每日" -Confirm:$false`
 
+### 双击没反应 / 报「找不到 python」
+
+Windows 自带的 `WindowsApps\python.exe` 是个**商店占位程序**，双击时什么都不做。
+所有批处理都通过 `scripts\_python.bat` 自动找一个真正能用的解释器，搜索顺序：
+
+1. 环境变量 `PYTHON_EXE`
+2. PATH 里的 `python`（跳过 `WindowsApps` 占位）
+3. `py` 启动器
+4. `%LOCALAPPDATA%\Programs\Python\Python3xx`、`C:\Python3xx`、`%ProgramFiles%\Python3xx`
+5. WorkBuddy 自带的 Python（本机当前走这条）
+
+都没有才会报错。要固定用某个解释器，设一个环境变量即可：
+
+```powershell
+setx PYTHON_EXE "C:\Path\To\python.exe"
+```
+
+> 批处理内容全部为纯 ASCII，避免中文在 cmd 里因编码不同而乱码。
+
 ---
 
 ## 二、输出长什么样
