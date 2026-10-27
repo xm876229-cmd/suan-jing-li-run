@@ -3,25 +3,29 @@
 <head>
 <meta charset="utf-8" />
 <style>
-  body { width: 330px; margin: 0; font: 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; color: #1F3B4D; }
+  body { width: 340px; margin: 0; font: 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; color: #1F3B4D; }
   header { padding: 12px 16px 9px; background: #1F3B4D; color: #fff; }
   header h1 { margin: 0; font-size: 14px; font-weight: 600; }
   header p { margin: 3px 0 0; font-size: 11px; opacity: .75; }
-  main { padding: 10px 16px 14px; }
-  .row { display: flex; justify-content: space-between; padding: 3px 0; }
+  main { padding: 9px 16px 14px; }
+  .row { display: flex; justify-content: space-between; padding: 2px 0; }
   .k { color: #6B7B8C; }
   .v { font-weight: 600; }
   .ok { color: #2E7D32; }
   .bad { color: #C0392B; }
-  hr { border: 0; border-top: 1px solid #EDF2F7; margin: 9px 0; }
-  label { display: block; font-size: 11px; color: #6B7B8C; margin: 6px 0 2px; }
-  input[type=date] { width: 100%; box-sizing: border-box; padding: 5px 6px; border: 1px solid #D5DDE5;
+  hr { border: 0; border-top: 1px solid #EDF2F7; margin: 8px 0; }
+  .dates { display: flex; gap: 8px; }
+  .dates > div { flex: 1; }
+  label { display: block; font-size: 11px; color: #6B7B8C; margin: 4px 0 2px; }
+  input[type=date] { width: 100%; box-sizing: border-box; padding: 4px 5px; border: 1px solid #D5DDE5;
                      border-radius: 5px; font-size: 12px; color: #1F3B4D; }
-  button { width: 100%; margin-top: 8px; padding: 8px; border: 0; border-radius: 6px;
+  button { width: 100%; margin-top: 7px; padding: 8px; border: 0; border-radius: 6px;
            background: #1F3B4D; color: #fff; font-size: 13px; cursor: pointer; }
   button.ghost { background: #EDF2F7; color: #1F3B4D; }
   button:disabled { opacity: .5; cursor: default; }
-  #log { margin-top: 8px; max-height: 110px; overflow: auto; font-size: 11px;
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 7px; }
+  .grid button { margin-top: 0; font-size: 12px; padding: 7px; }
+  #log { margin-top: 8px; max-height: 120px; overflow: auto; font-size: 11px;
          background: #F7FAFC; border-radius: 6px; padding: 6px 8px; color: #44576B;
          white-space: pre-wrap; line-height: 1.5; }
 </style>
@@ -34,16 +38,22 @@
 <main>
   <div class="row"><span class="k">记录状态</span><span class="v" id="enabled">—</span></div>
   <div class="row"><span class="k">已抓接口</span><span class="v" id="captured">0</span></div>
-  <div class="row"><span class="k">已回传</span><span class="v" id="pushed">0</span></div>
   <div class="row"><span class="k">本地程序</span><span class="v" id="bridge">—</span></div>
   <div class="row"><span class="k">已识别店铺</span><span class="v" id="hosts" style="font-size:11px">—</span></div>
 
   <hr />
-  <label>起始日期</label>
-  <input type="date" id="dfrom" />
-  <label>结束日期</label>
-  <input type="date" id="dto" />
-  <button id="run">自动取数：订单</button>
+  <div class="dates">
+    <div><label>起始</label><input type="date" id="dfrom" /></div>
+    <div><label>结束（含）</label><input type="date" id="dto" /></div>
+  </div>
+
+  <button id="runAll">一键取全部（订单 + 商品 + 联盟）</button>
+  <div class="grid">
+    <button class="ghost" data-task="orders">订单</button>
+    <button class="ghost" data-task="sku">商品 SKU</button>
+    <button class="ghost" data-task="affiliate">联盟佣金</button>
+    <button class="ghost" data-task="ads">广告（已完成任务）</button>
+  </div>
   <button id="toggle" class="ghost">暂停记录</button>
   <div id="log"></div>
 </main>

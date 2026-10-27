@@ -187,10 +187,190 @@ async function runOrders({ startMs, endMs }, log) {
   return { saved: saved.path, bytes: buf.byteLength };
 }
 
+// ---------------- 工具：在响应里找下载地址 ----------------
+
+/** 递归找一个像下载地址的字符串。不同接口字段名各不相同，与其逐个猜，不如扫一遍。 */
+function findUrl(obj, depth = 0) {
+  if (!obj || depth > 6) return null;
+  if (typeof obj === "string") {
+    if (/^https?:\/\//.test(obj) && /\.(xlsx|xls|csv|zip)/i.test(obj)) return obj;
+    return null;
+  }
+  if (Array.isArray(obj)) {
+    for (const v of obj) {
+      const hit = findUrl(v, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (typeof obj === "object") {
+    for (const v of Object.values(obj)) {
+      const hit = findUrl(v, depth + 1);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+async function downloadAndUpload(url, name, log) {
+  log(`下载中…`);
+  const resp = await fetch(url, { credentials: "include" });
+  if (!resp.ok) throw new Error(`下载失败 HTTP ${resp.status}`);
+  const buf = await resp.arrayBuffer();
+  if (buf.byteLength < 512) throw new Error("下载到的文件太小，可能还没生成好");
+  const saved = await uploadToBridge(name, buf);
+  log(`已保存：${saved.path}`);
+  return { saved: saved.path, bytes: buf.byteLength };
+}
+
+function dstr(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// ---------------- 任务：商品 SKU 统计 ----------------
+
+async function runSkuStats({ startDate, endDateExclusive }, log) {
+  const { params = {} } = await chrome.storage.local.get({ params: {} });
+  const host = pickHost(params, "seller-") || pickHost(params, "seller");
+  if (!host) throw new Error("还没学到卖家后台的公共参数：先打开一次店铺后台");
+
+  log("提交商品SKU导出…");
+  const body = {
+    request: {
+      list_control: {
+        rules: [{ direction: 2, field: "sku_gmv" }],
+        pagination: { size: 10000, page: 0 },
+      },
+      filter: {},
+      time_descriptor: { start: startDate, end: endDateExclusive },
+      search: {},
+    },
+  };
+  const r = await apiPost(
+    await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list/export"),
+    body
+  );
+  const file = r?.data?.file;
+  if (!file) throw new Error("没拿到文件路径（data.file 为空）");
+  log(`文件路径：${file}`);
+
+  // 这个接口直接返回文件路径，但文件可能还在生成，轮询直到能取到二进制
+  const url = `https://${host}${file}`;
+  for (let i = 0; i < 30; i++) {
+    const head = await fetch(url, { credentials: "include" });
+    const ct = head.headers.get("content-type") || "";
+    if (head.ok && !ct.includes("json")) {
+      const buf = await head.arrayBuffer();
+      if (buf.byteLength > 512) {
+        const saved = await uploadToBridge(`product_sku_list-${startDate}_${endDateExclusive}.xlsx`, buf);
+        log(`已保存：${saved.path}`);
+        return { saved: saved.path, bytes: buf.byteLength };
+      }
+    }
+    log(`文件还在生成…（${(i + 1) * 5}s）`);
+    await sleep(5000);
+  }
+  throw new Error("等了两分半仍取不到文件");
+}
+
+// ---------------- 任务：联盟佣金 ----------------
+
+async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
+  const { params = {} } = await chrome.storage.local.get({ params: {} });
+  const host = pickHost(params, "affiliate");
+  if (!host) throw new Error("还没学到联盟后台的公共参数：先打开一次达人联盟页面");
+
+  const startSec = Math.floor(new Date(startDate + "T00:00:00").getTime() / 1000);
+  const endSec = Math.floor(new Date(endDateExclusive + "T00:00:00").getTime() / 1000) - 1;
+  const tz = tzOffset ?? -new Date().getTimezoneOffset() * 60;
+
+  log("提交联盟佣金导出…");
+  const body = {
+    module_type: 104,
+    transaction_product_list_param: {
+      time_descriptor: {
+        granularity_type: 1,
+        timezone_offset: tz,
+        start_time: startSec,
+        end_time: endSec,
+        time_option_type: 1,
+      },
+      metric_types: [1, 3, 2, 4, 9, 20, 13, 14, 19, 6, 12, 11, 16, 17, 18, 8, 7, 10, 5],
+      sorter: { sort_type: 1, order_type: 1 },
+      filter: {},
+    },
+    locale: "zh-CN",
+  };
+  const created = await apiPost(
+    await buildUrl(host, "/api/v1/oec/affiliate/compass/export_task/create"),
+    body
+  );
+  const taskId = created?.data?.task_id || "";
+  log(`任务已创建：${taskId || "(无 task_id)"}`);
+
+  // 轮询任务列表，找到可下载的地址
+  for (let i = 0; i < 40; i++) {
+    await sleep(5000);
+    const list = await apiPost(
+      await buildUrl(host, "/api/v1/oec/affiliate/compass/export_task/list"),
+      { module_type: 104, locale: "zh-CN" }
+    );
+    const url = findUrl(list);
+    if (url) {
+      return downloadAndUpload(url, `Transaction_Analysis_${startDate}_${endDateExclusive}.xlsx`, log);
+    }
+    log(`等待任务完成…（${(i + 1) * 5}s）`);
+  }
+  throw new Error("等了约 3 分钟仍没有可下载地址（接口结构可能变了）");
+}
+
+// ---------------- 任务：广告（只拉已完成的任务） ----------------
+
+async function runAds({}, log) {
+  const { params = {} } = await chrome.storage.local.get({ params: {} });
+  const host = pickHost(params, "seller-") || pickHost(params, "seller");
+  if (!host) throw new Error("还没学到卖家后台的公共参数");
+
+  log("查询广告导出任务…");
+  for (let i = 0; i < 60; i++) {
+    const r = await apiPost(
+      await buildUrl(host, "/oec_ads/shopping/v1/oec/stat/download_task/query"),
+      { download_scene: "offline_export" }
+    );
+    const tasks = r?.offline_tasks || [];
+    const done = tasks.find((t) => t && t.url);
+    if (done) {
+      log(`发现已完成任务：${done.file_name || done.download_id}`);
+      return downloadAndUpload(done.url, `${done.file_name || "creative data"}.xlsx`, log);
+    }
+    const running = tasks.find((t) => t && t.task_status && t.task_status !== "FINISHED");
+    log(`任务状态：${running ? running.task_status : "无进行中的任务"}（${(i + 1) * 10}s）`);
+    await sleep(10000);
+  }
+  throw new Error("十分钟内没有等到已完成的广告导出任务（广告导出需要先手工点一次）");
+}
+
 // ---------------- 任务调度 ----------------
 
 async function runTask(task, range, log) {
   if (task === "orders") return runOrders(range, log);
+  if (task === "sku") return runSkuStats(range, log);
+  if (task === "affiliate") return runAffiliate(range, log);
+  if (task === "ads") return runAds(range, log);
+  if (task === "all") {
+    const out = {};
+    for (const t of ["orders", "sku", "affiliate"]) {
+      try {
+        log(`—— 开始：${t} ——`);
+        out[t] = await runTask(t, range, log);
+      } catch (e) {
+        log(`—— ${t} 失败：${e.message}`);
+        out[t] = { error: String(e.message || e) };
+      }
+    }
+    return out;
+  }
   throw new Error(`暂不支持的取数任务：${task}`);
 }
 
@@ -241,7 +421,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "runTask") {
     const log = (m) => {
       bridgeLog(`[${msg.task}] ${m}`);
-      chrome.runtime.sendMessage({ type: "taskLog", msg: m }).catch?.(() => {});
+      // 面板没打开时 sendMessage 会抛，别让日志影响任务本身
+      try {
+        const p = chrome.runtime.sendMessage({ type: "taskLog", msg: m });
+        if (p && typeof p.catch === "function") p.catch(() => {});
+      } catch (e) { /* 无接收方，忽略 */ }
     };
     runTask(msg.task, msg.range || {}, log)
       .then((r) => {
