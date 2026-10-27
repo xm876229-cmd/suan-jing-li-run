@@ -588,60 +588,105 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
   return r.result;
 }
 
+/** 把日期区间切成若干短段（end 为开区间）。 */
+function splitDateRange(startStr, endExclusive, chunkDays) {
+  const out = [];
+  const fmtD = (d) => {
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+  let cur = new Date(startStr + "T00:00:00");
+  const end = new Date(endExclusive + "T00:00:00");
+  if (isNaN(cur.getTime()) || isNaN(end.getTime())) return out;
+
+  while (cur < end) {
+    const next = new Date(cur.getTime() + chunkDays * 86400000);
+    const stop = next > end ? end : next;
+    out.push({ start: fmtD(cur), end: fmtD(stop) });
+    cur = stop;
+  }
+  return out;
+}
+
+/**
+ * 按区间取 SKU→商品 映射，整段失败就切成短段。
+ *
+ * 这个接口按商品维度聚合，跨度一大下游必超时（实测 16 天 → 98001021，
+ * 1 天 → 200）。但映射必须跟着统计区间走：链接改过之后，同一个 SKU
+ * 在不同时期属于不同商品，用「近 7 天」会拿到现在的归属而不是当时的。
+ * 所以不缩短区间，改成切段。
+ */
+async function pagePullSkuRanged(host, start, endExclusive, log) {
+  const MAX_TRIES = [3, 1];     // 先按 3 天切，仍失败就按天
+
+  for (const chunk of MAX_TRIES) {
+    const segs = splitDateRange(start, endExclusive, chunk);
+    if (!segs.length) return [];
+
+    // 只有一段就直接打，不用走分段循环
+    if (segs.length === 1) {
+      const r = await pagePullSku(host, segs[0].start, segs[0].end, 10, 400);
+      log(`区间 ${segs[0].start} ~ ${segs[0].end}：${(r.items || []).length} 条`);
+      return r.items || [];
+    }
+
+    log(`整段跨度 ${segs.length * chunk} 天左右，按 ${chunk} 天切 ${segs.length} 段取…`);
+    const bySku = new Map();     // sku_id → item，同一 SKU 只留第一条
+    const rebound = new Set();   // 区间内改绑过的 SKU
+    let failed = 0;
+
+    for (const s of segs) {
+      try {
+        const r = await pagePullSku(host, s.start, s.end, 10, 400);
+        for (const it of r.items || []) {
+          const meta = (it && it.meta) || {};
+          const sid = String(meta.sku_id || meta.skuId || meta.seller_sku || "") || JSON.stringify(it).slice(0, 40);
+          const old = bySku.get(sid);
+          if (!old) {
+            bySku.set(sid, it);
+          } else {
+            const pOld = String((old.meta || {}).product_id || (old.meta || {}).productId || "");
+            const pNew = String(meta.product_id || meta.productId || "");
+            if (pOld && pNew && pOld !== pNew) rebound.add(sid);
+          }
+        }
+      } catch (e) {
+        failed += 1;
+        log(`${s.start} ~ ${s.end} 失败：${(e && e.message) || e}`);
+      }
+    }
+
+    if (bySku.size) {
+      log(`分段取到 ${bySku.size} 条（失败 ${failed} 段）`);
+      if (rebound.size) log(`注意：区间内有 ${rebound.size} 个 SKU 改绑过商品`);
+      return Array.from(bySku.values());
+    }
+    log(`按 ${chunk} 天切段仍全部失败，换更细的粒度…`);
+  }
+  return [];
+}
+
 async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   const { skuCache: prev } = await skGet({ skuCache: null });
   const host = await ensureHost("seller", log);
 
-  // 这个接口按商品维度聚合，跨度越大下游越容易超时。
-  // 实测页面自己查 1 天（10-27~10-28）返回 200，
-  // 我们查 16 天（10-01~10-16）必回 code=98001021 call downstream server error。
-  //
-  // 而这个接口的产物只是「SKU → 商品ID」的映射，跟统计区间无关，
-  // 所以不需要按用户选的区间取：先用目标区间试，失败就退到更短的窗口。
-  const today = new Date();
-  const dayStr = (offset) => {
-    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() + offset);
-    const p = (n) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-  };
-
-  const WINDOWS = [
-    { label: "所选区间", start: startDate, end: endDateExclusive },
-    { label: "近 7 天", start: dayStr(-7), end: dayStr(1) },
-    { label: "近 2 天", start: dayStr(-2), end: dayStr(1) },
-  ];
-
-  let all = null;
-  let used = null;
-  let pages = 0;
-  let lastErr = "";
-
-  for (const w of WINDOWS) {
-    try {
-      log(`取商品SKU映射（${w.label}：${w.start} ~ ${w.end}）…`);
-      const r = await pagePullSku(host, w.start, w.end, 10, 400);
-      if (r.items && r.items.length) {
-        all = r.items;
-        used = w;
-        pages = r.pages;
-        break;
-      }
-      log(`${w.label} 返回 0 条，换更短的窗口`);
-    } catch (e) {
-      lastErr = String((e && e.message) || e);
-      log(`${w.label} 失败：${lastErr}`);
-    }
+  log(`取商品SKU映射（区间 ${startDate} ~ ${endDateExclusive}）…`);
+  let all = [];
+  try {
+    all = await pagePullSkuRanged(host, startDate, endDateExclusive, log);
+  } catch (e) {
+    log(`取数异常：${(e && e.message) || e}`);
   }
 
-  if (!all) {
+  if (!all.length) {
     throw new Error(
-      `商品SKU映射取不到：${lastErr || "各窗口均无数据"}。` +
-      "本轮沿用现有主表，不影响净利计算",
+      "商品SKU映射取不到，本轮沿用现有主表，不影响净利计算" +
+      "（需要更新时可手工导 product_sku_list.xlsx 放进 data/mapping/）",
     );
   }
 
   const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
-  const name = `sku_list_${used.start}_${used.end}.json`;
+  const name = `sku_list_${startDate}_${shiftDate(endDateExclusive, -1)}.json`;
   const saved = await uploadToBridge(name, bytes.buffer);
   await skSet({ skuCache: { at: Date.now(), file: saved.path, items: all.length } });
 
@@ -649,8 +694,8 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     const delta = all.length - prev.items;
     log(`映射有变化：${prev.items} → ${all.length} 条（${delta > 0 ? "+" : ""}${delta}）`);
   }
-  log(`已保存：${saved.path}（${all.length} 条，${pages} 页，窗口=${used.label}）`);
-  return { saved: saved.path, items: all.length, window: used.label };
+  log(`已保存：${saved.path}（${all.length} 条，区间 ${startDate} ~ ${endDateExclusive}）`);
+  return { saved: saved.path, items: all.length };
 }
 
 // ---------------- 任务：联盟佣金 ----------------
