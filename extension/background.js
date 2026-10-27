@@ -361,21 +361,38 @@ function dstr(d) {
 async function runSkuStats({ startDate, endDateExclusive }, log) {
   const host = await ensureHost("seller", log);
 
-  log("提交商品SKU导出…");
-  const body = {
+  // 优先走 JSON 数据接口：数据立刻返回，不用等平台生成文件
+  const reqBody = {
     request: {
       list_control: {
         rules: [{ direction: 2, field: "sku_gmv" }],
-        pagination: { size: 10000, page: 0 },
+        pagination: { size: 5000, page: 0 },
       },
       filter: {},
       time_descriptor: { start: startDate, end: endDateExclusive },
       search: {},
     },
   };
+
+  log("拉取商品SKU数据（JSON）…");
+  try {
+    const j = await apiPost(await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list"), reqBody);
+    const items = j?.data?.items || [];
+    if (items.length) {
+      const bytes = new TextEncoder().encode(JSON.stringify(j));
+      const saved = await uploadToBridge(`sku_list_${startDate}_${endDateExclusive}.json`, bytes.buffer);
+      log(`已保存：${saved.path}（${items.length} 条）`);
+      return { saved: saved.path, items: items.length };
+    }
+    log("JSON 接口返回 0 条，改走导出文件");
+  } catch (e) {
+    log(`JSON 接口失败（${e.message}），改走导出文件`);
+  }
+
+  log("提交商品SKU导出…");
   const r = await apiPost(
     await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list/export"),
-    body
+    reqBody
   );
   const file = r?.data?.file;
   if (!file) throw new Error("没拿到文件路径（data.file 为空）");
@@ -384,7 +401,7 @@ async function runSkuStats({ startDate, endDateExclusive }, log) {
   const name = `product_sku_list-${startDate}_${endDateExclusive}.xlsx`;
   const direct = file.startsWith("http") ? file : `https://${host}${file}`;
 
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 18; i++) {
     // 路子一：查导出任务列表，里面通常带可下载地址
     try {
       const tl = await apiPost(
@@ -413,13 +430,13 @@ async function runSkuStats({ startDate, endDateExclusive }, log) {
           log(`已保存：${saved.path}`);
           return { saved: saved.path, bytes: buf.byteLength };
         }
-      } else if (i % 4 === 0) {
+      } else {
         let body = "";
         try { body = (await resp.text()).slice(0, 150); } catch (e) { /* 忽略 */ }
         log(`直取返回 ${resp.status} ${ct.split(";")[0]} ${body.replace(/\s+/g, " ")}`);
       }
     } catch (e) {
-      if (i % 4 === 0) log(`直取出错：${e.message}`);
+      log(`直取出错：${e.message}`);
     }
 
     log(`等待文件生成…（${(i + 1) * 5}s）`);
@@ -662,6 +679,65 @@ try {
   console.warn("定时器注册失败：", e);
 }
 
+
+// ---------------- 深度抓包（调试协议） ----------------
+// 有些请求既不走页面 fetch/XHR，也不在 webRequest 视野里（由签名 SDK 在 worker 里发）。
+// chrome.debugger 直接挂在标签页的网络层，能看到该页发出的全部请求。
+// 代价：浏览器顶部会出现"正在调试"提示条，抓完自动断开。
+
+let deepTimer = null;
+
+async function deepCapture(seconds, log) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.id) throw new Error("找不到当前标签页");
+
+  const target = { tabId: tab.id };
+  try {
+    await chrome.debugger.attach(target, "1.3");
+  } catch (e) {
+    throw new Error(`无法挂载调试器：${e.message}（可能已有一个调试会话）`);
+  }
+
+  try {
+    await chrome.debugger.sendCommand(target, "Network.enable", {});
+  } catch (e) {
+    await chrome.debugger.detach(target).catch(() => {});
+    throw new Error(`开启网络监听失败：${e.message}`);
+  }
+
+  const onEvent = (source, method, params) => {
+    if (source.tabId !== tab.id || method !== "Network.requestWillBeSent") return;
+    const req = params.request || {};
+    const url = req.url || "";
+    if (!/export|download|task|insight|stat|create|submit/i.test(url)) return;
+    recordCapture({
+      kind: "debugger",
+      url,
+      method: req.method,
+      status: null,
+      contentType: "",
+      ms: 0,
+      reqBody: (req.postData || "").slice(0, 4000) || null,
+      respSample: null,
+      page: tab.url || "",
+      at: new Date().toISOString(),
+    });
+  };
+
+  chrome.debugger.onEvent.addListener(onEvent);
+
+  const stop = async (reason) => {
+    chrome.debugger.onEvent.removeListener(onEvent);
+    if (deepTimer) { clearTimeout(deepTimer); deepTimer = null; }
+    try { await chrome.debugger.detach(target); } catch (e) { /* 已断开 */ }
+    log(`深度抓包结束（${reason}）`);
+  };
+
+  deepTimer = setTimeout(() => stop(`${seconds} 秒到`), seconds * 1000);
+  log(`深度抓包已开始，${seconds} 秒内请完成要记录的操作`);
+  return { ok: true, tabId: tab.id, seconds };
+}
+
 // ---------------- 消息路由 ----------------
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -690,6 +766,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.storage.local.set({ enabled });
     if (enabled) flush();
     sendResponse({ ok: true, enabled });
+    return true;
+  }
+
+  if (msg.type === "deepCapture") {
+    const log = (m) => bridgeLog(`[debug] ${m}`);
+    deepCapture(msg.seconds || 120, log)
+      .then((r) => sendResponse({ ok: true, result: r }))
+      .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
     return true;
   }
 

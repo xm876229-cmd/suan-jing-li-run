@@ -229,3 +229,19 @@ function renderCal() {
   el.addEventListener("focus", () => openCal(id));
   el.addEventListener("click", () => openCal(id));
 });
+
+// ---------------- 深度抓包 ----------------
+
+const deepBtn = $("deep");
+if (deepBtn) {
+  deepBtn.addEventListener("click", () => {
+    deepBtn.disabled = true;
+    log("正在挂载调试器（顶部会出现“正在调试”提示条，属正常）…");
+    chrome.runtime.sendMessage({ type: "deepCapture", seconds: 120 }, (r) => {
+      deepBtn.disabled = false;
+      if (!r) { log("没有响应"); return; }
+      if (r.ok) log("深度抓包已开始，现在去点一次广告导出，2 分钟后自动结束");
+      else log(`失败：${r.error}`);
+    });
+  });
+}
