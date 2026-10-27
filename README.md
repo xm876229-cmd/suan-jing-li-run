@@ -48,6 +48,22 @@ python -m src.cli --workbook "V1-净利  -15.xlsx" --store demo-my
 > 同一期间两者会差 1.8 倍左右（例：2026-10-01~10-15，本引擎 13,074.78，平台统计 14,770.66，买家实付 15,219.88）。
 > 这个口径待定，切换只需要改 `calc.py` 里 `OrderLine.gmv` 一处。
 
+
+### 成本表：主表 + 变更流水
+
+成本只在新增商品时更新，所以不做成"每次读最新文件"，而是维护一张主表：
+
+```bash
+# 把新导的成本表丢进 data/costs/，执行一次
+python -m scripts.import_costs "data/costs/成本表.xlsx"
+```
+
+- `data/costs/master.csv`：主成本表，程序算账只认这张
+- `data/costs/history.jsonl`：变更流水，涨价/降价/新增都有记录（旧价 → 新价 + 时间）
+- 老编码不会被新表"冲掉"，价格没变就不动
+- 第一次没有主表时，程序会自动把目录里最新的表导入建表
+- 成本数据目录已 gitignore，不会上传
+
 ### 新增国家不用改代码
 
 在 `config/rates.json` 的 `countries` 下加一段就行，键名与 `--country` 一致：

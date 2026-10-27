@@ -152,3 +152,75 @@ chrome.runtime.sendMessage({ type: "getSchedule" }, (r) => { if (r && r.ok) rend
   const el = $(id);
   if (el) el.addEventListener("change", saveSchedule);
 });
+
+// ---------------- 自绘日历（中文，不受浏览器语言影响） ----------------
+
+const WD = ["日", "一", "二", "三", "四", "五", "六"];
+let calTarget = null;     // 当前在给哪个输入框选日期
+let calMonth = null;      // 当前显示的月份
+
+function openCal(inputId) {
+  calTarget = inputId;
+  calMonth = parseDate($(inputId).value) || new Date();
+  calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth(), 1);
+  renderCal();
+  $("cal").classList.remove("hidden");
+}
+
+function closeCal() {
+  $("cal").classList.add("hidden");
+  calTarget = null;
+}
+
+function renderCal() {
+  const y = calMonth.getFullYear();
+  const m = calMonth.getMonth();
+  const first = new Date(y, m, 1);
+  const days = new Date(y, m + 1, 0).getDate();
+  const lead = first.getDay();
+  const sel = calTarget ? parseDate($(calTarget).value) : null;
+  const today = new Date();
+
+  const parts = [];
+  parts.push(`<div class="cal-head">
+      <button data-nav="-1">‹</button>
+      <span>${y} 年 ${m + 1} 月</span>
+      <button data-nav="1">›</button>
+    </div>`);
+  parts.push('<div class="cal-grid">');
+  WD.forEach((w) => parts.push(`<div class="wd">${w}</div>`));
+  for (let i = 0; i < lead; i++) parts.push('<div class="day empty"></div>');
+  for (let d = 1; d <= days; d++) {
+    const cur = new Date(y, m, d);
+    const isSel = sel && cur.getFullYear() === sel.getFullYear()
+      && cur.getMonth() === sel.getMonth() && cur.getDate() === sel.getDate();
+    const isToday = cur.getFullYear() === today.getFullYear()
+      && cur.getMonth() === today.getMonth() && cur.getDate() === today.getDate();
+    const cls = `day${isSel ? " sel" : ""}${isToday ? " today" : ""}`;
+    parts.push(`<div class="${cls}" data-day="${d}">${d}</div>`);
+  }
+  parts.push("</div>");
+
+  const cal = $("cal");
+  cal.innerHTML = parts.join("");
+  cal.querySelectorAll("[data-nav]").forEach((b) => {
+    b.addEventListener("click", () => {
+      calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + (+b.dataset.nav), 1);
+      renderCal();
+    });
+  });
+  cal.querySelectorAll("[data-day]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const d = new Date(calMonth.getFullYear(), calMonth.getMonth(), +b.dataset.day);
+      if (calTarget) $(calTarget).value = fmt(d);
+      closeCal();
+    });
+  });
+}
+
+["dfrom", "dto"].forEach((id) => {
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener("focus", () => openCal(id));
+  el.addEventListener("click", () => openCal(id));
+});

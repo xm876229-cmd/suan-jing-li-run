@@ -45,3 +45,6 @@ desktop.ini
 # .workbuddy/ 为项目相关数据目录，正常纳入版本管理，不在此忽略
 
 data/capture/task.log
+
+data/costs/*
+!data/costs/README.md

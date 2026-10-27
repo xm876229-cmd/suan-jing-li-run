@@ -38,6 +38,56 @@ def parse_date(s: str | None) -> date | None:
     raise argparse.ArgumentTypeError(f"无法识别的日期：{s}（示例：2026-10-01）")
 
 
+
+COST_DIR = ROOT / "data" / "costs"
+
+
+def pick_costs(explicit: Path | None) -> tuple[Path | None, str]:
+    """决定这次用哪份成本表。
+
+    优先用 data/costs/master.csv（主表，增量合并过、带变更流水）。
+    没有主表但目录里有原始成本表时，先自动导入一次再算，不用手工执行命令。
+    """
+    if explicit:
+        return explicit, "命令行指定"
+
+    master = COST_DIR / "master.csv"
+    if not master.exists() and COST_DIR.exists():
+        raw = [
+            f for f in COST_DIR.iterdir()
+            if f.is_file() and f.suffix.lower() in (".xlsx", ".xls", ".csv")
+            and not f.name.startswith("~$")
+        ]
+        if raw:
+            try:
+                from scripts.import_costs import main as import_main  # 延迟导入，避免循环
+                src = max(raw, key=lambda f: f.stat().st_mtime)
+                print(f"首次使用：正在把 {src.name} 导入主成本表…")
+                import_main([str(src)])
+            except Exception as e:
+                print(f"⚠ 自动导入成本表失败：{e}")
+
+    if master.exists():
+        try:
+            with master.open("r", encoding="utf-8-sig") as f:
+                n = max(0, sum(1 for _ in f) - 1)
+        except OSError:
+            n = 0
+        return master, f"主成本表（{n} 条）"
+
+    if COST_DIR.exists():
+        raw = [
+            f for f in COST_DIR.iterdir()
+            if f.is_file() and f.suffix.lower() in (".xlsx", ".xls", ".csv")
+            and not f.name.startswith("~$")
+        ]
+        if raw:
+            newest = max(raw, key=lambda f: f.stat().st_mtime)
+            return newest, "直接取目录里最新的一份（未建主表）"
+        return None, "data/costs 里没有成本表"
+    return None, "未找到 data/costs 目录"
+
+
 def load_stores(path: Path) -> dict:
     if not path.exists():
         return {"stores": [], "defaults": {}}
@@ -100,25 +150,31 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     params = rates[country]
 
+    costs_path, costs_note = pick_costs(args.costs)
+    if costs_path:
+        print(f"成本表：{costs_path.name}（{costs_note}）")
+    else:
+        print(f"⚠ {costs_note}，成本将按 0 计，净利会偏高")
+
     # 读数据
     if args.workbook:
         if not args.workbook.exists():
             print(f"找不到工作簿：{args.workbook}")
             return 2
-        data = load_from_workbook(args.workbook, params.usd_to_local)
+        data = load_from_workbook(args.workbook, params.usd_to_local, costs_path)
         source = args.workbook.name
     elif args.orders:
         if not args.orders.exists():
             print(f"找不到订单文件：{args.orders}")
             return 2
         data = load_from_files(args.orders, args.ads, args.commissions,
-                               args.mapping, args.costs, params.usd_to_local)
+                               args.mapping, costs_path, params.usd_to_local)
         source = "、".join(data.sources.values()) or args.orders.name
     else:
         if not args.dir.exists():
             print(f"找不到目录：{args.dir}")
             return 2
-        data = load_from_dir(args.dir, args.costs, params.usd_to_local)
+        data = load_from_dir(args.dir, costs_path, params.usd_to_local)
         source = args.dir.name
 
     if not data.orders:
@@ -145,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         "订单行数": str(res.line_count),
         "订单数": str(res.order_count),
         "店铺": store_note or "-",
+        "成本表": f"{costs_path.name}（{costs_note}）" if costs_path else "未提供，成本按 0 计",
         "生成时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     path = build_report(res, res.lines, out, switches, subtitle, extra)

@@ -647,10 +647,20 @@ async function checkSchedule() {
   return jobs.map((j) => j[0]).join(",");
 }
 
-chrome.alarms.create("jingli-scheduler", { periodInMinutes: 15, delayInMinutes: 1 });
-chrome.alarms.onAlarm.addListener((a) => {
-  if (a.name === "jingli-scheduler") checkSchedule();
-});
+// 定时器注册必须包起来：缺 alarms 权限时这里是会抛异常的，
+// 一旦抛出去，后面的消息路由就全注册不上，扩展表现为"完全没反应"。
+try {
+  if (chrome.alarms) {
+    chrome.alarms.create("jingli-scheduler", { periodInMinutes: 15, delayInMinutes: 1 });
+    chrome.alarms.onAlarm.addListener((a) => {
+      if (a.name === "jingli-scheduler") checkSchedule();
+    });
+  } else {
+    console.warn("alarms 不可用，定时功能失效");
+  }
+} catch (e) {
+  console.warn("定时器注册失败：", e);
+}
 
 // ---------------- 消息路由 ----------------
 

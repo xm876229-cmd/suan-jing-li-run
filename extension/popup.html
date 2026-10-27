@@ -19,6 +19,19 @@
   label { display: block; font-size: 11px; color: #6B7B8C; margin: 4px 0 2px; }
   input[type=text] { width: 100%; box-sizing: border-box; padding: 5px 6px; border: 1px solid #D5DDE5;
                      border-radius: 5px; font-size: 12px; color: #1F3B4D; letter-spacing: .3px; }
+  .cal { margin-top: 6px; border: 1px solid #D5DDE5; border-radius: 8px; padding: 8px; background: #fff; }
+  .cal.hidden { display: none; }
+  .cal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .cal-head span { font-weight: 600; font-size: 12px; }
+  .cal-head button { width: 24px; height: 22px; margin: 0; padding: 0; background: #EDF2F7;
+                     color: #1F3B4D; font-size: 13px; line-height: 1; }
+  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+  .cal-grid .wd { text-align: center; font-size: 10px; color: #8A99A8; padding: 2px 0; }
+  .cal-grid .day { text-align: center; font-size: 12px; padding: 4px 0; border-radius: 4px; cursor: pointer; color: #1F3B4D; }
+  .cal-grid .day:hover { background: #EDF2F7; }
+  .cal-grid .day.sel { background: #1F3B4D; color: #fff; }
+  .cal-grid .day.today { outline: 1px solid #5B8DB8; }
+  .cal-grid .day.empty { cursor: default; }
   .presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-top: 6px; }
   .presets button { margin-top: 0; padding: 5px 0; font-size: 11px; background: #EDF2F7; color: #44576B; }
   button { width: 100%; margin-top: 7px; padding: 8px; border: 0; border-radius: 6px;
@@ -54,6 +67,7 @@
     <div><label>起始日期</label><input type="text" id="dfrom" placeholder="2026-10-01" /></div>
     <div><label>结束日期（含）</label><input type="text" id="dto" placeholder="2026-10-15" /></div>
   </div>
+  <div id="cal" class="cal hidden"></div>
   <div class="presets">
     <button data-preset="month">本月</button>
     <button data-preset="lastMonth">上月</button>
