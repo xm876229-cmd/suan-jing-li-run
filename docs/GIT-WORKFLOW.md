@@ -81,3 +81,28 @@ git revert <sha>                  # 生成反向提交（推荐，保留历史�
 ```
 
 > 严禁 `git reset --hard` + `git push --force` 处理已推送的历史，会让远程与本地脱节。
+
+## 7. 网络与代理
+
+本机直连 `github.com:443` 不通，必须走系统代理。仓库已在 **本地配置**（只对当前仓库生效，不影响其他项目）中写入：
+
+```bash
+git config --local http.proxy  http://127.0.0.1:10808
+git config --local https.proxy http://127.0.0.1:10808
+```
+
+若某天 `push` 报 `Failed to connect to github.com`：
+
+1. 确认代理软件在跑，且端口仍是 `10808`（`netstat -ano | findstr 10808`）；
+2. 端口变了就重设：`git config --local http.proxy http://127.0.0.1:<新端口>`；
+3. 检查 `git config --local --get http.proxy` 是否为空。
+
+## 8. 本仓库已固定的本地配置
+
+| 配置项 | 值 | 原因 |
+| --- | --- | --- |
+| `user.name` / `user.email` | `xm876229-cmd` / GitHub noreply 邮箱 | 提交能正确归属到 GitHub 账号 |
+| `core.quotepath` | `false` | 中文路径正常显示，不再转义成 `\344\270\255` |
+| `core.autocrlf` | `false` | 配合 `.gitattributes`，避免换行符被反复改写 |
+| `commit.template` | `.gitmessage` | 自带提交格式提示 |
+| `http(s).proxy` | `127.0.0.1:10808` | 见上一节 |
