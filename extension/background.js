@@ -358,78 +358,96 @@ function dstr(d) {
 
 // ---------------- 任务：商品 SKU 统计 ----------------
 
+function shiftDate(s, days) {
+  const d = new Date(s + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** 拉一次指定区间的全部 SKU 页面。失败直接抛，由上层决定换尺寸还是换日期。 */
+async function pullSkuPages(host, start, endExclusive, size, maxPages, log) {
+  const all = [];
+  for (let page = 0; page < maxPages; page++) {
+    const body = {
+      request: {
+        time_descriptor: { start, end: endExclusive },
+        search: {},
+        filter: {},
+        list_control: {
+          rules: [{ direction: 2, field: "sku_gmv" }],
+          pagination: { size, page },
+        },
+      },
+    };
+    const j = await apiPost(await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list"), body);
+    const items = j?.data?.items || [];
+    all.push(...items);
+    if (items.length < size) return all;      // 末页
+  }
+  return all;
+}
+
 async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   // 映射不能缓存：链接一编辑，SKU 归属就可能变，一天变一次也正常。
   // 缓存下来的旧映射会让新商品落进「未识别商品」，那种错很难被发现。
-  // 分页取全量只要几秒，每次都取。
   const { skuCache: prev } = await chrome.storage.local.get({ skuCache: null });
 
   const host = await ensureHost("seller", log);
 
-  // 走 JSON 数据接口分页拉全量。
-  // 之前试过「创建导出任务 → 等文件」那条路：任务列表永远 total_files=0，
-  // 文件路径也取不出二进制，白等三分钟。JSON 接口才是正路。
-  //
-  // 分页尺寸不能贪：真实页面用的是 10，直接给 5000 会返回
-  // code=98001021 call downstream server error（后端聚合超时）。
-  // 这里从 100 开始试，失败就退回 10。
+  // 分页尺寸不能贪：真实页面用的是 10，给 5000 会被后端拒绝。
   const SIZES = [{ size: 100, maxPages: 60 }, { size: 10, maxPages: 400 }];
 
-  for (const { size, maxPages } of SIZES) {
-    const all = [];
-    let page = 0;
-    let ok = true;
+  // 商品分析（洞察）数据是 T+1 的。用户选到"今天"时，结束日期指向了还没聚合的日期，
+  // 后端会回 code=98001021 call downstream server error —— 这不是参数错误，是没数据。
+  // 所以报这个码就把结束日期往前撤一天重试，最多撤 5 天，并明确告诉用户实际截止到哪天。
+  let endEx = endDateExclusive;
+  let all = null;
+  let usedEnd = endEx;
+  let sizeNote = "";
 
-    log(`拉取商品SKU（每页 ${size} 条）…`);
-    for (let i = 0; i < maxPages; i++) {
-      const body = {
-        request: {
-          time_descriptor: { start: startDate, end: endDateExclusive },
-          search: {},
-          filter: {},
-          list_control: {
-            rules: [{ direction: 2, field: "sku_gmv" }],
-            pagination: { size, page },
-          },
-        },
-      };
+  for (let back = 0; back <= 7 && !all; back++) {
+    for (const { size, maxPages } of SIZES) {
       try {
-        const j = await apiPost(await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list"), body);
-        const items = j?.data?.items || [];
-        all.push(...items);
-        log(`第 ${page + 1} 页：${items.length} 条，累计 ${all.length} 条`);
-        if (items.length < size) break;      // 最后一页
-        page += 1;
-      } catch (e) {
-        log(`每页 ${size} 时失败（${e.message}）`);
-        ok = false;
+        log(`拉取商品SKU（区间 ${startDate} ~ ${shiftDate(endEx, -1)}，每页 ${size} 条）…`);
+        const got = await pullSkuPages(host, startDate, endEx, size, maxPages, log);
+        all = got;
+        usedEnd = endEx;
+        sizeNote = `每页 ${size} 条`;
         break;
+      } catch (e) {
+        const msg = String(e.message || e);
+        if (/98001021|downstream/.test(msg)) {
+          // 数据未就绪，换日期比换分页尺寸有用，直接跳出内层
+          log(`该截止日期暂无聚合数据（结束 ${shiftDate(endEx, -1)}），往前撤一天`);
+          if (back === 2) log("提示：可在店铺后台「商品分析」页用同样日期看是否有数据，若那里也是空，就是平台还没结算到那天");
+          break;
+        }
+        log(`每页 ${size} 时失败：${msg}`);
       }
     }
-
-    if (ok && all.length) {
-      const payload = JSON.stringify({ data: { items: all } });
-      const bytes = new TextEncoder().encode(payload);
-      const name = `sku_list_${startDate}_${endDateExclusive}.json`;
-      const saved = await uploadToBridge(name, bytes.buffer);
-      await chrome.storage.local.set({ skuCache: { at: Date.now(), file: saved.path, items: all.length } });
-      if (prev && prev.items != null && prev.items !== all.length) {
-        const delta = all.length - prev.items;
-        log(`映射有变化：${prev.items} → ${all.length} 条（${delta > 0 ? "+" : ""}${delta}）`);
-      }
-      log(`已保存：${saved.path}（${all.length} 条 SKU）`);
-      return { saved: saved.path, items: all.length };
-    }
-    if (!ok && !all.length) continue;      // 换小尺寸再试
-    if (all.length) {
-      const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
-      const saved = await uploadToBridge(`sku_list_${startDate}_${endDateExclusive}.json`, bytes.buffer);
-      log(`部分成功：${all.length} 条（中途失败）`);
-      return { saved: saved.path, items: all.length, partial: true };
-    }
+    if (!all) endEx = shiftDate(endEx, -1);
   }
 
-  throw new Error("商品SKU取数失败：JSON 接口在两种分页尺寸下都没返回数据");
+  if (!all) throw new Error("商品SKU取数失败：连续 7 个截止日期都取不到数据，请确认店铺后台「商品分析」页能正常打开");
+
+  if (!all.length) throw new Error("商品SKU返回 0 条：该区间可能没有任何商品数据");
+
+  const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
+  const name = `sku_list_${startDate}_${shiftDate(usedEnd, -1)}.json`;
+  const saved = await uploadToBridge(name, bytes.buffer);
+  await chrome.storage.local.set({ skuCache: { at: Date.now(), file: saved.path, items: all.length } });
+
+  const realEnd = shiftDate(usedEnd, -1);
+  if (realEnd !== shiftDate(endDateExclusive, -1)) {
+    log(`注意：平台数据截至 ${realEnd}（T+1 延迟），不是你选的 ${shiftDate(endDateExclusive, -1)}`);
+  }
+  if (prev && prev.items != null && prev.items !== all.length) {
+    const delta = all.length - prev.items;
+    log(`映射有变化：${prev.items} → ${all.length} 条（${delta > 0 ? "+" : ""}${delta}）`);
+  }
+  log(`已保存：${saved.path}（${all.length} 条 SKU，${sizeNote}）`);
+  return { saved: saved.path, items: all.length, realEnd };
 }
 
 // ---------------- 任务：联盟佣金 ----------------
@@ -691,30 +709,35 @@ try {
 // 代价：浏览器顶部会出现"正在调试"提示条，抓完自动断开。
 
 let deepTimer = null;
+let deepKeepAlive = null;
 
 async function deepCapture(seconds, log) {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.id) throw new Error("找不到当前标签页");
+  // 只挂当前标签页是不够的：用户很可能在另一个标签页点导出，
+  // 那样什么都看不到。这里把所有 tiktok 域名的标签页都挂上。
+  const tabs = await chrome.tabs.query({
+    url: ["*://*.tiktok.com/*", "*://*.tiktokglobalshop.com/*"],
+  });
+  if (!tabs.length) throw new Error("没有找到 tiktok 标签页，请先打开店铺后台");
 
-  const target = { tabId: tab.id };
-  try {
-    await chrome.debugger.attach(target, "1.3");
-  } catch (e) {
-    throw new Error(`无法挂载调试器：${e.message}（可能已有一个调试会话）`);
+  const ids = new Set();
+  for (const tb of tabs) {
+    try {
+      await chrome.debugger.attach({ tabId: tb.id }, "1.3");
+      await chrome.debugger.sendCommand({ tabId: tb.id }, "Network.enable", {});
+      ids.add(tb.id);
+    } catch (e) {
+      // 已经挂着调试器的标签页会失败，跳过即可
+    }
   }
-
-  try {
-    await chrome.debugger.sendCommand(target, "Network.enable", {});
-  } catch (e) {
-    await chrome.debugger.detach(target).catch(() => {});
-    throw new Error(`开启网络监听失败：${e.message}`);
-  }
+  if (!ids.size) throw new Error("没能挂上任何标签页的调试器（可能已有其它调试会话）");
+  log(`已挂载 ${ids.size} 个标签页，${seconds} 秒内请完成要记录的操作`);
 
   const onEvent = (source, method, params) => {
-    if (source.tabId !== tab.id || method !== "Network.requestWillBeSent") return;
+    if (!ids.has(source.tabId) || method !== "Network.requestWillBeSent") return;
     const req = params.request || {};
     const url = req.url || "";
-    if (!/export|download|task|insight|stat|create|submit/i.test(url)) return;
+    // GET/OPTIONS 是静态资源和预检，记下来只会淹没真正有用的信息
+    if (req.method === "GET" || req.method === "OPTIONS") return;
     recordCapture({
       kind: "debugger",
       url,
@@ -724,23 +747,30 @@ async function deepCapture(seconds, log) {
       ms: 0,
       reqBody: (req.postData || "").slice(0, 4000) || null,
       respSample: null,
-      page: tab.url || "",
+      page: "",
       at: new Date().toISOString(),
     });
   };
 
   chrome.debugger.onEvent.addListener(onEvent);
 
+  // MV3 的 service worker 闲置会被回收，抓包期间要持续喂它一下
+  deepKeepAlive = setInterval(() => {
+    chrome.runtime.getPlatformInfo().catch(() => {});
+  }, 20000);
+
   const stop = async (reason) => {
     chrome.debugger.onEvent.removeListener(onEvent);
     if (deepTimer) { clearTimeout(deepTimer); deepTimer = null; }
-    try { await chrome.debugger.detach(target); } catch (e) { /* 已断开 */ }
-    log(`深度抓包结束（${reason}）`);
+    if (deepKeepAlive) { clearInterval(deepKeepAlive); deepKeepAlive = null; }
+    for (const id of ids) {
+      try { await chrome.debugger.detach({ tabId: id }); } catch (e) { /* 已断开 */ }
+    }
+    log(`深度抓包结束（${reason}），已记录 ${ids.size} 个标签页的请求`);
   };
 
   deepTimer = setTimeout(() => stop(`${seconds} 秒到`), seconds * 1000);
-  log(`深度抓包已开始，${seconds} 秒内请完成要记录的操作`);
-  return { ok: true, tabId: tab.id, seconds };
+  return { ok: true, tabs: ids.size, seconds };
 }
 
 // ---------------- 消息路由 ----------------
