@@ -279,6 +279,20 @@ class Handler(BaseHTTPRequestHandler):
                     break
 
             if proc.returncode == 0 and summary:
+                # 检查用到的导出文件有没有太旧的：广告任务可能还没下来，
+                # 这时会静默沿用上一期文件，数字看着正常但其实是错的。
+                stale = []
+                for label, fname in (summary.get("sources") or {}).items():
+                    f = INBOX_DIR / fname
+                    try:
+                        age_h = (datetime.now().timestamp() - f.stat().st_mtime) / 3600
+                    except OSError:
+                        continue
+                    if age_h > 24:
+                        stale.append(f"{label}：{fname}（{age_h:.0f} 小时前）")
+                if stale:
+                    summary["stale"] = stale
+                    _append_log("[run] 注意：有数据文件超过 24 小时未更新 → " + "；".join(stale))
                 _append_log(
                     f"[run] 完成：GMV {summary.get('gmv')} 净利 {summary.get('net_local')} "
                     f"（人民币 {summary.get('net_cny')}）"

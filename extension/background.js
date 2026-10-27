@@ -808,6 +808,21 @@ async function deepCapture(seconds, log) {
 }
 
 
+// 长任务保活：面板中途关掉后，MV3 的后台进程可能被判定空闲而回收，
+// 任务就断在半路。每 20 秒做一次极轻的 API 调用，让它别睡。
+let taskKeepAlive = null;
+
+function startKeepAlive() {
+  if (taskKeepAlive) return;
+  taskKeepAlive = setInterval(() => {
+    try { chrome.runtime.getPlatformInfo().catch(() => {}); } catch (e) { /* 忽略 */ }
+  }, 20000);
+}
+
+function stopKeepAlive() {
+  if (taskKeepAlive) { clearInterval(taskKeepAlive); taskKeepAlive = null; }
+}
+
 // ---------------- 核算 ----------------
 // 取数完成后让本地桥跑一次核算（Python 子进程），点一下就能看到净利，
 // 不用再切到命令行。核算是同步阻塞的，通常十几秒到一两分钟。
@@ -929,11 +944,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // 任务可能跑好几分钟（广告要等导出、SKU 要撤日期重试）。
     // 等它结束再 sendResponse，面板一关或扩展一重载消息通道就断了，
     // 用户看到的是"没有响应"——所以先回执，任务在后台继续，结果写 storage 让面板自己取。
-    sendResponse({ ok: true, started: true, task: msg.task });
+    // 注意：这里必须 return true（异步响应），否则扩展的后台进程会在回执之后
+    // 被浏览器判定为"空闲"并终止，任务根本没机会跑。
+    const finish = (obj) => { try { sendResponse(obj); } catch (e) { /* 面板已关 */ } };
 
     (async () => {
       const task = msg.task;
       const log = (m) => appendTaskLog(`[${task}] ${m}`);
+      startKeepAlive();
       await chrome.storage.local.set({ running: { task, at: Date.now() } });
       try {
         log(`开始（${msg.range?.startDate} ~ ${msg.range?.to || msg.range?.endDateExclusive}）`);
@@ -945,35 +963,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           lastResult: { task, ok: true, at: Date.now(), result },
         });
         log("完成");
+        finish({ ok: true, started: true, done: true, result });
       } catch (e) {
         const err = String(e.message || e);
         log(`失败：${err}`);
         await chrome.storage.local.set({ lastResult: { task, ok: false, at: Date.now(), error: err } });
+        finish({ ok: false, started: true, error: err });
       } finally {
+        stopKeepAlive();
         // 清掉 running 前留一点余量，避免面板刚好在中间轮询到空
         setTimeout(() => chrome.storage.local.set({ running: null }), 1500);
       }
     })();
-    return false;
+    return true;
   }
 
   if (msg.type === "calcNow") {
-    sendResponse({ ok: true, started: true });
+    const finish = (obj) => { try { sendResponse(obj); } catch (e) { /* 面板已关 */ } };
     (async () => {
       const log = (m) => appendTaskLog(`[calc] ${m}`);
+      startKeepAlive();
       await chrome.storage.local.set({ running: { task: "calc", at: Date.now() } });
       try {
-        await calcNow(msg.range || {}, log, { country: msg.country });
+        const j = await calcNow(msg.range || {}, log, { country: msg.country });
         await chrome.storage.local.set({ lastResult: { task: "calc", ok: true, at: Date.now() } });
+        finish({ ok: true, started: true, done: true, result: j });
       } catch (e) {
         const err = String(e.message || e);
         log(`失败：${err}`);
         await chrome.storage.local.set({ lastResult: { task: "calc", ok: false, at: Date.now(), error: err } });
+        finish({ ok: false, started: true, error: err });
       } finally {
+        stopKeepAlive();
         setTimeout(() => chrome.storage.local.set({ running: null }), 1500);
       }
     })();
-    return false;
+    return true;
   }
 
   return false;

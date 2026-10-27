@@ -275,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
             "orders": res.order_count,
             "lines": res.line_count,
             "issues": len(res.issues),
+            "sources": data.sources,
         }, ensure_ascii=False))
         return 0
 

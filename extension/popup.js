@@ -51,7 +51,11 @@ function renderResult(state) {
       `<span class="lbl">GMV</span> ${fmtNum(calc.gmv)}　` +
       `<span class="lbl">净利率</span> ${margin}%　` +
       `<span class="lbl">商品</span> ${calc.products}　` +
-      `<span class="lbl">异常</span> ${calc.issues}`;
+      `<span class="lbl">异常</span> ${calc.issues}` +
+      (calc.stale && calc.stale.length
+        ? `<br><span style="color:#C0392B">⚠ 有数据文件是旧的，结果可能偏离：</span><br>` +
+          calc.stale.map((x) => `<span style="color:#C0392B">${escapeHtml(x)}</span>`).join("<br>")
+        : "");
     box.title = calc.file || "";
     return;
   }
