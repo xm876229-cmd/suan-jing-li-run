@@ -97,6 +97,11 @@ function runTasks(task, btn) {
 
 chrome.runtime.sendMessage({ type: "state" }, (s) => { if (s) render(s); });
 checkBridge();
+
+// 面板不会自己刷新，这里每秒拉一次状态，否则看着像"数字不动"
+setInterval(() => {
+  chrome.runtime.sendMessage({ type: "state" }, (s) => { if (s) render(s); });
+}, 1200);
 initDates();
 
 chrome.runtime.onMessage.addListener((msg) => {
