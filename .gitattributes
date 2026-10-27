@@ -1,0 +1,31 @@
+# 统一换行符处理，避免 Windows / macOS 协作时整文件 diff
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 代码与文档按文本对比
+*.md   text
+*.py   text
+*.sql  text
+*.json text
+*.yml  text
+*.yaml text
+*.csv  text
+
+# 二进制文件：禁用行尾转换与文本 diff，避免损坏
+*.xlsx binary
+*.xls  binary
+*.xlsm binary
+*.docx binary
+*.doc  binary
+*.pptx binary
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.zip  binary
+
+# Excel 表格是二进制，GitHub 上不做行级 diff（体积小，未启用 LFS）
+*.xlsx -diff

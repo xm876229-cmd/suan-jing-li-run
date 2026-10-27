@@ -1,0 +1,38 @@
+# ===== Excel / Office 临时与锁文件 =====
+~$*
+*.tmp
+*.swp
+*.crdownload
+
+# ===== 计算产出（可随时重新生成，不入库） =====
+output/*
+!output/.gitkeep
+*.out.xlsx
+*.out.csv
+*.log
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 本地环境变量 / 密钥 =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ===== 明确保留（不要删） =====
+# .workbuddy/ 为项目相关数据目录，正常纳入版本管理，不在此忽略
