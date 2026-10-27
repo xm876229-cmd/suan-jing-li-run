@@ -151,6 +151,8 @@ class SkuIndex:
     # 卖家编码可能被多条链接共用（同一编码出现在多个商品下），
     # 这种编码无法靠编码本身定位商品，记下来供报表提示。
     ambiguous: set[str] = field(default_factory=set)
+    # 同一个 SKU ID 指向不同商品：映射表脏数据，需要人工确认
+    conflicts: set[str] = field(default_factory=set)
 
     def __len__(self) -> int:
         return len(self.by_sku_id) + len(self.by_seller_sku)
@@ -361,7 +363,13 @@ def parse_mapping(rows: list[tuple]) -> SkuIndex:
         }
         sid = to_str(r[c_skuid]) if c_skuid is not None and c_skuid < len(r) else ""
         if sid:
-            idx.by_sku_id.setdefault(sid, item)
+            old = idx.by_sku_id.get(sid)
+            if old is None:
+                idx.by_sku_id[sid] = item
+            elif old["product_id"] != item["product_id"]:
+                # SKU ID 是平台唯一的，同一个 ID 指向两个商品只可能是映射表本身脏了
+                # （比如两次导出的数据拼在一起）。留着第一个，但记下来。
+                idx.conflicts.add(sid)
         if c_sku is not None and c_sku < len(r):
             sku = to_str(r[c_sku])
             if sku:
@@ -418,7 +426,11 @@ def parse_mapping_json(path: Path) -> SkuIndex:
         }
         sid = flat.get("skuid", "")
         if sid:
-            idx.by_sku_id.setdefault(sid, item)
+            old = idx.by_sku_id.get(sid)
+            if old is None:
+                idx.by_sku_id[sid] = item
+            elif old["product_id"] != item["product_id"]:
+                idx.conflicts.add(sid)
         ssk = flat.get("sellersku", "") or flat.get("skuname", "") or flat.get("sku", "")
         if ssk:
             bucket = idx.by_seller_sku[ssk]
@@ -594,6 +606,12 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
 
     # 卖家编码可以挂在多条链接下（用户明确说过：编码不唯一，只有 SKU ID 唯一），
     # 这种行无法靠编码判定归属，单独说明，不要混进「真的找不到」里。
+    if sku_index.conflicts:
+        sample = "、".join(sorted(sku_index.conflicts)[:3])
+        issues.append(
+            f"映射表里 {len(sku_index.conflicts)} 个 SKU ID 指向了不同商品（如 {sample}），"
+            f"已取第一条；这属于映射数据冲突，建议重新导一次映射表"
+        )
     if ambiguous_rows:
         issues.append(
             f"{ambiguous_rows} 行的卖家编码同时挂在多条链接下（编码可复用），"
