@@ -616,6 +616,81 @@ function splitDateRange(startStr, endExclusive, chunkDays) {
  * 在不同时期属于不同商品，用「近 7 天」会拿到现在的归属而不是当时的。
  * 所以不缩短区间，改成切段。
  */
+/**
+ * 走「导出任务」接口取 SKU 列表（用户手工导出走的就是这条路）。
+ *
+ * 为什么不只靠 list 接口：list 按商品维度聚合，区间一大下游就超时。
+ * 导出任务则是异步生成文件，对长区间是支持的——用户手工导 15 天一直成功。
+ * 之前这条路走不通是因为下载环节跨源；现在整段都在页面上下文里执行，
+ * 创建、轮询、下载用的都是页面的登录态与同源身份。
+ */
+async function pagePullSkuByExport(host, start, endExclusive) {
+  const exportUrl = await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list/export");
+
+  const r = await runInPage(host, async (expUrl, s, e) => {
+    const body = {
+      request: {
+        time_descriptor: { start: s, end: e },
+        search: {},
+        filter: {},
+        list_control: { rules: [{ direction: 2, field: "sku_gmv" }], pagination: { size: 10, page: 0 } },
+      },
+    };
+
+    let j;
+    try {
+      const resp = await fetch(expUrl, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      j = JSON.parse(await resp.text());
+    } catch (err) {
+      return { error: `创建导出失败：${(err && err.message) || err}` };
+    }
+    if (!j || j.code !== 0) return { error: `创建导出 code=${j && j.code} ${(j && j.message) || ""}`.trim() };
+
+    const file = j.data && j.data.file;
+    if (!file) return { error: "创建成功但没返回文件路径" };
+
+    const fileUrl = file.startsWith("http") ? file : `${location.origin}${file}`;
+
+    // 文件是异步生成的，轮询到能取到二进制为止
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r2) => setTimeout(r2, 2000));
+      try {
+        const fr = await fetch(fileUrl, { credentials: "include" });
+        const ct = fr.headers.get("content-type") || "";
+        if (fr.ok && !ct.includes("json")) {
+          const buf = await fr.arrayBuffer();
+          if (buf.byteLength > 512) {
+            const bytes = new Uint8Array(buf);
+            let bin = "";
+            const CH = 0x8000;
+            for (let k = 0; k < bytes.length; k += CH) {
+              bin += String.fromCharCode.apply(null, bytes.subarray(k, k + CH));
+            }
+            return { b64: btoa(bin), bytes: buf.byteLength };
+          }
+        }
+      } catch (err) { /* 还没生成好，继续等 */ }
+    }
+    return { error: "等了两分多钟仍取不到导出文件" };
+  }, [exportUrl, start, endExclusive]);
+
+  if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
+  if (r.error) throw new Error(r.error);
+  const out = r.result || {};
+  if (out.error) throw new Error(out.error);
+  if (!out.b64) throw new Error("导出接口没有返回文件内容");
+
+  const bin = atob(out.b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return uploadToBridge(`sku_export_${start}_${endExclusive}.xlsx`, bytes.buffer);
+}
+
 async function pagePullSkuRanged(host, start, endExclusive, log) {
   const MAX_TRIES = [3, 1];     // 先按 3 天切，仍失败就按天
 
@@ -675,13 +750,24 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   try {
     all = await pagePullSkuRanged(host, startDate, endDateExclusive, log);
   } catch (e) {
-    log(`取数异常：${(e && e.message) || e}`);
+    log(`list 接口取数异常：${(e && e.message) || e}`);
   }
 
+  // list 接口拿不到就换导出任务：它异步生成文件，对长区间一直有效，
+  // 也是用户手工导出走的那条路。
   if (!all.length) {
+    log("list 接口没取到，改用导出任务…");
+    try {
+      const saved = await pagePullSkuByExport(host, startDate, endDateExclusive);
+      log(`导出文件已保存：${saved.path}（${Math.round((saved.bytes || 0) / 1024)} KB）`);
+      await skSet({ skuCache: { at: Date.now(), file: saved.path, items: null } });
+      return { saved: saved.path, via: "export" };
+    } catch (e) {
+      log(`导出任务也失败：${(e && e.message) || e}`);
+    }
     throw new Error(
-      "商品SKU映射取不到，本轮沿用现有主表，不影响净利计算" +
-      "（需要更新时可手工导 product_sku_list.xlsx 放进 data/mapping/）",
+      "商品SKU两条路都没取到，本轮沿用现有主表，不影响净利计算" +
+      "（也可手工导 product_sku_list.xlsx 放进 data/mapping/）",
     );
   }
 

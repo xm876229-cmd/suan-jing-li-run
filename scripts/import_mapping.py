@@ -76,7 +76,8 @@ def find_sources() -> list[Path]:
             if not f.is_file() or f.suffix.lower() not in SUFFIXES:
                 continue
             low = f.name.lower()
-            if "sku_list" in low or "sku list" in low or "产品" in f.name:
+            if ("sku_list" in low or "sku list" in low or "sku_export" in low
+                    or "产品" in f.name):
                 out.append(f)
     return sorted(out, key=lambda f: f.stat().st_mtime)
 

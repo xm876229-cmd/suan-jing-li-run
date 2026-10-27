@@ -105,15 +105,18 @@ def pick_mapping(explicit: Path | None) -> tuple[Path | None, str]:
         return explicit, "命令行指定"
 
     master = MAPPING_DIR / "master.csv"
-    fresh = []
-    for d in (MAPPING_DIR, INBOX_DIR):
-        if not d.exists():
-            continue
-        for f in d.iterdir():
-            if not f.is_file() or f.suffix.lower() != ".json" or "sku_list" not in f.name.lower():
-                continue
-            if not master.exists() or f.stat().st_mtime > master.stat().st_mtime:
-                fresh.append(f)
+
+    # 候选文件的判断统一交给 import_mapping，避免两处规则不一致
+    # （扩展可能产出 sku_list_*.json，也可能产出 sku_export_*.xlsx）
+    fresh: list[Path] = []
+    try:
+        from scripts.import_mapping import find_sources
+        fresh = [
+            f for f in find_sources()
+            if not master.exists() or f.stat().st_mtime > master.stat().st_mtime
+        ]
+    except Exception:
+        fresh = []
 
     if fresh:
         try:
