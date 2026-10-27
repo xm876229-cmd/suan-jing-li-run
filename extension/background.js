@@ -150,36 +150,69 @@ const PAGE_HINTS = {
   affiliate: "https://affiliate.tiktok.com/affiliate/platform/homepage",
 };
 
+const PARAM_TTL_MS = 6 * 3600 * 1000;   // 参数超过 6 小时视为过期
+
+function isFresh(p) {
+  return !!(p && p._at && Date.now() - p._at < PARAM_TTL_MS);
+}
+
+/** 在已打开的标签里找一个属于该域名族的页面（用于就地刷新，不用新开页） */
+async function findTab(hint) {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: ["*://*.tiktok.com/*", "*://*.tiktokglobalshop.com/*"],
+    });
+    for (const tb of tabs) {
+      try {
+        const h = new URL(tb.url).hostname;
+        if (h.includes(hint)) return { host: h, tabId: tb.id };
+      } catch (e) { /* 忽略坏 URL */ }
+    }
+  } catch (e) { /* 无权限或查询失败 */ }
+  return null;
+}
+
 /**
- * 确保已经学到某个域名的公共参数。
- * 没学到就自己开一个后台标签页，让页面发请求，我们再学——不用用户手工去打开。
+ * 确保某个后台域的公共参数可用。三种获取途径，按成本从低到高：
+ *   1. 已学到的参数且未过期 → 直接用
+ *   2. 已经有该域的标签页 → 刷新它，让页面重新发请求（就地自愈）
+ *   3. 都没有 → 后台开一个该域页面
+ * 这样不管用户当前停在哪个页面，都能拿到可用的登录态与风控参数。
  */
-async function ensureHost(hint, log) {
+async function ensureHost(hint, log, force = false) {
   const read = async () => (await chrome.storage.local.get({ params: {} })).params || {};
   let params = await read();
   let host = pickHost(params, hint);
-  if (host) return host;
+  if (host && isFresh(params[host]) && !force) return host;
+  if (host && force) log("参数可能已过期，尝试刷新页面重新获取…");
+
+  const tab = await findTab(hint);
+  if (tab) {
+    log(`复用已打开的页面刷新参数：${tab.host}`);
+    try { await chrome.tabs.reload(tab.tabId); } catch (e) { /* 忽略 */ }
+    for (let i = 0; i < 12; i++) {
+      await sleep(2000);
+      params = await read();
+      host = pickHost(params, hint);
+      if (host && isFresh(params[host])) { log(`参数已刷新：${host}`); return host; }
+    }
+    if (host) return host;
+  }
 
   const url = PAGE_HINTS[hint];
   if (url) {
-    log(`还没有该后台的参数，正在后台打开页面学习…`);
-    try {
-      await chrome.tabs.create({ url, active: false });
-    } catch (e) {
-      log(`打开页面失败：${e.message}`);
-    }
-    for (let i = 0; i < 14; i++) {
+    log(`后台打开页面获取参数：${url}`);
+    try { await chrome.tabs.create({ url, active: false }); } catch (e) { log(`打开失败：${e.message}`); }
+    for (let i = 0; i < 16; i++) {
       await sleep(2500);
       params = await read();
       host = pickHost(params, hint);
-      if (host) {
-        log(`已学到 ${host} 的参数`);
-        return host;
-      }
+      if (host) { log(`已学到 ${host} 的参数`); return host; }
     }
   }
+
   const label = hint === "affiliate" ? "达人联盟后台" : "卖家后台";
-  throw new Error(`学不到${label}的参数：请手动打开一次${label}页面后重试`);
+  throw new Error(`拿不到${label}的参数：请手动打开一次${label}页面后重试`);
 }
 
 // ---------------- 请求封装 ----------------
@@ -447,11 +480,13 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
 
 // ---------------- 任务：广告（只拉已完成的任务） ----------------
 
-async function runAds({}, log) {
+async function runAds(range, log, opts = {}) {
+  const quick = !!opts.quick;
   const host = await ensureHost("seller", log);
 
   log("查询广告导出任务…");
-  for (let i = 0; i < 60; i++) {
+  const maxRounds = quick ? 1 : 60;
+  for (let i = 0; i < maxRounds; i++) {
     const r = await apiPost(
       await buildUrl(host, "/oec_ads/shopping/v1/oec/stat/download_task/query"),
       { download_scene: "offline_export" }
@@ -463,6 +498,10 @@ async function runAds({}, log) {
       return downloadAndUpload(done.url, `${done.file_name || "creative data"}.xlsx`, log);
     }
     const running = tasks.find((t) => t && t.task_status && t.task_status !== "FINISHED");
+    if (quick) {
+      log(running ? `广告任务进行中（${running.task_status}），稍后可单独点「广告」拉取` : "暂无已完成的广告导出任务");
+      return { skipped: true };
+    }
     log(`任务状态：${running ? running.task_status : "无进行中的任务"}（${(i + 1) * 10}s）`);
     await sleep(10000);
   }
@@ -471,17 +510,21 @@ async function runAds({}, log) {
 
 // ---------------- 任务调度 ----------------
 
-async function runTask(task, range, log) {
-  if (task === "orders") return runOrders(range, log);
-  if (task === "sku") return runSkuStats(range, log);
-  if (task === "affiliate") return runAffiliate(range, log);
-  if (task === "ads") return runAds(range, log);
+const TASK_IMPL = {
+  orders: runOrders,
+  sku: runSkuStats,
+  affiliate: runAffiliate,
+  ads: runAds,
+};
+const TASK_HINT = { orders: "seller", sku: "seller", affiliate: "affiliate", ads: "seller" };
+
+async function runTask(task, range, log, opts = {}) {
   if (task === "all") {
     const out = {};
-    for (const t of ["orders", "sku", "affiliate"]) {
+    for (const t of ["orders", "sku", "affiliate", "ads"]) {
       try {
         log(`—— 开始：${t} ——`);
-        out[t] = await runTask(t, range, log);
+        out[t] = await runTask(t, range, log, t === "ads" ? { quick: true } : {});
       } catch (e) {
         log(`—— ${t} 失败：${e.message}`);
         out[t] = { error: String(e.message || e) };
@@ -489,7 +532,26 @@ async function runTask(task, range, log) {
     }
     return out;
   }
-  throw new Error(`暂不支持的取数任务：${task}`);
+
+  const impl = TASK_IMPL[task];
+  if (!impl) throw new Error(`暂不支持的取数任务：${task}`);
+
+  try {
+    return await impl(range, log, opts);
+  } catch (e) {
+    const msg = String(e.message || e);
+    // 登录态或风控参数过期是最常见的失败原因：自愈一次再试，别直接甩给用户
+    if (/40[123]|风控|登录|code=|参数|学不到/.test(msg)) {
+      log("可能登录态或风控参数失效，自动刷新页面后重试一次…");
+      try {
+        await ensureHost(TASK_HINT[task], log, true);
+      } catch (e2) {
+        throw new Error(`${msg}（自愈失败：${e2.message}）`);
+      }
+      return await impl(range, log, opts);
+    }
+    throw e;
+  }
 }
 
 function bridgeLog(msg) {
