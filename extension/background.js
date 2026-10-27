@@ -38,6 +38,7 @@ try {
 // ReferenceError: appendTaskLog is not defined，
 // 而且抛错位置在异步链的最外层，表现为「点了没反应、日志空白」。
 
+const HEADER_KEY = "headerParams";
 const LOG_KEY = "taskLogs";
 const LOG_MAX = 300;
 
@@ -111,7 +112,12 @@ function recordCapture(payload) {
   stats.captured += 1;
   if (buffer.length > MAX_BUFFER) buffer.splice(0, buffer.length - MAX_BUFFER);
   chrome.storage.local.set({ stats });
-  if (payload.url) learnParams(payload.url);
+  if (payload.url) {
+    learnParams(payload.url);
+    try {
+      learnHeaders(new URL(payload.url).hostname, payload.reqHeaders);
+    } catch (e) { /* URL 不合法就跳过 */ }
+  }
   flush();
 }
 
@@ -174,6 +180,24 @@ const LEARN_KEYS = [
   "browser_online", "timezone_name", "X-Tts-Oec-Bsid", "aadvid", "shop_region",
   "user_language", "device_id",
 ];
+
+/** 学一份请求头。真实请求里带的 x-* 头（风控、追踪、会话标识）常常是
+ *  接口判定的必要条件，缺了会返回含糊的 downstream server error。 */
+async function learnHeaders(host, reqHeaders) {
+  if (!host || !reqHeaders) return;
+  const clean = {};
+  for (const [k, v] of Object.entries(reqHeaders)) {
+    if (!k || v == null) continue;
+    const key = k.toLowerCase();
+    if (key === "content-type" || key === "cookie" || key === "authorization") continue;
+    clean[key] = String(v);
+  }
+  if (!Object.keys(clean).length) return;
+  const cur = await skGet({ [HEADER_KEY]: {} });
+  const all = cur[HEADER_KEY] || {};
+  all[host] = { ...(all[host] || {}), ...clean, _at: Date.now() };
+  await skSet({ [HEADER_KEY]: all });
+}
 
 async function learnParams(url) {
   let u;
@@ -279,10 +303,20 @@ async function ensureHost(hint, log, force = false) {
 // ---------------- 请求封装 ----------------
 
 async function apiPost(url, body) {
+  let host = "";
+  try { host = new URL(url).hostname; } catch (e) { /* 忽略 */ }
+  const { [HEADER_KEY]: hp = {} } = await skGet({ [HEADER_KEY]: {} });
+  const learned = (hp[host] || {});
+  const headers = { "Content-Type": "application/json" };
+  for (const [k, v] of Object.entries(learned)) {
+    if (k.startsWith("_")) continue;
+    headers[k] = v;
+  }
+
   const resp = await fetch(url, {
     method: "POST",
     credentials: "include",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
   const text = await resp.text();
@@ -580,8 +614,10 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
   const taskId = created?.data?.task_id || "";
   log(`任务已创建：${taskId || "(无 task_id)"}`);
 
-  // 轮询任务列表，找到可下载的地址
-  for (let i = 0; i < 40; i++) {
+  // 轮询任务列表，找到可下载的地址。
+  // 原来是 40 次×5 秒=200 秒，实测每次都等满，把整轮拖到四分钟。
+  // 现在 12 次=60 秒封顶；还没好就交给后台守望，不阻塞核算。
+  for (let i = 0; i < 12; i++) {
     await sleep(5000);
     const list = await apiPost(
       await buildUrl(host, "/api/v1/oec/affiliate/compass/export_task/list"),
@@ -591,9 +627,12 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
     if (url) {
       return downloadAndUpload(url, `Transaction_Analysis_${startDate}_${endDateExclusive}.xlsx`, log);
     }
-    log(`等待任务完成…（${(i + 1) * 5}s）`);
+    if (i === 2 || i === 11) {
+      // 打一次响应结构：字段名变了要能看出来，别再靠猜
+      log(`任务列表暂无下载地址（第 ${i + 1} 次），响应片段：${JSON.stringify(list).slice(0, 180)}`);
+    }
   }
-  throw new Error("等了约 3 分钟仍没有可下载地址（接口结构可能变了）");
+  throw new Error("联盟佣金 60 秒内没生成下载地址，本轮跳过（可用上一期文件或稍后重试）");
 }
 
 // ---------------- 任务：广告（只拉已完成的任务） ----------------
@@ -620,16 +659,26 @@ async function pullAdsTasks(host, log) {
   const tasks = r?.offline_tasks || [];
   const done = await getAdDone();
 
-  const ready = tasks.filter((x) => x && x.url && x.download_id && !done.includes(x.download_id));
+  // 同一个文件名往往对应多条任务记录（重复点导出、或平台保留历史），
+  // 全下会得到 11 份一模一样的 968KB 文件。按文件名去重，只取最新一条。
+  const byName = new Map();
+  for (const x of tasks) {
+    if (!x || !x.url || !x.download_id || done.includes(x.download_id)) continue;
+    const key = x.file_name || x.download_id;
+    byName.set(key, x);            // 后出现的覆盖前面的，即取最新
+  }
+  const ready = Array.from(byName.values());
   const running = tasks.filter((x) => x && x.task_status && x.task_status !== "FINISHED");
 
   const saved = [];
   for (const tk of ready) {
+    const key = tk.file_name || tk.download_id;
     const name = (tk.file_name || "creative data").replace(/[\\/:*?"<>|]/g, "_") + ".xlsx";
     log(`下载广告导出：${name}`);
     const one = await downloadAndUpload(tk.url, name, log);
     saved.push({ ...one, id: tk.download_id });
-    await markAdDone([tk.download_id]);
+    // 同名的所有任务记录一起标记，否则下次又会挨个下一遍
+    await markAdDone(tasks.filter((x) => (x.file_name || x.download_id) === key).map((x) => x.download_id));
   }
   return { saved, running: running.length, total: tasks.length, ready: ready.length };
 }

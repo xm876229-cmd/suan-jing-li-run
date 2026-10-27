@@ -53,6 +53,24 @@
   const interesting = (url) =>
     /\/api\/|\/v\d+\/|export|report|order|product|finance|settlement|affiliate|creator|ads|download|insight/i.test(url);
 
+  /** 只留可能影响接口判定的头：x- 开头的自定义头（风控、追踪、会话）和 content-type。
+   *  Cookie / Authorization 这类敏感的不要——它们由浏览器按域自动带上，不需要重放。 */
+  const KEEP_HEADER = /^x-|^content-type$/i;
+  function pickHeaders(h) {
+    const out = {};
+    try {
+      if (!h) return out;
+      if (typeof h.forEach === "function" && !Array.isArray(h)) {
+        h.forEach((v, k) => { if (KEEP_HEADER.test(k)) out[k.toLowerCase()] = String(v).slice(0, 300); });
+      } else if (Array.isArray(h)) {
+        for (const [k, v] of h) if (KEEP_HEADER.test(k)) out[k.toLowerCase()] = String(v).slice(0, 300);
+      } else if (typeof h === "object") {
+        for (const k of Object.keys(h)) if (KEEP_HEADER.test(k)) out[k.toLowerCase()] = String(h[k]).slice(0, 300);
+      }
+    } catch (e) { /* 跨域限制等，忽略 */ }
+    return out;
+  }
+
   // ---- fetch ----
   const origFetch = window.fetch;
   window.fetch = function (input, init) {
@@ -60,6 +78,8 @@
     const url = typeof input === "string" ? input : (input && input.url) || "";
     const method = (init && init.method) || (isReq ? input.method : "GET") || "GET";
     const started = Date.now();
+    let reqHeaders = pickHeaders(init && init.headers);
+    if (isReq && Object.keys(reqHeaders).length === 0) reqHeaders = pickHeaders(input.headers);
 
     // 同步抓一份 body：Request 对象要 clone 后异步读，不能阻塞原请求
     let bodyPromise = Promise.resolve(serializeBody(init && init.body));
@@ -82,7 +102,7 @@
         emit({
           kind: "fetch", url, method, status: resp.status,
           contentType: ct, ms: Date.now() - started,
-          reqBody, respSample: sample,
+          reqBody, respSample: sample, reqHeaders,
           page: location.href, at: new Date().toISOString(),
         });
       }
@@ -93,9 +113,16 @@
   // ---- XMLHttpRequest ----
   const origOpen = XMLHttpRequest.prototype.open;
   const origSend = XMLHttpRequest.prototype.send;
+  const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
   XMLHttpRequest.prototype.open = function (method, url) {
-    this.__cap = { method, url, started: Date.now() };
+    this.__cap = { method, url, started: Date.now(), headers: {} };
     return origOpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+    try {
+      if (this.__cap && KEEP_HEADER.test(k)) this.__cap.headers[String(k).toLowerCase()] = String(v).slice(0, 300);
+    } catch (e) { /* 忽略 */ }
+    return origSetHeader.apply(this, arguments);
   };
   XMLHttpRequest.prototype.send = function (body) {
     const cap = this.__cap;
@@ -111,7 +138,7 @@
           kind: "xhr", url: cap.url, method: cap.method, status: this.status,
           contentType: this.getResponseHeader("content-type"),
           ms: Date.now() - cap.started,
-          reqBody, respSample: sample,
+          reqBody, respSample: sample, reqHeaders: cap.headers || {},
           page: location.href, at: new Date().toISOString(),
         });
       });
