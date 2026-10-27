@@ -48,3 +48,6 @@ data/capture/task.log
 
 data/costs/*
 !data/costs/README.md
+
+data/mapping/*
+!data/mapping/README.md

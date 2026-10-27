@@ -88,6 +88,51 @@ def pick_costs(explicit: Path | None) -> tuple[Path | None, str]:
     return None, "未找到 data/costs 目录"
 
 
+
+MAPPING_DIR = ROOT / "data" / "mapping"
+INBOX_DIR = ROOT / "data" / "exports" / "_inbox"
+
+
+def pick_mapping(explicit: Path | None) -> tuple[Path | None, str]:
+    """决定这次用哪份 SKU→商品 映射。
+
+    优先用累积主表 data/mapping/master.csv。
+    链接一编辑，SKU 归属就可能变，所以每次取数都会产生新的 sku_list_*.json；
+    这里把比主表更新的那些合并进去（增量，幂等），再交主表去算。
+    这样新商品当天就能算对，老 SKU 因为链接改过而消失的也不会丢归属。
+    """
+    if explicit:
+        return explicit, "命令行指定"
+
+    master = MAPPING_DIR / "master.csv"
+    fresh = []
+    for d in (MAPPING_DIR, INBOX_DIR):
+        if not d.exists():
+            continue
+        for f in d.iterdir():
+            if not f.is_file() or f.suffix.lower() != ".json" or "sku_list" not in f.name.lower():
+                continue
+            if not master.exists() or f.stat().st_mtime > master.stat().st_mtime:
+                fresh.append(f)
+
+    if fresh:
+        try:
+            from scripts.import_mapping import main as import_main  # 延迟导入，避免循环
+            print(f"映射有更新，合并进主表：{'、'.join(f.name for f in fresh)}")
+            import_main([str(f) for f in fresh])
+        except Exception as e:
+            print(f"⚠ 映射合并失败：{e}")
+
+    if master.exists():
+        try:
+            with master.open("r", encoding="utf-8-sig") as f:
+                n = max(0, sum(1 for _ in f) - 1)
+        except OSError:
+            n = 0
+        return master, f"累积主表（{n} 条）"
+    return None, "未建累积主表（本次用导出目录里的映射表，链接改过后可能缺老 SKU 归属）"
+
+
 def load_stores(path: Path) -> dict:
     if not path.exists():
         return {"stores": [], "defaults": {}}
@@ -156,6 +201,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"⚠ {costs_note}，成本将按 0 计，净利会偏高")
 
+    map_path, map_note = pick_mapping(args.mapping)
+    if map_path:
+        print(f"映射表：{map_path.name}（{map_note}）")
+    else:
+        print(f"⚠ {map_note}")
+
     # 读数据
     if args.workbook:
         if not args.workbook.exists():
@@ -168,13 +219,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"找不到订单文件：{args.orders}")
             return 2
         data = load_from_files(args.orders, args.ads, args.commissions,
-                               args.mapping, costs_path, params.usd_to_local)
+                               map_path, costs_path, params.usd_to_local)
         source = "、".join(data.sources.values()) or args.orders.name
     else:
         if not args.dir.exists():
             print(f"找不到目录：{args.dir}")
             return 2
-        data = load_from_dir(args.dir, costs_path, params.usd_to_local)
+        data = load_from_dir(args.dir, costs_path, params.usd_to_local, map_path)
         source = args.dir.name
 
     if not data.orders:
@@ -202,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         "订单数": str(res.order_count),
         "店铺": store_note or "-",
         "成本表": f"{costs_path.name}（{costs_note}）" if costs_path else "未提供，成本按 0 计",
+        "映射表": f"{map_path.name}（{map_note}）" if map_path else "未提供",
         "生成时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     path = build_report(res, res.lines, out, switches, subtitle, extra)

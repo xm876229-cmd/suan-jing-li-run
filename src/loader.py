@@ -147,6 +147,21 @@ class SkuIndex:
     def __len__(self) -> int:
         return len(self.by_sku_id) + len(self.by_seller_sku)
 
+    def merge(self, other: "SkuIndex") -> "SkuIndex":
+        """把 other 里本索引没有的条目补进来（self 优先）。
+
+        用途：累积主表 + 本次导出目录里的映射表合并使用。
+        主表保证老 SKU 不丢，目录表保证本次抓取完整——任一方缺失都不会算错。
+        """
+        for sid, item in other.by_sku_id.items():
+            self.by_sku_id.setdefault(sid, item)
+        for sku, items in other.by_seller_sku.items():
+            bucket = self.by_seller_sku[sku]
+            for it in items:
+                if it not in bucket:
+                    bucket.append(it)
+        return self
+
     def lookup(self, sku_id: str, seller_sku: str, product_name: str) -> tuple[str, str]:
         hit = self.by_sku_id.get(sku_id) if sku_id else None
         if hit:
@@ -660,7 +675,8 @@ def classify_rows(rows: list[tuple]) -> Optional[str]:
 
 
 def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
-                  usd_to_local: float = 1.0) -> RawData:
+                  usd_to_local: float = 1.0,
+                  mapping_file: Optional[Path] = None) -> RawData:
     """从目录自动识别四类文件：逐张读表头判断类型，同名类型取最新的一张。"""
     folder = Path(folder)
     buckets: dict[str, list[tuple[Path, list[tuple]]]] = {
@@ -711,17 +727,35 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
 
     sku_index = SkuIndex()
     m = newest("mapping")
-    # 表格映射（人工导的链接资料）与 JSON 映射（扩展抓的）都认，取更新的那份
+    # 映射主表优先：它是历次抓取累积合并出来的，链接改绑后老 SKU 也不会丢。
+    # 单次抓下来的那份只反映"现在"，用它会让历史订单里消失的 SKU 归入未识别。
+    # 映射来源可以有多份，全部合并（主表优先），而不是挑一份用：
+    # 主表保证链接改过后老 SKU 不丢归属，目录里的表保证本次抓取完整。
+    parts: list[str] = []
+    if mapping_file and Path(mapping_file).exists():
+        midx = parse_mapping(read_table(Path(mapping_file)))
+        if len(midx):
+            sku_index.merge(midx)
+            parts.append(f"{Path(mapping_file).name}（累积主表）")
+        else:
+            issues.append(f"映射主表里没识别出 SKU ID / Product ID 列：{Path(mapping_file).name}")
+
+    m = newest("mapping")
     if m:
-        sku_index = parse_mapping(m[1])
-        sources["映射"] = m[0].name
-        if not len(sku_index):
+        tidx = parse_mapping(m[1])
+        if len(tidx):
+            sku_index.merge(tidx)
+            parts.append(m[0].name)
+        else:
             issues.append(f"映射表里没识别出 SKU ID / Product ID 列：{m[0].name}")
+
     if json_maps:
-        jf, jidx = max(json_maps, key=lambda x: x[0].stat().st_mtime)
-        if not m or jf.stat().st_mtime > m[0].stat().st_mtime:
-            sku_index = jidx
-            sources["映射"] = jf.name
+        for jf, jidx in sorted(json_maps, key=lambda x: x[0].stat().st_mtime):
+            sku_index.merge(jidx)
+            parts.append(jf.name)
+
+    if parts:
+        sources["映射"] = " + ".join(parts)
 
     costs: dict[str, float] = {}
     if costs_file and Path(costs_file).exists():

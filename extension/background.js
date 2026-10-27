@@ -359,16 +359,10 @@ function dstr(d) {
 // ---------------- 任务：商品 SKU 统计 ----------------
 
 async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
-  // 商品SKU 的用途是「SKU ID → 商品ID」映射，一个月才可能变一次。
-  // 一键取全部时如果缓存还新，直接跳过，省掉几十页请求。
-  // 单独点「商品 SKU」按钮视为强制更新。
-  const SKU_TTL = 30 * 86400000;
-  const { skuCache } = await chrome.storage.local.get({ skuCache: null });
-  if (!opts.force && skuCache && Date.now() - skuCache.at < SKU_TTL) {
-    const days = Math.floor((Date.now() - skuCache.at) / 86400000);
-    log(`映射已是最新（${days} 天前取过，${skuCache.items} 条），跳过。要更新请单独点「商品 SKU」`);
-    return { cached: true, saved: skuCache.file, items: skuCache.items };
-  }
+  // 映射不能缓存：链接一编辑，SKU 归属就可能变，一天变一次也正常。
+  // 缓存下来的旧映射会让新商品落进「未识别商品」，那种错很难被发现。
+  // 分页取全量只要几秒，每次都取。
+  const { skuCache: prev } = await chrome.storage.local.get({ skuCache: null });
 
   const host = await ensureHost("seller", log);
 
@@ -419,7 +413,11 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
       const name = `sku_list_${startDate}_${endDateExclusive}.json`;
       const saved = await uploadToBridge(name, bytes.buffer);
       await chrome.storage.local.set({ skuCache: { at: Date.now(), file: saved.path, items: all.length } });
-      log(`已保存：${saved.path}（${all.length} 条 SKU），30 天内不再重复取`);
+      if (prev && prev.items != null && prev.items !== all.length) {
+        const delta = all.length - prev.items;
+        log(`映射有变化：${prev.items} → ${all.length} 条（${delta > 0 ? "+" : ""}${delta}）`);
+      }
+      log(`已保存：${saved.path}（${all.length} 条 SKU）`);
       return { saved: saved.path, items: all.length };
     }
     if (!ok && !all.length) continue;      // 换小尺寸再试

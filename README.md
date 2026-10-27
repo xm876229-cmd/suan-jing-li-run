@@ -64,6 +64,24 @@ python -m scripts.import_costs "data/costs/成本表.xlsx"
 - 第一次没有主表时，程序会自动把目录里最新的表导入建表
 - 成本数据目录已 gitignore，不会上传
 
+
+### SKU→商品 映射：同样是主表 + 变更流水
+
+映射**不能**当成"一个月才变一次"的静态表。链接一编辑，SKU 归属就可能变，频率高时一天一次。
+所以不做缓存，每次取数都拉全量，并且增量合并进主表：
+
+```bash
+python -m scripts.import_mapping                    # 合并 _inbox 里所有 sku_list_*.json
+```
+
+- `data/mapping/master.csv`：累积主表，新 SKU 追加、老 SKU 永远保留
+- `data/mapping/history.jsonl`：新增 / **改绑**（SKU 换到另一个商品）都有流水
+- 主表与导出目录里的映射表**合并使用**（主表优先），任一方不完整都不会算错
+- `src/cli.py` 发现更新的 `sku_list_*.json` 会自动合并，平时不用手动跑
+
+> 为什么必须累积：只用最新那份时，链接改过之后老 SKU 会消失，历史订单里那些行就找不到商品ID，
+> 整片归进「未识别商品」——报表看起来正常，实际少算了那个商品的全部净利。
+
 ### 新增国家不用改代码
 
 在 `config/rates.json` 的 `countries` 下加一段就行，键名与 `--country` 一致：
