@@ -7,6 +7,12 @@
 # ===== 计算产出（可随时重新生成，不入库） =====
 output/*
 !output/.gitkeep
+
+# ===== 抓包原始数据（含店铺数据，不入库） =====
+data/capture/*.jsonl
+data/exports/*
+!data/.gitkeep
+!data/capture/endpoints.json
 *.out.xlsx
 *.out.csv
 *.log

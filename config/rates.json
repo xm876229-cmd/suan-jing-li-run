@@ -1,0 +1,56 @@
+{
+  "_comment": "国家费率参数。cny_to_local = 1 人民币兑本地货币；usd_to_local = 1 美金兑本地货币。费率为占各自计算基数的比例。",
+  "_bases": {
+    "dispatch_fee": "按订单数（不是按金额）",
+    "platform_commission": "按 GMV",
+    "tx_fee": "按买家实付",
+    "cashback": "按 GMV",
+    "super_coupon": "按 GMV",
+    "growth_fee": "按 GMV",
+    "logistics": "按 GMV（比例法，非实际运费）"
+  },
+  "countries": {
+    "马来西亚": {
+      "cny_to_local": 0.61,
+      "usd_to_local": 4.04,
+      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_local": 2.37,
+      "platform_commission": 0.081,
+      "tx_fee": 0.0378,
+      "cashback": 0.0486,
+      "super_coupon": 0.0108,
+      "growth_fee": 0.0,
+      "logistics": 0.0
+    },
+    "菲律宾": {
+      "cny_to_local": 9.3,
+      "usd_to_local": 62.48,
+      "dispatch_fee_cny": 2.0,
+      "dispatch_fee_local": 23.6,
+      "platform_commission": 0.062,
+      "tx_fee": 0.0224,
+      "cashback": 0.0,
+      "super_coupon": 0.0,
+      "growth_fee": 0.01,
+      "logistics": 0.055
+    },
+    "泰国": {
+      "cny_to_local": 4.91,
+      "usd_to_local": 33.0,
+      "dispatch_fee_cny": 2.0,
+      "dispatch_fee_local": 9.82,
+      "platform_commission": 0.0,
+      "tx_fee": 0.0,
+      "cashback": 0.0,
+      "super_coupon": 0.0,
+      "growth_fee": 0.0,
+      "logistics": 0.0
+    }
+  },
+  "switches": {
+    "_comment": "与原表 AE2 / 超级优惠券开关保持一致。super_coupon_enabled=false 时超级优惠券按 0 计（原表公式 ×0）。allocation_paid: equal=按行数平分（与原表一致）；proportional=按行 GMV 占比（更准，但与人工表会有细微差异）。",
+    "super_coupon_enabled": false,
+    "only_paid_orders": true,
+    "allocation_paid": "equal"
+  }
+}

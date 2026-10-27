@@ -1,0 +1,6 @@
+{
+  "updatedAt": null,
+  "endpointCount": 0,
+  "endpoints": {},
+  "_note": "此文件由 python -m bridge.server 自动生成：浏览器扩展抓到的接口会汇总到这里。跑过一次抓包后本文件会被覆盖。"
+}
