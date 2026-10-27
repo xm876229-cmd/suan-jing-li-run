@@ -311,7 +311,10 @@ def compute(data: RawData, params: Params, switches: Switches,
     products = sorted(buckets.values(), key=lambda x: x.gmv, reverse=True)
 
     if no_pid:
-        issues.append(f"{no_pid} 行订单无法确定商品ID，已归入「未识别商品」，请检查链接资料是否缺 SKU")
+        issues.append(
+            f"{no_pid} 行订单无法确定商品归属，已归入「无ID」照常计入合计"
+            f"（卖家编码可在多条链接间复用，只有 SKU ID 唯一）"
+        )
     if missing_cost_lines:
         issues.append(f"{missing_cost_lines} 行订单缺成本，按 0 计，这些行的净利会偏高")
     if untimed:

@@ -148,6 +148,9 @@ class SkuIndex:
     """
     by_sku_id: dict[str, dict] = field(default_factory=dict)
     by_seller_sku: dict[str, list[dict]] = field(default_factory=lambda: defaultdict(list))
+    # 卖家编码可能被多条链接共用（同一编码出现在多个商品下），
+    # 这种编码无法靠编码本身定位商品，记下来供报表提示。
+    ambiguous: set[str] = field(default_factory=set)
 
     def __len__(self) -> int:
         return len(self.by_sku_id) + len(self.by_seller_sku)
@@ -199,12 +202,19 @@ class SkuIndex:
             return "", ""
         if len(cands) == 1:
             return cands[0]["product_id"], cands[0]["style_code"]
+        # 走到这里说明：卖家编码相同，但对应了多个商品。
+        # 业务上卖家编码是可以复用的（同一编码挂在多条链接下常见），
+        # 只有 SKU ID 才是唯一的。所以这种情况绝不能默认取第一个——
+        # 取错会把这条链接的 GMV 与全部费用记到另一条链接上，报表表面还正常。
+        # 只有商品名能唯一确定时才用，否则留空（由报表归入「无ID」）。
         norm = re.sub(r"\s+", "", product_name or "").lower()
         if norm:
-            for c in cands:
-                if re.sub(r"\s+", "", c["product_name"]).lower() == norm:
-                    return c["product_id"], c["style_code"]
-        return cands[0]["product_id"], cands[0]["style_code"]
+            hits = [c for c in cands
+                    if re.sub(r"\s+", "", c["product_name"]).lower() == norm]
+            if len(hits) == 1:
+                return hits[0]["product_id"], hits[0]["style_code"]
+        self.ambiguous.add(seller_sku)
+        return "", ""
 
 
 MULTIPACK_RE = re.compile(r"^(?P<base>.+?)[-\s](?P<n>\d+)\s*[Pp][Cc][Ss]$")
@@ -566,6 +576,7 @@ def resolve_cost(sku: str, costs: dict[str, float]) -> tuple[Optional[float], st
 
 def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list[str]) -> None:
     unresolved = Counter()
+    ambiguous_rows = 0
     styles_by_product: dict[str, set[str]] = defaultdict(set)
     for l in lines:
         if l.product_id:
@@ -574,11 +585,24 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
             pid, style = sku_index.lookup(l.sku_id, l.seller_sku, l.product_name)
         l.product_id, l.style_codes = pid, style
         if not pid:
-            unresolved[l.seller_sku or l.sku_id] += 1
+            if l.seller_sku and l.seller_sku in sku_index.ambiguous:
+                ambiguous_rows += 1
+            else:
+                unresolved[l.seller_sku or l.sku_id] += 1
         elif style:
             styles_by_product[pid].add(style)
-    for sku, n in unresolved.most_common():
-        issues.append(f"「{sku}」找不到商品ID（{n} 行），已归入「未识别商品」")
+
+    # 卖家编码可以挂在多条链接下（用户明确说过：编码不唯一，只有 SKU ID 唯一），
+    # 这种行无法靠编码判定归属，单独说明，不要混进「真的找不到」里。
+    if ambiguous_rows:
+        issues.append(
+            f"{ambiguous_rows} 行的卖家编码同时挂在多条链接下（编码可复用），"
+            f"已归入「无ID」；有 SKU ID 的行不受影响"
+        )
+    for sku, n in unresolved.most_common(8):
+        issues.append(f"「{sku}」找不到商品ID（{n} 行），已归入「无ID」")
+    if len(unresolved) > 8:
+        issues.append(f"另有 {len(unresolved) - 8} 个 SKU 同样找不到商品ID，未逐条列出")
     for l in lines:
         if l.product_id and not l.style_codes:
             l.style_codes = "/".join(sorted(styles_by_product.get(l.product_id, [])))
