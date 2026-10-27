@@ -215,6 +215,17 @@ function runTasks(task, btn) {
   // 双通道：先把任务写进扩展存储（后台每分钟会来领），再发消息抢先执行。
   // 消息这条偶尔会断——断的时候存储那条兜住，任务照样跑。
   const force = task === "sku";
+
+  // 第三条通道：直接投到本地桥。它走普通 HTTP，不依赖扩展的消息机制，
+  // 后台每 1 分钟来取一次。
+  try {
+    fetch("http://127.0.0.1:8765/pending", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task, range, force, withCalc: true, at: Date.now() }),
+    }).catch(() => {});
+  } catch (e) { /* 桥没开就算了 */ }
+
   try {
     chrome.storage.local.set(
       { pendingTask: { task, range, force, at: Date.now() } },

@@ -9,6 +9,28 @@
 */
 
 const BRIDGE = "http://127.0.0.1:8765";
+
+// 后台脚本里的异常默认只出现在开发者工具的 console 里，用户看不到，
+// 排查时等于黑箱。这里把所有未捕获错误直接送到本地桥的日志。
+function reportCrash(tag, detail) {
+  try {
+    fetch(`${BRIDGE}/log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ msg: `[崩溃] ${tag}：${detail}` }),
+    }).catch(() => {});
+  } catch (e) { /* 连桥都发不出去，只能放弃 */ }
+}
+
+try {
+  self.addEventListener("error", (e) => {
+    reportCrash("未捕获异常", `${e.message || ""} @${e.filename || ""}:${e.lineno || ""}`);
+  });
+  self.addEventListener("unhandledrejection", (e) => {
+    const r = e.reason;
+    reportCrash("未处理的 Promise 拒绝", (r && (r.stack || r.message)) || String(r));
+  });
+} catch (e) { /* 环境不支持，忽略 */ }
 const MAX_BUFFER = 500;
 
 let buffer = [];
@@ -234,6 +256,29 @@ async function apiPost(url, body) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** storage 读写统一走回调包装。
+ *  老版 Chromium 的 chrome.storage 只有回调形式，直接 await 会拿到 undefined，
+ *  写法上不报错但行为不对——这里统一收口。 */
+function skGet(defaults) {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.get(defaults, (v) => resolve(v || defaults));
+    } catch (e) {
+      resolve(defaults);
+    }
+  });
+}
+
+function skSet(obj) {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.set(obj, () => resolve(true));
+    } catch (e) {
+      resolve(false);
+    }
+  });
+}
 
 async function uploadToBridge(name, arrayBuffer) {
   // 分块 base64，避免一次拼串把内存打爆
@@ -862,25 +907,25 @@ async function calcNow(range, log, opts = {}) {
 
 /** 真正执行一个任务：写运行标记、保活、跑、落结果。两条触发路径共用。 */
 async function executeTask(task, range, log, opts = {}) {
-  startKeepAlive();
-  await chrome.storage.local.set({ running: { task, at: Date.now() } });
   try {
+    startKeepAlive();
+    await skSet({ running: { task, at: Date.now() } });
     log(`开始（${range?.startDate} ~ ${range?.to || range?.endDateExclusive}）`);
     const withCalc = opts.withCalc !== false && task !== "ads";
     const result = withCalc
       ? await runTaskThenCalc(task, range || {}, log, opts)
       : await runTask(task, range || {}, log, opts);
-    await chrome.storage.local.set({ lastResult: { task, ok: true, at: Date.now(), result } });
+    await skSet({ lastResult: { task, ok: true, at: Date.now(), result } });
     log("完成");
     return { ok: true, result };
   } catch (e) {
-    const err = String(e.message || e);
+    const err = String((e && (e.message || e)) || e);
     log(`失败：${err}`);
-    await chrome.storage.local.set({ lastResult: { task, ok: false, at: Date.now(), error: err } });
+    await skSet({ lastResult: { task, ok: false, at: Date.now(), error: err } });
     return { ok: false, error: err };
   } finally {
     stopKeepAlive();
-    setTimeout(() => chrome.storage.local.set({ running: null }), 1500);
+    setTimeout(() => skSet({ running: null }), 1500);
   }
 }
 
@@ -892,13 +937,27 @@ async function executeTask(task, range, log, opts = {}) {
 const PENDING_KEY = "pendingTask";
 
 async function consumePending() {
-  const { [PENDING_KEY]: p } = await chrome.storage.local.get({ [PENDING_KEY]: null });
+  // 两条来源：面板写的本地存储，以及面板通过桥中转的任务。
+  // 前者依赖扩展自己的 storage，后者依赖普通 HTTP，互为备份。
+  let p = (await skGet({ pendingTask: null })).pendingTask;
+
+  if (!p || !p.task) {
+    try {
+      const resp = await fetch(`${BRIDGE}/pending`);
+      const j = await resp.json();
+      if (j && j.job && j.job.task) {
+        p = { ...j.job, at: j.job.at || Date.now() };
+        appendTaskLog(`[${p.task}] 从本地桥领取任务`);
+      }
+    } catch (e) { /* 桥没开，忽略 */ }
+  }
+
   if (!p || !p.task || Date.now() - (p.at || 0) > 10 * 60 * 1000) return null;
 
-  const { running } = await chrome.storage.local.get({ running: null });
+  const { running } = await skGet({ running: null });
   if (running) return null;                 // 已经在跑了，别重复执行
 
-  await chrome.storage.local.set({ [PENDING_KEY]: null });
+  await skSet({ pendingTask: null });
   const log = (m) => appendTaskLog(`[${p.task}] ${m}`);
   log("从待办队列领取任务");
   return executeTask(p.task, p.range || {}, log, { force: !!p.force, withCalc: p.withCalc });
@@ -1005,12 +1064,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     (async () => {
       const task = msg.task;
-      const log = (m) => appendTaskLog(`[${task}] ${m}`);
-      await chrome.storage.local.set({ [PENDING_KEY]: null });   // 消息到了，待办作废
-      const r = await executeTask(task, msg.range || {}, log, {
-        force: !!msg.force, withCalc: msg.withCalc,
-      });
-      finish({ ok: r.ok, started: true, done: true, result: r.result, error: r.error });
+      try {
+        const log = (m) => appendTaskLog(`[${task}] ${m}`);
+        await skSet({ pendingTask: null });          // 消息到了，待办作废
+        const r = await executeTask(task, msg.range || {}, log, {
+          force: !!msg.force, withCalc: msg.withCalc,
+        });
+        finish({ ok: r.ok, started: true, done: true, result: r.result, error: r.error });
+      } catch (e) {
+        const detail = (e && (e.stack || e.message)) || String(e);
+        appendTaskLog(`[${task}] 启动失败：${detail.split("\n")[0]}`);
+        reportCrash("runTask", detail.split("\n").slice(0, 3).join(" / "));
+        finish({ ok: false, started: false, error: String(e && e.message || e) });
+      }
     })();
     return true;
   }

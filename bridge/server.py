@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import subprocess
 import sys
@@ -34,6 +35,8 @@ PORT = 8765
 
 TASK_LOG: list[str] = []
 _RUN_LOCK = threading.Lock()
+_PENDING: dict = {}
+_PENDING_LOCK = threading.Lock()
 
 
 def _append_log(msg: str) -> None:
@@ -142,6 +145,11 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, rebuild_endpoints())
         elif self.path.startswith("/log"):
             _json(self, {"ok": True, "lines": TASK_LOG[-200:]})
+        elif self.path.startswith("/pending"):
+            with _PENDING_LOCK:
+                job = dict(_PENDING) if _PENDING else None
+                _PENDING.clear()
+            _json(self, {"ok": True, "job": job})
         else:
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
@@ -154,6 +162,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_log()
         elif self.path.startswith("/run"):
             self._post_run()
+        elif self.path.startswith("/pending"):
+            self._post_pending()
         else:
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
@@ -261,8 +271,11 @@ class Handler(BaseHTTPRequestHandler):
                 cmd += ["--to", str(dto)]
 
             _append_log(f"[run] 开始核算 {country} {dfrom or '全量'}~{dto or '全量'}")
+            env = dict(os.environ)
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
             proc = subprocess.run(
-                cmd, cwd=str(ROOT), capture_output=True,
+                cmd, cwd=str(ROOT), capture_output=True, env=env,
                 text=True, encoding="utf-8", errors="replace", timeout=900,
             )
             stdout = proc.stdout or ""
@@ -310,6 +323,26 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": str(e)})
         finally:
             _RUN_LOCK.release()
+
+
+    def _post_pending(self):
+        """面板把任务放这里，扩展定时来取。
+
+        为什么需要这条：面板 → 后台的 sendMessage 偶尔会断（上下文失效、
+        后台刚被唤醒等），断了任务就发不出去。桥是普通 HTTP，
+        两个方向都能通，作为第三条通道。
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+        with _PENDING_LOCK:
+            _PENDING.clear()
+            _PENDING.update(payload or {})
+        _append_log(f"[pending] 收到任务：{payload.get('task')} {payload.get('range', {}).get('startDate', '')}")
+        _json(self, {"ok": True})
 
 
 def main() -> int:
