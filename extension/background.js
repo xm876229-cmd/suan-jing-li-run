@@ -560,7 +560,13 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     }
   }
 
-  if (!all) throw new Error("商品SKU取数失败：连续 7 个截止日期都取不到数据，请确认店铺后台「商品分析」页能正常打开");
+  if (!all) {
+    throw new Error(
+      "商品SKU接口取不到数据，本轮跳过（映射沿用现有主表与目录里的表，" +
+      "不影响净利计算）。需要更新映射时：打开一次店铺「商品分析」页让它发出真实请求，" +
+      "或手工导出 product_sku_list.xlsx 放进 data/mapping/"
+    );
+  }
 
   if (!all.length) throw new Error("商品SKU返回 0 条：该区间可能没有任何商品数据");
 
@@ -616,8 +622,8 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
 
   // 轮询任务列表，找到可下载的地址。
   // 原来是 40 次×5 秒=200 秒，实测每次都等满，把整轮拖到四分钟。
-  // 现在 12 次=60 秒封顶；还没好就交给后台守望，不阻塞核算。
-  for (let i = 0; i < 12; i++) {
+  // 现在 18 次=90 秒封顶；还没好就本轮跳过，不阻塞核算。
+  for (let i = 0; i < 18; i++) {
     await sleep(5000);
     const list = await apiPost(
       await buildUrl(host, "/api/v1/oec/affiliate/compass/export_task/list"),
@@ -627,12 +633,12 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
     if (url) {
       return downloadAndUpload(url, `Transaction_Analysis_${startDate}_${endDateExclusive}.xlsx`, log);
     }
-    if (i === 2 || i === 11) {
+    if (i === 2 || i === 17) {
       // 打一次响应结构：字段名变了要能看出来，别再靠猜
       log(`任务列表暂无下载地址（第 ${i + 1} 次），响应片段：${JSON.stringify(list).slice(0, 180)}`);
     }
   }
-  throw new Error("联盟佣金 60 秒内没生成下载地址，本轮跳过（可用上一期文件或稍后重试）");
+  throw new Error("联盟佣金 90 秒内没生成下载地址，本轮跳过（改用上一期文件，报表会标注）");
 }
 
 // ---------------- 任务：广告（只拉已完成的任务） ----------------

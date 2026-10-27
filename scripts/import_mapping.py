@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.loader import parse_mapping_json  # noqa: E402
+from src.loader import parse_mapping, parse_mapping_json, read_table  # noqa: E402
 
 MAPPING_DIR = ROOT / "data" / "mapping"
 MASTER = MAPPING_DIR / "master.csv"
@@ -58,21 +58,34 @@ def write_master(data: dict[str, dict]) -> None:
             w.writerow(data[sid])
 
 
+SUFFIXES = (".json", ".xlsx", ".xls", ".csv")
+
+
 def find_sources() -> list[Path]:
-    """所有可能的 sku_list_*.json，按时间从旧到新（合并要按时间顺序，后者覆盖前者）。"""
+    """所有可能的映射来源，按时间从旧到新（后者覆盖前者）。
+
+    两种形态都收：
+      · 扩展自动抓的 sku_list_*.json
+      · 用户手工导的 product_sku_list.xlsx（接口取不到时的退路）
+    """
     out: list[Path] = []
     for d in (MAPPING_DIR, INBOX):
         if not d.exists():
             continue
-        out.extend(
-            f for f in d.iterdir()
-            if f.is_file() and f.suffix.lower() == ".json" and "sku_list" in f.name.lower()
-        )
+        for f in d.iterdir():
+            if not f.is_file() or f.suffix.lower() not in SUFFIXES:
+                continue
+            low = f.name.lower()
+            if "sku_list" in low or "sku list" in low or "产品" in f.name:
+                out.append(f)
     return sorted(out, key=lambda f: f.stat().st_mtime)
 
 
 def merge_file(path: Path, master: dict[str, dict], events: list[dict], now: str) -> tuple[int, int, int]:
-    idx = parse_mapping_json(path)
+    if path.suffix.lower() in (".xlsx", ".xls", ".csv"):
+        idx = parse_mapping(read_table(path))
+    else:
+        idx = parse_mapping_json(path)
     added, rebound, same = 0, 0, 0
 
     for sid, item in idx.by_sku_id.items():
