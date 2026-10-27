@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from collections import Counter, defaultdict
@@ -24,7 +25,24 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE_DIR = ROOT / "data" / "capture"
+INBOX_DIR = ROOT / "data" / "exports" / "_inbox"
+LOG_FILE = ROOT / "data" / "capture" / "task.log"
 PORT = 8765
+
+TASK_LOG: list[str] = []
+
+
+def _append_log(msg: str) -> None:
+    line = f"{datetime.now():%Y-%m-%d %H:%M:%S}  {msg}"
+    TASK_LOG.append(line)
+    if len(TASK_LOG) > 500:
+        del TASK_LOG[:-500]
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
 
 
 def _cors(handler: BaseHTTPRequestHandler) -> None:
@@ -114,16 +132,26 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/health"):
             _json(self, {"ok": True, "service": "jingli-bridge",
-                         "captureDir": str(CAPTURE_DIR)})
+                         "captureDir": str(CAPTURE_DIR),
+                         "inbox": str(INBOX_DIR)})
         elif self.path.startswith("/endpoints"):
             _json(self, rebuild_endpoints())
+        elif self.path.startswith("/log"):
+            _json(self, {"ok": True, "lines": TASK_LOG[-200:]})
         else:
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
     def do_POST(self):
-        if not self.path.startswith("/capture"):
+        if self.path.startswith("/capture"):
+            self._post_capture()
+        elif self.path.startswith("/upload"):
+            self._post_upload()
+        elif self.path.startswith("/log"):
+            self._post_log()
+        else:
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
-            return
+
+    def _post_capture(self):
         try:
             length = int(self.headers.get("Content-Length") or 0)
             payload = json.loads(self.rfile.read(length) or b"{}")
@@ -149,6 +177,45 @@ class Handler(BaseHTTPRequestHandler):
                 line = line.encode("utf-8", "replace").decode("utf-8", "replace")
                 fh.write(line + "\n")
         _json(self, {"ok": True, "saved": len(batch), "file": f.name})
+
+    def _post_upload(self):
+        """扩展把下载到的导出文件回传到这里，直接落进 inbox 目录。"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            name = str(payload.get("name") or "").strip()
+            b64 = payload.get("b64") or ""
+            if not name or not b64:
+                raise ValueError("missing name/b64")
+            data = base64.b64decode(b64)
+        except Exception as e:
+            _json(self, {"ok": False, "error": f"invalid payload: {e}"}, 400)
+            return
+
+        safe = re.sub(r'[\\/:*?"<>|]', "_", name)
+        INBOX_DIR.mkdir(parents=True, exist_ok=True)
+        path = INBOX_DIR / safe
+        if path.exists():
+            stem, suf = path.stem, path.suffix
+            i = 2
+            while path.exists():
+                path = INBOX_DIR / f"{stem} ({i}){suf}"
+                i += 1
+        path.write_bytes(data)
+        _append_log(f"文件已保存：{path.name}（{len(data)/1024:.0f} KB）")
+        _json(self, {"ok": True, "path": str(path), "bytes": len(data)})
+
+    def _post_log(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+        msg = str(payload.get("msg") or "")
+        if msg:
+            _append_log(msg)
+            print(msg, flush=True)
+        _json(self, {"ok": True})
 
 
 def main() -> int:

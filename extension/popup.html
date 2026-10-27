@@ -3,38 +3,49 @@
 <head>
 <meta charset="utf-8" />
 <style>
-  body { width: 300px; margin: 0; font: 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; color: #1F3B4D; }
-  header { padding: 14px 16px 10px; background: #1F3B4D; color: #fff; }
+  body { width: 330px; margin: 0; font: 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; color: #1F3B4D; }
+  header { padding: 12px 16px 9px; background: #1F3B4D; color: #fff; }
   header h1 { margin: 0; font-size: 14px; font-weight: 600; }
-  header p { margin: 4px 0 0; font-size: 11px; opacity: .75; }
-  main { padding: 12px 16px 16px; }
-  .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #EDF2F7; }
-  .row:last-of-type { border-bottom: 0; }
+  header p { margin: 3px 0 0; font-size: 11px; opacity: .75; }
+  main { padding: 10px 16px 14px; }
+  .row { display: flex; justify-content: space-between; padding: 3px 0; }
   .k { color: #6B7B8C; }
   .v { font-weight: 600; }
   .ok { color: #2E7D32; }
   .bad { color: #C0392B; }
-  button { width: 100%; margin-top: 12px; padding: 8px; border: 0; border-radius: 6px;
+  hr { border: 0; border-top: 1px solid #EDF2F7; margin: 9px 0; }
+  label { display: block; font-size: 11px; color: #6B7B8C; margin: 6px 0 2px; }
+  input[type=date] { width: 100%; box-sizing: border-box; padding: 5px 6px; border: 1px solid #D5DDE5;
+                     border-radius: 5px; font-size: 12px; color: #1F3B4D; }
+  button { width: 100%; margin-top: 8px; padding: 8px; border: 0; border-radius: 6px;
            background: #1F3B4D; color: #fff; font-size: 13px; cursor: pointer; }
-  button.off { background: #C0392B; }
-  .tip { margin-top: 10px; font-size: 11px; color: #6B7B8C; line-height: 1.5; }
+  button.ghost { background: #EDF2F7; color: #1F3B4D; }
+  button:disabled { opacity: .5; cursor: default; }
+  #log { margin-top: 8px; max-height: 110px; overflow: auto; font-size: 11px;
+         background: #F7FAFC; border-radius: 6px; padding: 6px 8px; color: #44576B;
+         white-space: pre-wrap; line-height: 1.5; }
 </style>
 </head>
 <body>
 <header>
   <h1>净利取数助手</h1>
-  <p>记录店铺后台的数据接口，供本地核算程序重放</p>
+  <p>在店铺登录态里取数，回传给本地核算程序</p>
 </header>
 <main>
   <div class="row"><span class="k">记录状态</span><span class="v" id="enabled">—</span></div>
   <div class="row"><span class="k">已抓接口</span><span class="v" id="captured">0</span></div>
-  <div class="row"><span class="k">已回传本地</span><span class="v" id="pushed">0</span></div>
+  <div class="row"><span class="k">已回传</span><span class="v" id="pushed">0</span></div>
   <div class="row"><span class="k">本地程序</span><span class="v" id="bridge">—</span></div>
-  <button id="toggle">暂停记录</button>
-  <div class="tip">
-    用法：打开店铺后台 → 正常点一次「导出」→ 抓到的接口会写到
-    <code>data/capture/</code>。之后就能照着这些接口做自动取数。
-  </div>
+  <div class="row"><span class="k">已识别店铺</span><span class="v" id="hosts" style="font-size:11px">—</span></div>
+
+  <hr />
+  <label>起始日期</label>
+  <input type="date" id="dfrom" />
+  <label>结束日期</label>
+  <input type="date" id="dto" />
+  <button id="run">自动取数：订单</button>
+  <button id="toggle" class="ghost">暂停记录</button>
+  <div id="log"></div>
 </main>
 <script src="popup.js"></script>
 </body>

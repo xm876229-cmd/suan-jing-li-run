@@ -43,3 +43,5 @@ desktop.ini
 
 # ===== 明确保留（不要删） =====
 # .workbuddy/ 为项目相关数据目录，正常纳入版本管理，不在此忽略
+
+data/capture/task.log
