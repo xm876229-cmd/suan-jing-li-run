@@ -31,6 +31,10 @@ def default_range(mode: str) -> tuple[date, date]:
         return y, y
     if mode == "last7":
         return today - timedelta(days=6), today
+    if mode == "last-week":
+        # 上周一 ~ 上周日
+        monday = today - timedelta(days=today.weekday())
+        return monday - timedelta(days=7), monday - timedelta(days=1)
     if mode == "last-month":
         first_this = today.replace(day=1)
         last_prev = first_this - timedelta(days=1)
@@ -41,7 +45,7 @@ def default_range(mode: str) -> tuple[date, date]:
 def main() -> int:
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--mode", default="month",
-                    choices=["month", "yesterday", "last7", "last-month"])
+                    choices=["month", "yesterday", "last7", "last-week", "last-month"])
     known, rest = ap.parse_known_args()
 
     dfrom, dto = default_range(known.mode)

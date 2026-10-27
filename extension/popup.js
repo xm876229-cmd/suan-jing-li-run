@@ -32,26 +32,48 @@ function fmt(d) {
 }
 
 function initDates() {
+  applyPreset("month");
+}
+
+/** 不用原生日期控件：它的语言跟随浏览器（马来店里会显示马来语），改用文本 + 预设。 */
+function applyPreset(name) {
   const today = new Date();
-  const first = new Date(today.getFullYear(), today.getMonth(), 1);
-  $("dfrom").value = fmt(first);
-  $("dto").value = fmt(today);
+  let from = new Date(today), to = new Date(today);
+  if (name === "month") {
+    from = new Date(today.getFullYear(), today.getMonth(), 1);
+  } else if (name === "lastMonth") {
+    from = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    to = new Date(today.getFullYear(), today.getMonth(), 0);
+  } else if (name === "last7") {
+    from = new Date(today.getTime() - 6 * 86400000);
+  } else if (name === "yesterday") {
+    from = new Date(today.getTime() - 86400000);
+    to = new Date(from);
+  }
+  $("dfrom").value = fmt(from);
+  $("dto").value = fmt(to);
+}
+
+function parseDate(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((s || "").trim());
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  return isNaN(d.getTime()) ? null : d;
 }
 
 /** 把用户选的两个日期换算成各接口需要的形态 */
 function buildRange() {
-  const from = $("dfrom").value;
-  const to = $("dto").value;
-  if (!from || !to) return null;
+  const from = parseDate($("dfrom").value);
+  const to = parseDate($("dto").value);
+  if (!from || !to) { log("日期格式不对，请用 2026-10-01 这种写法"); return null; }
+  if (from > to) { log("起始日期不能晚于结束日期"); return null; }
 
-  const start = new Date(from + "T00:00:00");
-  const endDay = new Date(to + "T00:00:00");
-  const endNext = new Date(endDay.getTime() + 24 * 3600 * 1000); // 各接口的 end 多为开区间
+  const endNext = new Date(to.getTime() + 24 * 3600 * 1000); // 多数接口的 end 是开区间
 
   return {
-    startMs: start.getTime(),
-    endMs: new Date(to + "T23:59:59.999").getTime(),
-    startDate: from,
+    startMs: from.getTime(),
+    endMs: new Date(to.getFullYear(), to.getMonth(), to.getDate(), 23, 59, 59, 999).getTime(),
+    startDate: fmt(from),
     endDateExclusive: fmt(endNext),
     tzOffset: -new Date().getTimezoneOffset() * 60,
   };
@@ -93,4 +115,40 @@ $("toggle").addEventListener("click", () => {
 $("runAll").addEventListener("click", (e) => runTasks("all", e.target));
 document.querySelectorAll(".grid button").forEach((b) => {
   b.addEventListener("click", () => runTasks(b.dataset.task, b));
+});
+document.querySelectorAll(".presets button").forEach((b) => {
+  b.addEventListener("click", () => applyPreset(b.dataset.preset));
+});
+
+// ---------------- 定时设置 ----------------
+
+function renderSchedule(s) {
+  if (!s) return;
+  $("wOn").checked = !!s.weekly?.enabled;
+  $("wDay").value = String(s.weekly?.weekday ?? 1);
+  $("wHour").value = s.weekly?.hour ?? 9;
+  $("mOn").checked = !!s.monthly?.enabled;
+  $("mDay").value = s.monthly?.day ?? 1;
+  $("mHour").value = s.monthly?.hour ?? 9;
+  const lr = s.lastRun || {};
+  $("lastRun").textContent = `上次自动运行：每周 ${lr.weekly || "从未"}｜每月 ${lr.monthly || "从未"}`;
+}
+
+function saveSchedule() {
+  const schedule = {
+    weekly: { enabled: $("wOn").checked, weekday: +$("wDay").value, hour: +$("wHour").value },
+    monthly: { enabled: $("mOn").checked, day: +$("mDay").value, hour: +$("mHour").value },
+  };
+  chrome.runtime.sendMessage({ type: "setSchedule", schedule }, (r) => {
+    if (r && r.ok) {
+      renderSchedule(r.schedule);
+      log(`定时已保存：每周 ${schedule.weekly.enabled ? "开" : "关"}｜每月 ${schedule.monthly.enabled ? "开" : "关"}`);
+    }
+  });
+}
+
+chrome.runtime.sendMessage({ type: "getSchedule" }, (r) => { if (r && r.ok) renderSchedule(r.schedule); });
+["wOn", "wDay", "wHour", "mOn", "mDay", "mHour"].forEach((id) => {
+  const el = $(id);
+  if (el) el.addEventListener("change", saveSchedule);
 });

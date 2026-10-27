@@ -41,7 +41,68 @@ function flush() {
   });
 }
 
-// ---------------- 公共参数学习 ----------------
+// ---------------- 抓包记录入口 ----------------
+
+function recordCapture(payload) {
+  if (!payload) return;
+  buffer.push(payload);
+  stats.captured += 1;
+  if (buffer.length > MAX_BUFFER) buffer.splice(0, buffer.length - MAX_BUFFER);
+  chrome.storage.local.set({ stats });
+  if (payload.url) learnParams(payload.url);
+  flush();
+}
+
+/** 把 webRequest 的 requestBody 转成可读文本 */
+function summarizeRequestBody(rb) {
+  if (!rb) return null;
+  try {
+    if (rb.formData) {
+      const parts = [];
+      for (const [k, vs] of Object.entries(rb.formData)) {
+        parts.push(`${k}=${(vs || []).join(",").slice(0, 200)}`);
+      }
+      return parts.join("&").slice(0, 4000);
+    }
+    if (rb.raw && rb.raw.length) {
+      const chunks = rb.raw.map((r) => {
+        if (!r.bytes) return "";
+        const dec = new TextDecoder("utf-8", { fatal: false });
+        return dec.decode(new Uint8Array(r.bytes));
+      });
+      return chunks.join("").slice(0, 4000);
+    }
+  } catch (e) { /* 二进制或读不出来就算了 */ }
+  return null;
+}
+
+// 页面里的 fetch/XHR 抓不到的东西都在这一层：表单提交、iframe、Service Worker 发的请求。
+// 广告导出很可能就是这类，所以必须补上。
+if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
+  chrome.webRequest.onBeforeRequest.addListener(
+    (details) => {
+      if (!enabled) return;
+      const u = details.url || "";
+      if (!/export|download|task|insight|stat\//i.test(u)) return;
+      recordCapture({
+        kind: "webrequest",
+        url: u,
+        method: details.method,
+        status: null,
+        contentType: "",
+        ms: 0,
+        reqBody: summarizeRequestBody(details.requestBody),
+        respSample: null,
+        page: details.initiator || "",
+        at: new Date().toISOString(),
+      });
+    },
+    { urls: ["*://*.tiktok.com/*", "*://*.tiktokglobalshop.com/*"] },
+    ["requestBody"]
+  );
+}
+
+// ---------------- 抓包转发结束 ----------------
 // 页面每个请求都带一长串公共参数（locale/seller_id/fp/X-Tts-Oec-Bsid…）。
 // 我们不伪造，直接从抓到的真实请求里学一份最新的，重放时带上。
 
@@ -82,6 +143,43 @@ async function buildUrl(host, path, extra = {}) {
 
 function pickHost(params, hint) {
   return Object.keys(params).find((h) => h.includes(hint));
+}
+
+const PAGE_HINTS = {
+  seller: "https://seller-my.tiktok.com/",
+  affiliate: "https://affiliate.tiktok.com/affiliate/platform/homepage",
+};
+
+/**
+ * 确保已经学到某个域名的公共参数。
+ * 没学到就自己开一个后台标签页，让页面发请求，我们再学——不用用户手工去打开。
+ */
+async function ensureHost(hint, log) {
+  const read = async () => (await chrome.storage.local.get({ params: {} })).params || {};
+  let params = await read();
+  let host = pickHost(params, hint);
+  if (host) return host;
+
+  const url = PAGE_HINTS[hint];
+  if (url) {
+    log(`还没有该后台的参数，正在后台打开页面学习…`);
+    try {
+      await chrome.tabs.create({ url, active: false });
+    } catch (e) {
+      log(`打开页面失败：${e.message}`);
+    }
+    for (let i = 0; i < 14; i++) {
+      await sleep(2500);
+      params = await read();
+      host = pickHost(params, hint);
+      if (host) {
+        log(`已学到 ${host} 的参数`);
+        return host;
+      }
+    }
+  }
+  const label = hint === "affiliate" ? "达人联盟后台" : "卖家后台";
+  throw new Error(`学不到${label}的参数：请手动打开一次${label}页面后重试`);
 }
 
 // ---------------- 请求封装 ----------------
@@ -133,9 +231,7 @@ function stamp() {
 }
 
 async function runOrders({ startMs, endMs }, log) {
-  const { params = {} } = await chrome.storage.local.get({ params: {} });
-  const host = pickHost(params, "seller-") || pickHost(params, "seller");
-  if (!host) throw new Error("还没学到卖家后台的公共参数：先在卖家后台点一次导出，让扩展抓到请求");
+  const host = await ensureHost("seller", log);
 
   log("提交订单导出任务…");
   const fileName = encodeURIComponent(`全部 笔订单-${stamp()}.csv`);
@@ -231,9 +327,7 @@ function dstr(d) {
 // ---------------- 任务：商品 SKU 统计 ----------------
 
 async function runSkuStats({ startDate, endDateExclusive }, log) {
-  const { params = {} } = await chrome.storage.local.get({ params: {} });
-  const host = pickHost(params, "seller-") || pickHost(params, "seller");
-  if (!host) throw new Error("还没学到卖家后台的公共参数：先打开一次店铺后台");
+  const host = await ensureHost("seller", log);
 
   log("提交商品SKU导出…");
   const body = {
@@ -255,31 +349,57 @@ async function runSkuStats({ startDate, endDateExclusive }, log) {
   if (!file) throw new Error("没拿到文件路径（data.file 为空）");
   log(`文件路径：${file}`);
 
-  // 这个接口直接返回文件路径，但文件可能还在生成，轮询直到能取到二进制
-  const url = `https://${host}${file}`;
-  for (let i = 0; i < 30; i++) {
-    const head = await fetch(url, { credentials: "include" });
-    const ct = head.headers.get("content-type") || "";
-    if (head.ok && !ct.includes("json")) {
-      const buf = await head.arrayBuffer();
-      if (buf.byteLength > 512) {
-        const saved = await uploadToBridge(`product_sku_list-${startDate}_${endDateExclusive}.xlsx`, buf);
-        log(`已保存：${saved.path}`);
-        return { saved: saved.path, bytes: buf.byteLength };
+  const name = `product_sku_list-${startDate}_${endDateExclusive}.xlsx`;
+  const direct = file.startsWith("http") ? file : `https://${host}${file}`;
+
+  for (let i = 0; i < 40; i++) {
+    // 路子一：查导出任务列表，里面通常带可下载地址
+    try {
+      const tl = await apiPost(
+        await buildUrl(host, "/api/v2/insights/seller/shop/export/task/list"),
+        { sub_modules: [80] }
+      );
+      let url = findUrl(tl);
+      const n = tl?.total_files ?? 0;
+      if (i === 0 || url) log(`任务列表：total_files=${n}${url ? "，已拿到下载地址" : ""}`);
+      if (url) {
+        if (url.startsWith("/")) url = `https://${host}${url}`;
+        return downloadAndUpload(url, name, log);
       }
+    } catch (e) {
+      log(`查任务列表出错：${e.message}`);
     }
-    log(`文件还在生成…（${(i + 1) * 5}s）`);
+
+    // 路子二：直接取文件路径
+    try {
+      const resp = await fetch(direct, { credentials: "include" });
+      const ct = resp.headers.get("content-type") || "";
+      if (resp.ok && !ct.includes("json")) {
+        const buf = await resp.arrayBuffer();
+        if (buf.byteLength > 512) {
+          const saved = await uploadToBridge(name, buf);
+          log(`已保存：${saved.path}`);
+          return { saved: saved.path, bytes: buf.byteLength };
+        }
+      } else if (i % 4 === 0) {
+        let body = "";
+        try { body = (await resp.text()).slice(0, 150); } catch (e) { /* 忽略 */ }
+        log(`直取返回 ${resp.status} ${ct.split(";")[0]} ${body.replace(/\s+/g, " ")}`);
+      }
+    } catch (e) {
+      if (i % 4 === 0) log(`直取出错：${e.message}`);
+    }
+
+    log(`等待文件生成…（${(i + 1) * 5}s）`);
     await sleep(5000);
   }
-  throw new Error("等了两分半仍取不到文件");
+  throw new Error("等了约 3 分钟仍取不到文件，日志里有每次返回的状态供排查");
 }
 
 // ---------------- 任务：联盟佣金 ----------------
 
 async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
-  const { params = {} } = await chrome.storage.local.get({ params: {} });
-  const host = pickHost(params, "affiliate");
-  if (!host) throw new Error("还没学到联盟后台的公共参数：先打开一次达人联盟页面");
+  const host = await ensureHost("affiliate", log);
 
   const startSec = Math.floor(new Date(startDate + "T00:00:00").getTime() / 1000);
   const endSec = Math.floor(new Date(endDateExclusive + "T00:00:00").getTime() / 1000) - 1;
@@ -328,9 +448,7 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
 // ---------------- 任务：广告（只拉已完成的任务） ----------------
 
 async function runAds({}, log) {
-  const { params = {} } = await chrome.storage.local.get({ params: {} });
-  const host = pickHost(params, "seller-") || pickHost(params, "seller");
-  if (!host) throw new Error("还没学到卖家后台的公共参数");
+  const host = await ensureHost("seller", log);
 
   log("查询广告导出任务…");
   for (let i = 0; i < 60; i++) {
@@ -382,18 +500,104 @@ function bridgeLog(msg) {
   }).catch(() => {});
 }
 
+
+// ---------------- 定时自动取数 ----------------
+// 扩展不能像 cron 那样精确定时，标准做法是：每 15 分钟醒一次，
+// 检查"现在是否到了该跑的时间点、今天是否已经跑过"，满足就执行。
+
+const DEFAULT_SCHEDULE = {
+  weekly: { enabled: false, weekday: 1, hour: 9 },   // 1 = 周一
+  monthly: { enabled: false, day: 1, hour: 9 },
+  lastRun: { weekly: "", monthly: "" },
+};
+
+async function getSchedule() {
+  const { schedule } = await chrome.storage.local.get({ schedule: DEFAULT_SCHEDULE });
+  return { ...DEFAULT_SCHEDULE, ...schedule, lastRun: { ...DEFAULT_SCHEDULE.lastRun, ...(schedule?.lastRun || {}) } };
+}
+
+function rangeFor(mode, now) {
+  const fmt = (d) => {
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+  if (mode === "weekly") {
+    // 上周一 ~ 上周日
+    const dow = (now.getDay() + 6) % 7;              // 周一=0
+    const thisMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow);
+    const from = new Date(thisMonday.getTime() - 7 * 86400000);
+    const to = new Date(thisMonday.getTime() - 86400000);
+    return { startDate: fmt(from), endDateExclusive: fmt(thisMonday), to: fmt(to) };
+  }
+  // 上月 1 日 ~ 月末
+  const firstThis = new Date(now.getFullYear(), now.getMonth(), 1);
+  const from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const to = new Date(firstThis.getTime() - 86400000);
+  return { startDate: fmt(from), endDateExclusive: fmt(firstThis), to: fmt(to) };
+}
+
+function toRangeObj(r) {
+  const start = new Date(r.startDate + "T00:00:00");
+  const endEx = new Date(r.endDateExclusive + "T00:00:00");
+  const endLast = new Date(endEx.getTime() - 1);
+  return {
+    startMs: start.getTime(),
+    endMs: new Date(endLast.getFullYear(), endLast.getMonth(), endLast.getDate(), 23, 59, 59, 999).getTime(),
+    startDate: r.startDate,
+    endDateExclusive: r.endDateExclusive,
+    tzOffset: -new Date().getTimezoneOffset() * 60,
+  };
+}
+
+async function checkSchedule() {
+  const s = await getSchedule();
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const dow = (now.getDay() + 6) % 7;
+
+  const jobs = [];
+  if (s.weekly.enabled && dow === s.weekly.weekday && now.getHours() >= s.weekly.hour
+      && s.lastRun.weekly !== today) {
+    jobs.push(["weekly", rangeFor("weekly", now)]);
+  }
+  if (s.monthly.enabled && now.getDate() === s.monthly.day && now.getHours() >= s.monthly.hour
+      && s.lastRun.monthly !== today) {
+    jobs.push(["monthly", rangeFor("monthly", now)]);
+  }
+  if (!jobs.length) return null;
+
+  for (const [mode, r] of jobs) {
+    const log = (m) => bridgeLog(`[auto-${mode}] ${m}`);
+    log(`开始自动取数：${r.startDate} ~ ${r.to}`);
+    try {
+      await runTask("all", toRangeObj(r), log);
+      s.lastRun[mode] = today;
+      await chrome.storage.local.set({ schedule: s });
+      log(`完成`);
+      fetch(`${BRIDGE}/log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ msg: `[auto-${mode}] 解锁：自动取数完成 ${r.startDate} ~ ${r.to}` }),
+      }).catch(() => {});
+    } catch (e) {
+      log(`失败：${e.message}`);
+    }
+  }
+  return jobs.map((j) => j[0]).join(",");
+}
+
+chrome.alarms.create("jingli-scheduler", { periodInMinutes: 15, delayInMinutes: 1 });
+chrome.alarms.onAlarm.addListener((a) => {
+  if (a.name === "jingli-scheduler") checkSchedule();
+});
+
 // ---------------- 消息路由 ----------------
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return false;
 
   if (msg.type === "capture") {
-    buffer.push(msg.payload);
-    stats.captured += 1;
-    if (buffer.length > MAX_BUFFER) buffer.splice(0, buffer.length - MAX_BUFFER);
-    chrome.storage.local.set({ stats });
-    if (msg.payload && msg.payload.url) learnParams(msg.payload.url);
-    flush();
+    recordCapture(msg.payload);
     sendResponse({ ok: true, buffered: buffer.length });
     return true;
   }
@@ -415,6 +619,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.storage.local.set({ enabled });
     if (enabled) flush();
     sendResponse({ ok: true, enabled });
+    return true;
+  }
+
+  if (msg.type === "getSchedule") {
+    getSchedule().then((s) => sendResponse({ ok: true, schedule: s }));
+    return true;
+  }
+
+  if (msg.type === "setSchedule") {
+    (async () => {
+      const cur = await getSchedule();
+      const next = { ...cur, ...msg.schedule };
+      await chrome.storage.local.set({ schedule: next });
+      sendResponse({ ok: true, schedule: next });
+    })();
+    return true;
+  }
+
+  if (msg.type === "checkScheduleNow") {
+    checkSchedule()
+      .then((r) => sendResponse({ ok: true, ran: r }))
+      .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
     return true;
   }
 
