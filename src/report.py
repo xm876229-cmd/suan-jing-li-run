@@ -73,7 +73,7 @@ def _fmt_row(ws: Worksheet, row: int, money_cols: list[int], pct_cols: list[int]
 # ---------------- 汇总 ----------------
 
 SUMMARY_HEADERS = [
-    "排名", "款式编码", "商品ID", "商品名称",
+    "排名", "款式编码", "链接（商品ID）", "商品名称",
     "GMV", "订单数", "客单价", "买家实付",
     "成本", "毛利", "毛利额",
     "发单费", "平台佣金", "交易手续费", "奖金返现", "超级优惠券",
@@ -86,7 +86,10 @@ INT_COLS = [6]
 
 
 def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
-    _title(ws, "净利润汇总（按商品）", subtitle, span=12)
+    # 一条链接（商品ID）一行：同一链接下的多个 SKU 合并，
+    # 不同链接即使卖家编码相同也绝不合并——卖家编码可在多条链接间复用，
+    # 只有商品ID 是链接的唯一标识。
+    _title(ws, "净利润汇总（每条链接一行）", subtitle, span=12)
     _head(ws, SUMMARY_HEADERS)
     row = 3
     for i, p in enumerate(res.products, 1):
@@ -331,6 +334,8 @@ def _meta(ws: Worksheet, res: CalcResult, params: Params, switches: Switches,
          "开关：" + ("启用" if switches.super_coupon_enabled else "关闭（按 0 计）")),
         ("商家成长费率", p.growth_fee, "基数为 GMV"),
         ("物流费率", p.logistics, "基数为 GMV（比例法，非实际运费账单）"),
+        ("分组维度", "链接（商品ID）", "一条链接一行；同一链接下多个 SKU 合并计算，不同链接不合并"),
+        ("SKU 归属", "平台 SKU ID（唯一）", "卖家编码可在多条链接间复用，只在缺 SKU ID 时兜底使用"),
         ("GMV 口径", "折扣前小计 − 卖家折扣", "不含平台补贴；排除取消/退货行"),
         ("订单数口径", "订单级计数按行数平分", "一个订单的分配数合计为 1"),
         ("买家实付口径", f"{switches.allocation_paid}", "订单实付在订单内各行的分配方式"),
