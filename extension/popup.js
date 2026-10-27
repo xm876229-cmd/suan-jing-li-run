@@ -1,6 +1,53 @@
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
 
+// 扩展被刷新/重载后，旧面板的 chrome.runtime 会失效，此时所有调用都会静默失败。
+// 一打开就检查，比等用户点了没反应再猜要好。
+(function checkContextOnce() {
+  try {
+    if (!(chrome && chrome.runtime && chrome.runtime.id)) {
+      setTimeout(() => onContextLost(), 0);
+    }
+  } catch (e) {
+    setTimeout(() => onContextLost(), 0);
+  }
+})();
+
+function contextAlive() {
+  try {
+    return !!(chrome && chrome.runtime && chrome.runtime.id);
+  } catch (e) {
+    return false;
+  }
+}
+
+/** 安全发送：上下文失效时抛的是同步异常，必须 try/catch，
+ *  否则回调不执行、按钮卡在禁用态，看起来就是"点了没反应"。 */
+function safeSend(msg, cb) {
+  if (!contextAlive()) {
+    onContextLost();
+    return false;
+  }
+  try {
+    chrome.runtime.sendMessage(msg, (resp) => {
+      if (!contextAlive()) { onContextLost(); return; }
+      if (cb) cb(resp);
+    });
+    return true;
+  } catch (e) {
+    onContextLost();
+    return false;
+  }
+}
+
+let contextLostShown = false;
+function onContextLost() {
+  if (contextLostShown) return;
+  contextLostShown = true;
+  log("⚠ 面板已过期（扩展刚被刷新/重载）。请关掉这个面板，重新点图标打开。");
+  document.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+}
+
 function log(msg) {
   const line = document.createElement("div");
   line.textContent = msg;
@@ -164,10 +211,12 @@ function runTasks(task, btn) {
   // 以前是等任务结束才回，任务一跑几分钟，面板一关消息通道就断了，
   // 用户看到的是「没有响应」——那不是任务失败，是回执方式错了。
   saveCountry();
-  chrome.runtime.sendMessage({ type: "runTask", task, range }, (resp) => {
+  safeSend({ type: "runTask", task, range }, (resp) => {
     if (btn) btn.disabled = false;
-    if (chrome.runtime.lastError) {
-      log(`后台未响应：${chrome.runtime.lastError.message}（刷新扩展后重开面板）`);
+    let lasterr = null;
+    try { lasterr = chrome.runtime.lastError; } catch (e) { /* 上下文已失效 */ }
+    if (lasterr) {
+      log(`后台未响应：${lasterr.message}（请关掉面板重开）`);
       return;
     }
     if (resp && resp.started) log(`已启动：${label}，进度看下方日志`);
@@ -194,19 +243,19 @@ $("calcOnly") && $("calcOnly").addEventListener("click", (e) => {
   const country = ($("country").value || "").trim() || "马来西亚";
   e.target.disabled = true;
   log(`=== 只算净利：${country} ${range.startDate} ~ ${$("dto").value} ===`);
-  chrome.runtime.sendMessage({ type: "calcNow", range, country }, (resp) => {
+  safeSend({ type: "calcNow", range, country }, (resp) => {
     e.target.disabled = false;
     if (chrome.runtime.lastError) { log(`后台未响应：${chrome.runtime.lastError.message}`); return; }
     if (resp && resp.started) log("已开始核算，用现有导出文件算，不重新取数");
   });
 });
 
-chrome.runtime.sendMessage({ type: "state" }, (s) => { if (s) render(s); });
+safeSend({ type: "state" }, (s) => { if (s) render(s); });
 checkBridge();
 
 // 面板不会自己刷新，这里每秒拉一次状态，否则看着像"数字不动"
 setInterval(() => {
-  chrome.runtime.sendMessage({ type: "state" }, (s) => { if (s) render(s); });
+  safeSend({ type: "state" }, (s) => { if (s) render(s); });
 }, 1200);
 initDates();
 
@@ -215,7 +264,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 
 // 面板关掉会丢日志，这里从扩展存储里把上次的记录捞回来
-chrome.runtime.sendMessage({ type: "getLog" }, (r) => {
+safeSend({ type: "getLog" }, (r) => {
   if (!r || !r.ok || !r.logs || !r.logs.length) return;
   const head = document.createElement("div");
   head.textContent = "—— 上次的记录 ——";
@@ -230,10 +279,10 @@ chrome.runtime.sendMessage({ type: "getLog" }, (r) => {
 });
 
 $("toggle").addEventListener("click", () => {
-  chrome.runtime.sendMessage({ type: "state" }, (s) => {
+  safeSend({ type: "state" }, (s) => {
     const next = !(s && s.enabled);
-    chrome.runtime.sendMessage({ type: "toggle", enabled: next }, () => {
-      chrome.runtime.sendMessage({ type: "state" }, (s2) => { if (s2) render(s2); });
+    safeSend({ type: "toggle", enabled: next }, () => {
+      safeSend({ type: "state" }, (s2) => { if (s2) render(s2); });
     });
   });
 });
@@ -265,7 +314,7 @@ function saveSchedule() {
     weekly: { enabled: $("wOn").checked, weekday: +$("wDay").value, hour: +$("wHour").value },
     monthly: { enabled: $("mOn").checked, day: +$("mDay").value, hour: +$("mHour").value },
   };
-  chrome.runtime.sendMessage({ type: "setSchedule", schedule }, (r) => {
+  safeSend({ type: "setSchedule", schedule }, (r) => {
     if (r && r.ok) {
       renderSchedule(r.schedule);
       log(`定时已保存：每周 ${schedule.weekly.enabled ? "开" : "关"}｜每月 ${schedule.monthly.enabled ? "开" : "关"}`);
@@ -273,7 +322,7 @@ function saveSchedule() {
   });
 }
 
-chrome.runtime.sendMessage({ type: "getSchedule" }, (r) => { if (r && r.ok) renderSchedule(r.schedule); });
+safeSend({ type: "getSchedule" }, (r) => { if (r && r.ok) renderSchedule(r.schedule); });
 ["wOn", "wDay", "wHour", "mOn", "mDay", "mHour"].forEach((id) => {
   const el = $(id);
   if (el) el.addEventListener("change", saveSchedule);
@@ -361,7 +410,7 @@ if (deepBtn) {
   deepBtn.addEventListener("click", () => {
     deepBtn.disabled = true;
     log("正在挂载调试器（顶部会出现“正在调试”提示条，属正常）…");
-    chrome.runtime.sendMessage({ type: "deepCapture", seconds: 300 }, (r) => {
+    safeSend({ type: "deepCapture", seconds: 300 }, (r) => {
       deepBtn.disabled = false;
       if (!r) { log("没有响应"); return; }
       if (r.ok) log(`深度抓包已开始（挂载 ${r.result?.tabs ?? "?"} 个标签页），现在去点一次广告导出，5 分钟后自动结束`);
