@@ -60,11 +60,16 @@ def to_str(v) -> str:
 
 
 def norm_header(s) -> str:
-    """表头归一：去掉所有空白、全角转半角、小写，便于稳定匹配。"""
+    """表头归一：去掉空白、下划线、连字符、全角转半角、小写，便于稳定匹配。
+
+    必须去掉下划线：主表用的列名是 sku_id / product_id，
+    而别名表写的是 skuid / productid，不去掉就永远匹配不上
+    （表现为主表 235 条一条都读不出来）。
+    """
     s = to_str(s)
     s = s.replace("\u3000", " ")
     s = s.translate(str.maketrans("　（）／", " ()/"))
-    return re.sub(r"\s+", "", s).lower()
+    return re.sub(r"[\s_\-]+", "", s).lower()
 
 
 # ---------------- 表头定位 ----------------

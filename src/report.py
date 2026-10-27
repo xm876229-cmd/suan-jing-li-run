@@ -224,7 +224,6 @@ def _daily(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: str
 
 ISSUE_RULES = [
     ("缺成本", "成本表里查不到该 SKU，且无法推导；成本按 0 计，净利偏高", "补录成本表"),
-    ("缺商品映射", "链接资料里没有该 SKU，无法定位商品ID", "补链接资料，或在 config/manual_map.json 手工指定"),
     ("未付款", "订单实付为 0，已按口径排除在订单数和成本之外", "确认是否为赠品或异常单"),
     ("取消退货", "带取消/退货标记，已从 GMV 与成本中排除", "无需处理，仅作提示"),
 ]
@@ -234,7 +233,7 @@ def _issues(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: st
     _title(ws, "异常与待办", subtitle, span=5)
     _head(ws, ["类别", "对象", "影响行数", "说明", "建议动作"])
 
-    # 缺成本 / 缺映射：逐个 SKU 列出，需要人工补数据
+    # 缺成本：逐个 SKU 列出，需要人工补数据
     detail: dict[tuple[str, str], int] = {}
     # 未付款 / 取消退货：只汇总，不需要处理
     summary: dict[str, int] = {}
@@ -242,8 +241,6 @@ def _issues(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: st
     for l in lines:
         if l.cost_unit_cny is None:
             detail[("缺成本", l.seller_sku)] = detail.get(("缺成本", l.seller_sku), 0) + 1
-        elif not l.product_id:
-            detail[("缺商品映射", l.seller_sku)] = detail.get(("缺商品映射", l.seller_sku), 0) + 1
         elif l.is_cancelled:
             summary["取消退货"] = summary.get("取消退货", 0) + 1
         elif not l.is_paid:
@@ -299,7 +296,7 @@ def _detail(ws: Worksheet, lines: list[OrderLine], subtitle: str) -> None:
     row = 3
     for l in lines:
         vals = [
-            l.order_id, l.created, l.product_id or "未识别", l.style_codes,
+            l.order_id, l.created, l.product_id or "无ID", l.style_codes,
             l.seller_sku, l.sku_id, l.product_name, l.qty,
             l.gmv, l.allocated_paid, l.allocated_orders, l.order_line_count,
             l.cost_unit_cny, l.cost_total_cny, l.status, l.cancel,

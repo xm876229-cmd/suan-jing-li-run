@@ -249,7 +249,9 @@ def compute(data: RawData, params: Params, switches: Switches,
         if parse_dt(l.created if date_field == "created" else l.paid) is None:
             untimed += 1
 
-        pid = l.product_id or "__未识别商品__"
+        # 找不到商品ID 的行不丢弃、也不算异常：按「无ID」单独成组照常计入合计。
+        # 这类行通常是没有映射的新商品，不影响整体净利。
+        pid = l.product_id or "无ID"
         if not l.product_id:
             no_pid += 1
         m = buckets.get(pid)
