@@ -592,38 +592,56 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   const { skuCache: prev } = await skGet({ skuCache: null });
   const host = await ensureHost("seller", log);
 
-  // 分页尺寸按页面的真实请求来：页面用的是 10。
-  // 之前一上来给 100，后端聚合不了直接回 98001021，就先被误判成"数据没就绪"。
-  const SIZES = [10, 100];
+  // 这个接口按商品维度聚合，跨度越大下游越容易超时。
+  // 实测页面自己查 1 天（10-27~10-28）返回 200，
+  // 我们查 16 天（10-01~10-16）必回 code=98001021 call downstream server error。
+  //
+  // 而这个接口的产物只是「SKU → 商品ID」的映射，跟统计区间无关，
+  // 所以不需要按用户选的区间取：先用目标区间试，失败就退到更短的窗口。
+  const today = new Date();
+  const dayStr = (offset) => {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() + offset);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+
+  const WINDOWS = [
+    { label: "所选区间", start: startDate, end: endDateExclusive },
+    { label: "近 7 天", start: dayStr(-7), end: dayStr(1) },
+    { label: "近 2 天", start: dayStr(-2), end: dayStr(1) },
+  ];
+
   let all = null;
-  let usedSize = 0;
+  let used = null;
   let pages = 0;
   let lastErr = "";
 
-  for (const size of SIZES) {
+  for (const w of WINDOWS) {
     try {
-      log(`在页面上下文里取商品SKU（每页 ${size} 条）…`);
-      const r = await pagePullSku(host, startDate, endDateExclusive, size, size === 10 ? 400 : 60);
-      all = r.items;
-      pages = r.pages;
-      usedSize = size;
-      log(`共 ${pages} 页，${all.length} 条`);
-      break;
+      log(`取商品SKU映射（${w.label}：${w.start} ~ ${w.end}）…`);
+      const r = await pagePullSku(host, w.start, w.end, 10, 400);
+      if (r.items && r.items.length) {
+        all = r.items;
+        used = w;
+        pages = r.pages;
+        break;
+      }
+      log(`${w.label} 返回 0 条，换更短的窗口`);
     } catch (e) {
       lastErr = String((e && e.message) || e);
-      log(`每页 ${size} 条失败：${lastErr}`);
+      log(`${w.label} 失败：${lastErr}`);
     }
   }
 
   if (!all) {
     throw new Error(
-      `商品SKU取数失败：${lastErr}。映射本轮沿用现有主表，不影响净利计算。`,
+      `商品SKU映射取不到：${lastErr || "各窗口均无数据"}。` +
+      "本轮沿用现有主表，不影响净利计算",
     );
   }
-  if (!all.length) throw new Error("商品SKU返回 0 条，该区间可能没有商品数据");
 
   const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
-  const name = `sku_list_${startDate}_${shiftDate(endDateExclusive, -1)}.json`;
+  const name = `sku_list_${used.start}_${used.end}.json`;
   const saved = await uploadToBridge(name, bytes.buffer);
   await skSet({ skuCache: { at: Date.now(), file: saved.path, items: all.length } });
 
@@ -631,8 +649,8 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     const delta = all.length - prev.items;
     log(`映射有变化：${prev.items} → ${all.length} 条（${delta > 0 ? "+" : ""}${delta}）`);
   }
-  log(`已保存：${saved.path}（${all.length} 条 SKU，每页 ${usedSize} 条）`);
-  return { saved: saved.path, items: all.length };
+  log(`已保存：${saved.path}（${all.length} 条，${pages} 页，窗口=${used.label}）`);
+  return { saved: saved.path, items: all.length, window: used.label };
 }
 
 // ---------------- 任务：联盟佣金 ----------------
