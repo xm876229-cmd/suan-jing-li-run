@@ -507,84 +507,132 @@ async function pullSkuPages(host, start, endExclusive, size, maxPages, log) {
   return all;
 }
 
-async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
-  // 映射不能缓存：链接一编辑，SKU 归属就可能变，一天变一次也正常。
-  // 缓存下来的旧映射会让新商品落进「未识别商品」，那种错很难被发现。
-  const { skuCache: prev } = await chrome.storage.local.get({ skuCache: null });
 
+// ---------------- 在页面上下文里发请求 ----------------
+// 这是取数能通的关键。同样一个请求：
+//   · 页面自己发 → Referer 是店铺域名、Origin 同源 → 服务端正常返回
+//   · 扩展后台发 → Origin 是 chrome-extension://、Referer 也是扩展 → 风控直接拒
+// 实测同一份 body，页面 status 200，后台 fetch 回 code=98001021，
+// 差别只在发起方。所以取数一律在目标页面的上下文里执行。
+
+async function findTabFor(host) {
+  const tabs = await chrome.tabs.query({ url: [`*://${host}/*`] });
+  const tab = (tabs || []).find((x) => x && x.id);
+  return tab || null;
+}
+
+/** 在页面里跑一段函数，拿到 JSON。页面没开时返回 null，由调用方决定回退。 */
+async function runInPage(host, func, args) {
+  let tab = await findTabFor(host);
+  if (!tab) {
+    // 参数是新鲜的，ensureHost 不会开页，但页面上下文取数必须有 tab
+    try { await chrome.tabs.create({ url: `https://${host}/`, active: false }); } catch (e) { /* 忽略 */ }
+    for (let i = 0; i < 10 && !tab; i++) {
+      await sleep(2000);
+      tab = await findTabFor(host);
+    }
+  }
+  if (!tab) return { missingTab: true };
+  try {
+    const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func, args });
+    return { result: res && res.result };
+  } catch (e) {
+    return { error: String(e && e.message || e) };
+  }
+}
+
+/** 分页拉全量商品 SKU（在页面上下文里循环，一次调用拿完）。 */
+async function pagePullSku(host, start, endExclusive, size, maxPages) {
+  const url = await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list");
+
+  const r = await runInPage(host, async (u, s, e, sz, mp) => {
+    const all = [];
+    for (let page = 0; page < mp; page++) {
+      const body = {
+        request: {
+          time_descriptor: { start: s, end: e },
+          search: {},
+          filter: {},
+          list_control: {
+            rules: [{ direction: 2, field: "sku_gmv" }],
+            pagination: { size: sz, page },
+          },
+        },
+      };
+      let j;
+      try {
+        const resp = await fetch(u, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        j = JSON.parse(await resp.text());
+      } catch (err) {
+        return { error: `第 ${page + 1} 页请求失败：${(err && err.message) || err}` };
+      }
+      if (!j || j.code !== 0) {
+        return { error: `code=${j && j.code} ${(j && j.message) || ""}`.trim(), page: page + 1 };
+      }
+      const items = (j.data && j.data.items) || [];
+      all.push(...items);
+      if (items.length < sz) return { items: all, pages: page + 1 };
+    }
+    return { items: all, pages: mp, truncated: true };
+  }, [url, start, endExclusive, size, maxPages]);
+
+  if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
+  if (r.error) throw new Error(r.error);
+  if (!r.result) throw new Error("页面执行没有返回结果");
+  if (r.result.error) throw new Error(r.result.error);
+  return r.result;
+}
+
+async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
+  const { skuCache: prev } = await skGet({ skuCache: null });
   const host = await ensureHost("seller", log);
 
-  // 分页尺寸不能贪：真实页面用的是 10，给 5000 会被后端拒绝。
-  const SIZES = [{ size: 100, maxPages: 60 }, { size: 10, maxPages: 400 }];
-
-  // 商品分析（洞察）数据是 T+1 的。用户选到"今天"时，结束日期指向了还没聚合的日期，
-  // 后端会回 code=98001021 call downstream server error —— 这不是参数错误，是没数据。
-  // 所以报这个码就把结束日期往前撤一天重试，最多撤 5 天，并明确告诉用户实际截止到哪天。
-  let endEx = endDateExclusive;
+  // 分页尺寸按页面的真实请求来：页面用的是 10。
+  // 之前一上来给 100，后端聚合不了直接回 98001021，就先被误判成"数据没就绪"。
+  const SIZES = [10, 100];
   let all = null;
-  let usedEnd = endEx;
-  let sizeNote = "";
+  let usedSize = 0;
+  let pages = 0;
+  let lastErr = "";
 
-  for (let back = 0; back <= 7 && !all; back++) {
-    for (const { size, maxPages } of SIZES) {
-      try {
-        log(`拉取商品SKU（区间 ${startDate} ~ ${shiftDate(endEx, -1)}，每页 ${size} 条）…`);
-        const got = await pullSkuPages(host, startDate, endEx, size, maxPages, log);
-        all = got;
-        usedEnd = endEx;
-        sizeNote = `每页 ${size} 条`;
-        break;
-      } catch (e) {
-        const msg = String(e.message || e);
-        if (back === 0 && size === SIZES[0].size) {
-          const { params = {} } = await chrome.storage.local.get({ params: {} });
-          const p0 = params[host] || {};
-          log(`参数自检：fp=${p0.fp ? "有" : "缺"} bsid=${p0["X-Tts-Oec-Bsid"] ? "有" : "缺"} seller=${p0.oec_seller_id || "缺"}`);
-        }
-        if (/98001021|downstream/.test(msg)) {
-          // 数据未就绪，换日期比换分页尺寸有用，直接跳出内层
-          log(`该截止日期暂无聚合数据（结束 ${shiftDate(endEx, -1)}），往前撤一天`);
-          if (back === 2) log("提示：可在店铺后台「商品分析」页用同样日期看是否有数据，若那里也是空，就是平台还没结算到那天");
-          break;
-        }
-        log(`每页 ${size} 时失败：${msg}`);
-      }
-    }
-    if (!all) {
-      endEx = shiftDate(endEx, -1);
-      if (back === 1) {
-        // 撤了一次日期还不行，说明可能不是日期问题：把风控参数重新学一遍再试
-        log("撤日期仍未成功，尝试刷新登录态与风控参数…");
-        try { await ensureHost("seller", log, true); } catch (e) { log(`刷新参数失败：${e.message}`); }
-      }
+  for (const size of SIZES) {
+    try {
+      log(`在页面上下文里取商品SKU（每页 ${size} 条）…`);
+      const r = await pagePullSku(host, startDate, endDateExclusive, size, size === 10 ? 400 : 60);
+      all = r.items;
+      pages = r.pages;
+      usedSize = size;
+      log(`共 ${pages} 页，${all.length} 条`);
+      break;
+    } catch (e) {
+      lastErr = String((e && e.message) || e);
+      log(`每页 ${size} 条失败：${lastErr}`);
     }
   }
 
   if (!all) {
     throw new Error(
-      "商品SKU接口取不到数据，本轮跳过（映射沿用现有主表与目录里的表，" +
-      "不影响净利计算）。需要更新映射时：打开一次店铺「商品分析」页让它发出真实请求，" +
-      "或手工导出 product_sku_list.xlsx 放进 data/mapping/"
+      `商品SKU取数失败：${lastErr}。映射本轮沿用现有主表，不影响净利计算。`,
     );
   }
-
-  if (!all.length) throw new Error("商品SKU返回 0 条：该区间可能没有任何商品数据");
+  if (!all.length) throw new Error("商品SKU返回 0 条，该区间可能没有商品数据");
 
   const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
-  const name = `sku_list_${startDate}_${shiftDate(usedEnd, -1)}.json`;
+  const name = `sku_list_${startDate}_${shiftDate(endDateExclusive, -1)}.json`;
   const saved = await uploadToBridge(name, bytes.buffer);
-  await chrome.storage.local.set({ skuCache: { at: Date.now(), file: saved.path, items: all.length } });
+  await skSet({ skuCache: { at: Date.now(), file: saved.path, items: all.length } });
 
-  const realEnd = shiftDate(usedEnd, -1);
-  if (realEnd !== shiftDate(endDateExclusive, -1)) {
-    log(`注意：平台数据截至 ${realEnd}（T+1 延迟），不是你选的 ${shiftDate(endDateExclusive, -1)}`);
-  }
   if (prev && prev.items != null && prev.items !== all.length) {
     const delta = all.length - prev.items;
     log(`映射有变化：${prev.items} → ${all.length} 条（${delta > 0 ? "+" : ""}${delta}）`);
   }
-  log(`已保存：${saved.path}（${all.length} 条 SKU，${sizeNote}）`);
-  return { saved: saved.path, items: all.length, realEnd };
+  log(`已保存：${saved.path}（${all.length} 条 SKU，每页 ${usedSize} 条）`);
+  return { saved: saved.path, items: all.length };
 }
 
 // ---------------- 任务：联盟佣金 ----------------
