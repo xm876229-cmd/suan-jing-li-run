@@ -138,12 +138,16 @@ class Handler(BaseHTTPRequestHandler):
 
         CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
         f = CAPTURE_DIR / f"capture-{datetime.now():%Y%m%d}.jsonl"
-        with f.open("a", encoding="utf-8") as fh:
+        with f.open("a", encoding="utf-8", errors="replace") as fh:
             for rec in batch:
                 if not isinstance(rec, dict):
                     continue
                 rec["_receivedAt"] = datetime.now().isoformat(timespec="seconds")
-                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                # 页面里的字符串可能被截断出半个代理对（lone surrogate），
+                # 直接写会让整个文件出现非法 UTF-8 字节，后续所有读取都报错。
+                line = json.dumps(rec, ensure_ascii=False)
+                line = line.encode("utf-8", "replace").decode("utf-8", "replace")
+                fh.write(line + "\n")
         _json(self, {"ok": True, "saved": len(batch), "file": f.name})
 
 

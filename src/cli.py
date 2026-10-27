@@ -94,7 +94,9 @@ def main(argv: list[str] | None = None) -> int:
 
     rates, switches = load_rates(args.rates)
     if country not in rates:
-        print(f"config/rates.json 里没有「{country}」的参数，可选：{'、'.join(rates)}")
+        print(f"config/rates.json 里没有「{country}」的参数。")
+        print(f"已配置的国家：{'、'.join(rates)}")
+        print(f"新增方法：在 {args.rates} 的 countries 下加一段即可，键名与 --country 保持一致。")
         return 2
     params = rates[country]
 

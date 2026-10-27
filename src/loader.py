@@ -125,7 +125,8 @@ def find_header_row(rows: list[tuple], required: tuple[str, ...], max_scan: int 
         if score > best[0] or (score == best[0] and len(cm) > len(best[2])):
             best = (score, i, cm)
     score, idx, cm = best
-    if score < max(1, len(required) // 2):
+    # 至少命中 2 个（或全部，若要求少于 2 个）才算找到表头
+    if score < min(2, len(required)):
         return -1, {}
     return idx, cm
 
@@ -575,31 +576,122 @@ def load_from_files(order_file: Path, ads_file: Optional[Path] = None,
                    commissions=commissions, issues=issues, sources=sources)
 
 
+# 每类表的特征字段：只要这几个字段同时出现在同一行，就能确定类型
+TABLE_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("order", ("order_id", "subtotal_before")),
+    ("ads", ("product_id", "ad_cost")),
+    ("affiliate", ("product_id", "commission")),
+    ("mapping", ("sku_id", "product_id")),
+)
+
+
+def classify_rows(rows: list[tuple]) -> Optional[str]:
+    """按表头特征判断这是一张什么表。
+
+    不靠文件名，因为平台导出的默认文件名千奇百怪
+    （"全部 笔订单-2026-10-27-16_59.csv"、"creative data for product campaigns ..."），
+    而表头结构是稳定的。
+    """
+    for kind, required in TABLE_SIGNATURES:
+        hidx, cm = find_header_row(rows, required)
+        if hidx >= 0 and all(k in cm for k in required):
+            return kind
+    return None
+
+
 def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
                   usd_to_local: float = 1.0) -> RawData:
-    """从目录按文件名关键字识别四类文件。"""
+    """从目录自动识别四类文件：逐张读表头判断类型，同名类型取最新的一张。"""
     folder = Path(folder)
-    found: dict[str, Optional[Path]] = {"order": None, "map": None, "ad": None, "affiliate": None}
-    rules = [
-        ("order", ("订单", "order")),
-        ("affiliate", ("联盟", "佣金", "affiliate", "commission")),
-        ("ad", ("广告", "ads", "advert", "_ad")),
-        ("map", ("商品", "链接", "映射", "找id", "product", "sku")),
-    ]
+    buckets: dict[str, list[tuple[Path, list[tuple]]]] = {
+        "order": [], "ads": [], "affiliate": [], "mapping": []
+    }
+    skipped: list[str] = []
+
     for f in sorted(folder.iterdir()):
         if not f.is_file() or f.suffix.lower() not in (".xlsx", ".xls", ".csv", ".txt"):
             continue
-        name = f.name.lower()
-        for key, kws in rules:
-            if found[key] is None and any(k.lower() in name for k in kws):
-                found[key] = f
-                break
+        if f.name.startswith("~$"):
+            continue
+        try:
+            rows = read_table(f)
+        except Exception:
+            skipped.append(f.name)
+            continue
+        kind = classify_rows(rows)
+        if kind:
+            buckets[kind].append((f, rows))
+        else:
+            skipped.append(f.name)
 
-    if found["order"] is None:
-        raise FileNotFoundError(f"目录里没找到订单导出文件：{folder}")
+    if not buckets["order"]:
+        raise FileNotFoundError(
+            f"目录里没识别出订单表：{folder}\n"
+            f"（跳过：{'、'.join(skipped) if skipped else '无'}）"
+        )
 
-    return load_from_files(found["order"], found["ad"], found["affiliate"],
-                           found["map"], costs_file, usd_to_local)
+    def newest(kind: str):
+        items = buckets[kind]
+        if not items:
+            return None
+        return max(items, key=lambda x: x[0].stat().st_mtime)
+
+    order_f, order_rows = newest("order")
+    issues: list[str] = []
+    sources: dict[str, str] = {"订单": order_f.name}
+    orders = parse_orders(order_rows)
+
+    sku_index = SkuIndex()
+    m = newest("mapping")
+    if m:
+        sku_index = parse_mapping(m[1])
+        sources["映射"] = m[0].name
+        if not len(sku_index):
+            issues.append(f"映射表里没识别出 SKU ID / Product ID 列：{m[0].name}")
+
+    costs: dict[str, float] = {}
+    if costs_file and Path(costs_file).exists():
+        cpath = Path(costs_file)
+        if cpath.is_dir():
+            for cf in cpath.iterdir():
+                if cf.suffix.lower() in (".xlsx", ".xls", ".csv") and not cf.name.startswith("~$"):
+                    c = parse_costs(read_table(cf, sheet="成本") if cf.suffix.lower().startswith(".xls") else read_table(cf))
+                    if c:
+                        costs.update(c)
+                        sources["成本"] = cf.name
+                        break
+        else:
+            rows = read_table(cpath, sheet="成本") if cpath.suffix.lower().startswith(".xls") else read_table(cpath)
+            costs = parse_costs(rows)
+            sources["成本"] = cpath.name
+        if not costs:
+            issues.append(f"成本文件里没读到编码与成本：{costs_file}")
+    elif costs_file:
+        issues.append(f"成本文件不存在：{costs_file}")
+
+    ads: dict[str, float] = {}
+    a = newest("ads")
+    if a:
+        ads, ad_issues = parse_ads(a[1], usd_to_local)
+        issues += ad_issues
+        sources["广告"] = a[0].name
+
+    commissions: dict[str, float] = {}
+    c = newest("affiliate")
+    if c:
+        commissions, com_issues = parse_commissions(c[1])
+        issues += com_issues
+        sources["联盟佣金"] = c[0].name
+
+    for kind, label in (("ads", "广告表"), ("affiliate", "联盟佣金表"), ("mapping", "商品映射表")):
+        if not buckets[kind]:
+            issues.append(f"目录里没识别出{label}，相关字段按 0 计")
+
+    attach_product_ids(orders, sku_index, issues)
+    attach_costs(orders, costs, issues)
+
+    return RawData(orders=orders, costs=costs, sku_index=sku_index, ads=ads,
+                   commissions=commissions, issues=issues, sources=sources)
 
 
 def load_from_workbook(path: Path, usd_to_local: float = 1.0) -> RawData:
