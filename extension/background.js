@@ -91,14 +91,13 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
         status: null,
         contentType: "",
         ms: 0,
-        reqBody: summarizeRequestBody(details.requestBody),
+        reqBody: null,
         respSample: null,
         page: details.initiator || "",
         at: new Date().toISOString(),
       });
     },
-    { urls: ["*://*.tiktok.com/*", "*://*.tiktokglobalshop.com/*"] },
-    ["requestBody"]
+    { urls: ["*://*.tiktok.com/*", "*://*.tiktokglobalshop.com/*"] }
   );
 }
 
@@ -731,3 +730,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 setInterval(flush, 3000);
+
+// 启动心跳：用来确认后台脚本已经换到新版本
+(function announce() {
+  try {
+    fetch(`${BRIDGE}/log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ msg: `[扩展] 后台启动 v${chrome.runtime.getManifest().version}，webRequest=${!!(chrome.webRequest && chrome.webRequest.onBeforeRequest)}，alarms=${!!chrome.alarms}` }),
+    }).catch(() => {});
+  } catch (e) { /* 忽略 */ }
+})();
