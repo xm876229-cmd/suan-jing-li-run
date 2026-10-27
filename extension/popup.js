@@ -211,17 +211,45 @@ function runTasks(task, btn) {
   // 以前是等任务结束才回，任务一跑几分钟，面板一关消息通道就断了，
   // 用户看到的是「没有响应」——那不是任务失败，是回执方式错了。
   saveCountry();
-  safeSend({ type: "runTask", task, range }, (resp) => {
-    if (btn) btn.disabled = false;
-    let lasterr = null;
-    try { lasterr = chrome.runtime.lastError; } catch (e) { /* 上下文已失效 */ }
-    if (lasterr) {
-      log(`后台未响应：${lasterr.message}（请关掉面板重开）`);
-      return;
-    }
-    if (resp && resp.started) log(`已启动：${label}，进度看下方日志`);
-    else if (!resp) log("后台未响应，请刷新扩展后重开面板");
-  });
+
+  // 双通道：先把任务写进扩展存储（后台每分钟会来领），再发消息抢先执行。
+  // 消息这条偶尔会断——断的时候存储那条兜住，任务照样跑。
+  const force = task === "sku";
+  try {
+    chrome.storage.local.set(
+      { pendingTask: { task, range, force, at: Date.now() } },
+      () => {
+        safeSend({ type: "ping" }, (pr) => {
+          if (!pr || !pr.ok) {
+            if (btn) btn.disabled = false;
+            log("⚠ 后台没响应消息，但任务已入队，1 分钟内会自动开始");
+            return;
+          }
+          log(`后台在线 v${pr.version}，提交任务…`);
+          safeSend({ type: "runTask", task, range, force }, (resp) => {
+            if (btn) btn.disabled = false;
+            let lasterr = null;
+            try { lasterr = chrome.runtime.lastError; } catch (e) { /* 上下文已失效 */ }
+            if (lasterr) {
+              log(`消息通道断了，任务已入队，1 分钟内自动开始（${lasterr.message}）`);
+              return;
+            }
+            if (resp && resp.started) log(`已启动：${label}，进度看下方日志`);
+            else log("已入队，1 分钟内自动开始");
+          });
+        });
+      },
+    );
+  } catch (e) {
+    onContextLost();
+  }
+
+  // 8 秒后回头看一眼：真跑起来了就会有 running 标记，没有就说明还在排队
+  setTimeout(() => {
+    safeSend({ type: "state" }, (s) => {
+      if (!s || !s.running) log("（还没开始执行，最多等 1 分钟由后台自动领取）");
+    });
+  }, 8000);
 }
 
 function saveCountry() {
@@ -248,6 +276,15 @@ $("calcOnly") && $("calcOnly").addEventListener("click", (e) => {
     if (chrome.runtime.lastError) { log(`后台未响应：${chrome.runtime.lastError.message}`); return; }
     if (resp && resp.started) log("已开始核算，用现有导出文件算，不重新取数");
   });
+});
+
+// 打开面板先探一次后台：通了说明「面板 → 后台」这条路是活的，
+// 不通就是面板过期或后台没起来，不用等用户点按钮才发现。
+safeSend({ type: "ping" }, (r) => {
+  const v = r && r.ok ? r.version : "";
+  if ($("ver")) $("ver").textContent = v ? `v${v}` : "";
+  if (!r || !r.ok) { log("⚠ 后台没有响应，扩展可能没加载好"); return; }
+  log(`后台在线 v${v}`);
 });
 
 safeSend({ type: "state" }, (s) => { if (s) render(s); });

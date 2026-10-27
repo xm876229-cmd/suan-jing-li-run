@@ -597,6 +597,10 @@ async function pollAdsQuiet() {
 try {
   if (chrome.alarms) {
     chrome.alarms.create("ads-poll", { periodInMinutes: 3, delayInMinutes: 2 });
+    chrome.alarms.create("pending-watch", { periodInMinutes: 1, delayInMinutes: 1 });
+    chrome.alarms.onAlarm.addListener((a) => {
+      if (a.name === "pending-watch") consumePending().catch(() => {});
+    });
     chrome.alarms.onAlarm.addListener((a) => {
       if (a.name === "ads-poll") pollAdsQuiet();
     });
@@ -856,6 +860,50 @@ async function calcNow(range, log, opts = {}) {
   return j;
 }
 
+/** 真正执行一个任务：写运行标记、保活、跑、落结果。两条触发路径共用。 */
+async function executeTask(task, range, log, opts = {}) {
+  startKeepAlive();
+  await chrome.storage.local.set({ running: { task, at: Date.now() } });
+  try {
+    log(`开始（${range?.startDate} ~ ${range?.to || range?.endDateExclusive}）`);
+    const withCalc = opts.withCalc !== false && task !== "ads";
+    const result = withCalc
+      ? await runTaskThenCalc(task, range || {}, log, opts)
+      : await runTask(task, range || {}, log, opts);
+    await chrome.storage.local.set({ lastResult: { task, ok: true, at: Date.now(), result } });
+    log("完成");
+    return { ok: true, result };
+  } catch (e) {
+    const err = String(e.message || e);
+    log(`失败：${err}`);
+    await chrome.storage.local.set({ lastResult: { task, ok: false, at: Date.now(), error: err } });
+    return { ok: false, error: err };
+  } finally {
+    stopKeepAlive();
+    setTimeout(() => chrome.storage.local.set({ running: null }), 1500);
+  }
+}
+
+// ---------------- 存储领取 ----------------
+// 面板发消息这条路偶尔会断（面板上下文失效、后台刚被唤醒等）。
+// 所以点按钮时同时把任务写进 storage，这里定时来领——
+// 只要有一条路通，任务就能跑起来。
+
+const PENDING_KEY = "pendingTask";
+
+async function consumePending() {
+  const { [PENDING_KEY]: p } = await chrome.storage.local.get({ [PENDING_KEY]: null });
+  if (!p || !p.task || Date.now() - (p.at || 0) > 10 * 60 * 1000) return null;
+
+  const { running } = await chrome.storage.local.get({ running: null });
+  if (running) return null;                 // 已经在跑了，别重复执行
+
+  await chrome.storage.local.set({ [PENDING_KEY]: null });
+  const log = (m) => appendTaskLog(`[${p.task}] ${m}`);
+  log("从待办队列领取任务");
+  return executeTask(p.task, p.range || {}, log, { force: !!p.force, withCalc: p.withCalc });
+}
+
 async function runTaskThenCalc(task, range, log, opts = {}) {
   const r = await runTask(task, range, log, opts);
   try {
@@ -870,6 +918,13 @@ async function runTaskThenCalc(task, range, log, opts = {}) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return false;
+
+  if (msg.type === "ping") {
+    let v = "?";
+    try { v = chrome.runtime.getManifest().version; } catch (e) { /* 忽略 */ }
+    sendResponse({ ok: true, version: v, at: Date.now() });
+    return true;
+  }
 
   if (msg.type === "capture") {
     recordCapture(msg.payload);
@@ -951,29 +1006,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const task = msg.task;
       const log = (m) => appendTaskLog(`[${task}] ${m}`);
-      startKeepAlive();
-      await chrome.storage.local.set({ running: { task, at: Date.now() } });
-      try {
-        log(`开始（${msg.range?.startDate} ~ ${msg.range?.to || msg.range?.endDateExclusive}）`);
-        const withCalc = msg.withCalc !== false && task !== "ads";
-        const result = withCalc
-          ? await runTaskThenCalc(task, msg.range || {}, log, { force: !!msg.force })
-          : await runTask(task, msg.range || {}, log, { force: !!msg.force });
-        await chrome.storage.local.set({
-          lastResult: { task, ok: true, at: Date.now(), result },
-        });
-        log("完成");
-        finish({ ok: true, started: true, done: true, result });
-      } catch (e) {
-        const err = String(e.message || e);
-        log(`失败：${err}`);
-        await chrome.storage.local.set({ lastResult: { task, ok: false, at: Date.now(), error: err } });
-        finish({ ok: false, started: true, error: err });
-      } finally {
-        stopKeepAlive();
-        // 清掉 running 前留一点余量，避免面板刚好在中间轮询到空
-        setTimeout(() => chrome.storage.local.set({ running: null }), 1500);
-      }
+      await chrome.storage.local.set({ [PENDING_KEY]: null });   // 消息到了，待办作废
+      const r = await executeTask(task, msg.range || {}, log, {
+        force: !!msg.force, withCalc: msg.withCalc,
+      });
+      finish({ ok: r.ok, started: true, done: true, result: r.result, error: r.error });
     })();
     return true;
   }
@@ -1005,6 +1042,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 setInterval(flush, 3000);
+
+// 后台每次被唤醒都先看看有没有待办任务
+setTimeout(() => { consumePending().catch(() => {}); }, 1200);
 
 // 启动心跳：用来确认后台脚本已经换到新版本
 (function announce() {
