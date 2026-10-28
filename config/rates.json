@@ -31,8 +31,7 @@
       "currency": "MYR",
       "rates_verified": true,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0.54
     },
     "菲律宾": {
       "cny_to_local": 9.3,
@@ -49,8 +48,7 @@
       "currency": "PHP",
       "rates_verified": false,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0
     },
     "泰国": {
       "cny_to_local": 4.91,
@@ -67,8 +65,7 @@
       "currency": "THB",
       "rates_verified": false,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0
     },
     "越南": {
       "region": "东南亚",
@@ -85,8 +82,7 @@
       "growth_fee": 0.0,
       "logistics": 0.0,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0
     },
     "新加坡": {
       "region": "东南亚",
@@ -103,8 +99,7 @@
       "growth_fee": 0.0,
       "logistics": 0.0,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0
     },
     "印尼": {
       "region": "东南亚",
@@ -121,8 +116,7 @@
       "growth_fee": 0.0,
       "logistics": 0.0,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0
     },
     "美国": {
       "region": "欧美",
@@ -139,8 +133,7 @@
       "growth_fee": 0.0,
       "logistics": 0.0,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0
     },
     "英国": {
       "region": "欧美",
@@ -157,8 +150,7 @@
       "growth_fee": 0.0,
       "logistics": 0.0,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0
     },
     "德国": {
       "region": "欧美",
@@ -175,8 +167,7 @@
       "growth_fee": 0.0,
       "logistics": 0.0,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0
     },
     "法国": {
       "region": "欧美",
@@ -193,8 +184,7 @@
       "growth_fee": 0.0,
       "logistics": 0.0,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0
     },
     "意大利": {
       "region": "欧美",
@@ -211,8 +201,7 @@
       "growth_fee": 0.0,
       "logistics": 0.0,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0
     },
     "西班牙": {
       "region": "欧美",
@@ -229,8 +218,7 @@
       "growth_fee": 0.0,
       "logistics": 0.0,
       "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变",
-      "order_service": 0,
-      "other_fee": 0
+      "order_service": 0
     }
   },
   "switches": {

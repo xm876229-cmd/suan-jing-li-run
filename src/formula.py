@@ -250,41 +250,39 @@ DEFAULTS: dict = {
          "kinds": ["normal", "zero_amount"]},
         {"id": "cost", "label": "商品成本", "role": "cost",
          "expr": "cost_cny * params.cny_to_local",
-         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
+         "kinds": ["normal"]},
         {"id": "order_count", "label": "订单数", "role": "order_count",
          "expr": "orders",
-         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
+         "kinds": ["normal"]},
         {"id": "items", "label": "件数", "role": "items",
          "expr": "qty",
-         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
+         "kinds": ["normal"]},
         {"id": "buyer_paid", "label": "买家实付", "role": "buyer_paid",
          "expr": "paid",
          "kinds": ["normal", "zero_amount"]},
         {"id": "dispatch", "label": "发单费",
          "expr": "orders * params.dispatch_fee_cny * params.cny_to_local",
-         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
+         "kinds": ["normal"]},
         {"id": "platform_commission", "label": "平台佣金",
          "expr": "gmv * params.platform_commission",
-         "kinds": ["normal", "cancelled", "refunded"]},
-        {"id": "tx_fee", "label": "交易手续费",
-         "expr": "paid * params.tx_fee",
          "kinds": ["normal"]},
+        {"id": "tx_fee", "label": "交易手续费",
+         "expr": "paid * params.tx_fee"},
         {"id": "ads", "label": "广告花费", "expr": "ads"},
+        {"id": "cashback", "label": "奖金返现",
+         "expr": "gmv * params.cashback", "kinds": ["normal"]},
         {"id": "affiliate", "label": "达人佣金", "expr": "commission"},
         {"id": "order_service", "label": "订单服务费",
          "expr": "orders * params.order_service",
-         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
-        {"id": "other_fee", "label": "其他费用",
-         "expr": "gmv * params.other_fee",
          "kinds": ["normal"]},
     ],
     "by_country": {},
     "formulas": {
         "gross_profit": "gmv - cost",
-        "total_fees": ("dispatch + platform_commission + tx_fee + ads + affiliate"
-                       " + order_service + other_fee"),
-        "net": ("gmv - cost - dispatch - platform_commission - tx_fee - ads"
-                " - affiliate - order_service - other_fee"),
+        "total_fees": ("dispatch + platform_commission + tx_fee + cashback"
+                       " + ads + affiliate + order_service"),
+        "net": ("gmv - cost - dispatch - platform_commission - tx_fee - cashback"
+                " - ads - affiliate - order_service"),
         "net_rate": "net / gmv",
     },
 }
@@ -585,7 +583,9 @@ def compute_params(params_cfg: list[dict], ctx: dict) -> tuple[dict[str, float],
             #   裸写 gmv   = 按这一项自己的 kinds 现算的 GMV
             #   param.gmv  = 参数表里「GMV」那一项算出来的值
             local["param"] = {k: v for k, v in resolved.items() if k != fid}
-            local.pop(fid, None)      # 不允许自己引用自己
+            # 刻意不把同名变量删掉：参数 id 叫 ads / gmv / cost 时，
+            # 公式里写 ads 就是那个「算好的量」（广告表花费），不是自己引用自己。
+            # 删掉会让「广告花费 = ads」直接变成 0，这个坑很难看出来。
 
             try:
                 if py_expr.strip():

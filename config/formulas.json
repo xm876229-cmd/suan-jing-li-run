@@ -11,6 +11,10 @@
     "     gmv          按这一项勾选的订单类别，算 Σ折扣前小计 − Σ卖家折扣",
     "     paid         买家实付合计",
     "     qty          件数",
+    "  要算新的费用（比如奖金返现、包材费）：先在「费率」页加一项费率，",
+    "  再在本表加一条参数引用它。软件不预设「其他费用」这种空名字。",
+    "  默认只算「正常订单」：取消/退货/样品的成本与发单费不计——和原模板一致。",
+    "  想算哪类就在参数右边把那一格勾上；交易手续费默认含取消单（平台照收）。",
     "     orders       订单数（一个订单里多条链接按 SKU 行数分摊）",
     "     cost_cny     商品成本（人民币）= Σ(数量 × 成本表单价)",
     "     cost         商品成本（本地货币）= cost_cny × 汇率",
@@ -190,10 +194,7 @@
       "role": "cost",
       "expr": "cost_cny * params.cny_to_local",
       "kinds": [
-        "normal",
-        "cancelled",
-        "refunded",
-        "zero_amount"
+        "normal"
       ]
     },
     {
@@ -202,10 +203,7 @@
       "role": "order_count",
       "expr": "orders",
       "kinds": [
-        "normal",
-        "cancelled",
-        "refunded",
-        "zero_amount"
+        "normal"
       ]
     },
     {
@@ -214,10 +212,7 @@
       "role": "items",
       "expr": "qty",
       "kinds": [
-        "normal",
-        "cancelled",
-        "refunded",
-        "zero_amount"
+        "normal"
       ]
     },
     {
@@ -226,8 +221,7 @@
       "role": "buyer_paid",
       "expr": "paid",
       "kinds": [
-        "normal",
-        "zero_amount"
+        "normal"
       ]
     },
     {
@@ -235,10 +229,7 @@
       "label": "发单费",
       "expr": "orders * params.dispatch_fee_cny * params.cny_to_local",
       "kinds": [
-        "normal",
-        "cancelled",
-        "refunded",
-        "zero_amount"
+        "normal"
       ]
     },
     {
@@ -246,18 +237,13 @@
       "label": "平台佣金",
       "expr": "gmv * params.platform_commission",
       "kinds": [
-        "normal",
-        "cancelled",
-        "refunded"
+        "normal"
       ]
     },
     {
       "id": "tx_fee",
       "label": "交易手续费",
-      "expr": "paid * params.tx_fee",
-      "kinds": [
-        "normal"
-      ]
+      "expr": "paid * params.tx_fee"
     },
     {
       "id": "ads",
@@ -270,20 +256,17 @@
       "expr": "commission"
     },
     {
-      "id": "order_service",
-      "label": "订单服务费",
-      "expr": "orders * params.order_service",
+      "id": "cashback",
+      "label": "奖金返现",
+      "expr": "gmv * params.cashback",
       "kinds": [
-        "normal",
-        "cancelled",
-        "refunded",
-        "zero_amount"
+        "normal"
       ]
     },
     {
-      "id": "other_fee",
-      "label": "其他费用",
-      "expr": "gmv * params.other_fee",
+      "id": "order_service",
+      "label": "订单服务费",
+      "expr": "orders * params.order_service",
       "kinds": [
         "normal"
       ]
@@ -291,8 +274,8 @@
   ],
   "formulas": {
     "gross_profit": "gmv - cost",
-    "total_fees": "dispatch + platform_commission + tx_fee + ads + affiliate + order_service + other_fee",
-    "net": "gmv - cost - dispatch - platform_commission - tx_fee - ads - affiliate - order_service - other_fee",
+    "total_fees": "dispatch + platform_commission + tx_fee + cashback + ads + affiliate + order_service",
+    "net": "gmv - cost - dispatch - platform_commission - tx_fee - cashback - ads - affiliate - order_service",
     "net_rate": "net / gmv"
   },
   "by_country": {}

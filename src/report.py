@@ -151,7 +151,8 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
     t = res.total
     tfv = fee_vals(t)
     totals = [
-        "", "合计", "", f"{res.order_count} 个订单 / {res.line_count} 行",
+        "", "合计", "",
+        f"{res.line_count} 行 · 全部 {res.order_count} 单 · 计入 {t.orders:.1f} 单",
         t.gmv, t.orders, t.aov if t.orders else 0, t.buyer_paid,
         t.cost_local, t.gross_profit, t.gmv - t.cost_local,
         *tfv,

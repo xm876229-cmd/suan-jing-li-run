@@ -282,7 +282,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.workbook.exists():
             print(f"找不到工作簿：{args.workbook}")
             return 2
-        data = load_from_workbook(args.workbook, params.usd_to_local, costs_path)
+        data = load_from_workbook(args.workbook, params.usd_to_local, costs_path,
+                                  order_fields=order_fields, cost_fields=cost_fields)
         source = args.workbook.name
     elif args.orders:
         if not args.orders.exists():

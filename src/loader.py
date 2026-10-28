@@ -1025,7 +1025,9 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
 
 
 def load_from_workbook(path: Path, usd_to_local: float = 1.0,
-                       costs_file: Optional[Path] = None) -> RawData:
+                       costs_file: Optional[Path] = None,
+                       order_fields: dict | None = None,
+                       cost_fields: dict | None = None) -> RawData:
     """兼容旧版主工作簿（订单表前面插了四列人工列，链接资料是完整模板）。"""
     path = Path(path)
     issues: list[str] = []
@@ -1043,15 +1045,16 @@ def load_from_workbook(path: Path, usd_to_local: float = 1.0,
     com_rows = sheet_rows("联盟佣金")
     wb.close()
 
-    orders = parse_orders(order_rows)
+    titles: list[str] = []
+    orders = parse_orders(order_rows, order_fields, titles)
     sku_index = parse_mapping(link_rows)
 
-    costs = parse_costs(cost_rows)
+    costs = parse_costs(cost_rows, cost_fields)
     # 如果 data/costs 里有更新的一份，用它覆盖工作簿里的成本表
     if costs_file and Path(costs_file).exists():
         cf = Path(costs_file)
         rows = read_table(cf, sheet="成本") if cf.suffix.lower().startswith(".xls") else read_table(cf)
-        override = parse_costs(rows)
+        override = parse_costs(rows, cost_fields)
         if override:
             costs = override
     ads, ad_issues = parse_ads(ad_rows, usd_to_local)
@@ -1063,4 +1066,4 @@ def load_from_workbook(path: Path, usd_to_local: float = 1.0,
 
     return RawData(orders=orders, costs=costs, sku_index=sku_index, ads=ads,
                    commissions=commissions, issues=issues,
-                   sources={"工作簿": path.name})
+                   sources={"工作簿": path.name}, order_titles=titles)
