@@ -633,7 +633,9 @@ async function pagePullSkuByExport(host, start, endExclusive) {
         time_descriptor: { start: s, end: e },
         search: {},
         filter: {},
-        list_control: { rules: [{ direction: 2, field: "sku_gmv" }], pagination: { size: 10, page: 0 } },
+        // 页面自己用的是「总条数」一次导全（抓包里是 236）。
+        // 这里给一个足够大的值，导出接口对 size 不敏感，不像 list 会超时。
+        list_control: { rules: [{ direction: 2, field: "sku_gmv" }], pagination: { size: 10000, page: 0 } },
       },
     };
 
@@ -746,6 +748,19 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   const host = await ensureHost("seller", log);
 
   log(`取商品SKU映射（区间 ${startDate} ~ ${endDateExclusive}）…`);
+
+  // 先用导出任务：抓包里页面自己就是这么取的，16 天区间 + 一次导全，status 200。
+  // list 接口对长区间会超时，只在导出失败时兜底。
+  try {
+    log("走导出任务（支持长区间，一次导全）…");
+    const saved = await pagePullSkuByExport(host, startDate, endDateExclusive);
+    log(`导出文件已保存：${saved.path}（${Math.round((saved.bytes || 0) / 1024)} KB）`);
+    await skSet({ skuCache: { at: Date.now(), file: saved.path, items: null } });
+    return { saved: saved.path, via: "export" };
+  } catch (e) {
+    log(`导出任务失败：${(e && e.message) || e}，改用 list 接口…`);
+  }
+
   let all = [];
   try {
     all = await pagePullSkuRanged(host, startDate, endDateExclusive, log);
@@ -753,21 +768,10 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     log(`list 接口取数异常：${(e && e.message) || e}`);
   }
 
-  // list 接口拿不到就换导出任务：它异步生成文件，对长区间一直有效，
-  // 也是用户手工导出走的那条路。
   if (!all.length) {
-    log("list 接口没取到，改用导出任务…");
-    try {
-      const saved = await pagePullSkuByExport(host, startDate, endDateExclusive);
-      log(`导出文件已保存：${saved.path}（${Math.round((saved.bytes || 0) / 1024)} KB）`);
-      await skSet({ skuCache: { at: Date.now(), file: saved.path, items: null } });
-      return { saved: saved.path, via: "export" };
-    } catch (e) {
-      log(`导出任务也失败：${(e && e.message) || e}`);
-    }
     throw new Error(
       "商品SKU两条路都没取到，本轮沿用现有主表，不影响净利计算" +
-      "（也可手工导 product_sku_list.xlsx 放进 data/mapping/）",
+      "（主工作簿的「链接资料」表已自动作为映射来源）",
     );
   }
 

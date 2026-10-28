@@ -93,6 +93,39 @@ MAPPING_DIR = ROOT / "data" / "mapping"
 INBOX_DIR = ROOT / "data" / "exports" / "_inbox"
 
 
+
+def refresh_link_info() -> None:
+    """主工作簿更新过就重新导出「链接资料」表。
+
+    这张表是店铺导出的当前全部链接（实测 1382 条 SKU），
+    比接口取到的全得多，是映射的最佳来源。但它只反映"现在"，
+    删减过的旧 SKU 不会出现——所以必须与累积主表配合使用。
+
+    只在新工作簿出现时才读它：打开大工作簿要一两秒，
+    每次算账都读一遍没有必要。
+    """
+    try:
+        from scripts.import_link_info import OUT, find_workbook, main as link_main
+
+        cands = [
+            f for f in ROOT.glob("*.xlsx")
+            if f.is_file() and not f.name.startswith("~$")
+        ]
+        if not cands:
+            return
+        newest = max(cands, key=lambda f: f.stat().st_mtime)
+        if OUT.exists() and newest.stat().st_mtime <= OUT.stat().st_mtime:
+            return
+
+        wb = find_workbook()
+        if not wb:
+            return
+        print(f"检测到工作簿更新（{wb.name}），重新导出「链接资料」…")
+        link_main([str(wb)])
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠ 链接资料导出失败：{e}")
+
+
 def pick_mapping(explicit: Path | None) -> tuple[Path | None, str]:
     """决定这次用哪份 SKU→商品 映射。
 
@@ -103,6 +136,9 @@ def pick_mapping(explicit: Path | None) -> tuple[Path | None, str]:
     """
     if explicit:
         return explicit, "命令行指定"
+
+    # 先看看主工作簿的「链接资料」表有没有更新（它是当前全量映射的最佳来源）
+    refresh_link_info()
 
     master = MAPPING_DIR / "master.csv"
 
