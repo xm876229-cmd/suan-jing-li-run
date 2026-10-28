@@ -1,0 +1,10 @@
+{
+  "report": {
+    "name_template": "{店铺}_{开始}_{结束}",
+    "auto_copy": false,
+    "download_dir": ""
+  },
+  "fx": {
+    "mode": "auto"
+  }
+}

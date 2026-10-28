@@ -8,6 +8,13 @@
       "zhanfu_browser_id": "1510442",
       "prototype": true,
       "enabled": true
+    },
+    {
+      "id": "7496027585645218321",
+      "name": "马来一号店",
+      "country": "马来西亚",
+      "shop_code": "MYLCS7L24W",
+      "shop_name": "Party Pop Hub"
     }
   ],
   "defaults": {

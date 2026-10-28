@@ -471,6 +471,61 @@ function skSet(obj) {
   });
 }
 
+// ---------------- 店铺身份 ----------------
+//
+// 多店铺的核心：先搞清楚「现在这个浏览器登的是哪家店」，再决定数据存哪。
+// shop_id 是平台给的唯一标识，一长串数字；名字给人看，可以在程序里改成自己认得的名。
+//
+// 识别办法：卖家后台自己的页面就在调 /api/v1/affiliate/account/info_v2，
+// 返回里有 shop.shop_id / shop.shop_name / shop.region。
+// 不猜、不解析 DOM，直接问接口。
+let CURRENT_SHOP = { shop_id: "", shop_name: "", shop_code: "", region: "" };
+
+async function identifyShop(host, log) {
+  if (CURRENT_SHOP.shop_id) return CURRENT_SHOP;
+  try {
+    const url = await buildUrl(host, "/api/v1/affiliate/account/info_v2");
+    const r = await runInPage(host, async (u) => {
+      const resp = await fetch(u, { credentials: "include" });
+      return await resp.text();
+    }, [url]);
+    if (r.missingTab) throw new Error("没有开着的店铺页面");
+    if (r.error) throw new Error(r.error);
+    const j = JSON.parse(r.result);
+    const shop = (j && j.data && j.data.shop) || {};
+    const id = String(shop.shop_id || shop.shopId || "").trim();
+    if (!id) throw new Error("接口没返回 shop_id");
+
+    CURRENT_SHOP = {
+      shop_id: id,
+      shop_name: String(shop.shop_name || shop.shopName || ""),
+      shop_code: String(shop.shop_code || ""),
+      region: String(shop.region || "").toUpperCase(),
+    };
+    log(`店铺已识别：${CURRENT_SHOP.shop_name || id}（${CURRENT_SHOP.region || "?"}）`);
+
+    // 告诉本地程序：这家店是谁。它会记住，并把后续数据存到这家店自己的目录。
+    try {
+      const resp = await fetch(`${BRIDGE}/identify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(CURRENT_SHOP),
+      });
+      const ack = await resp.json();
+      if (ack && ack.ok) {
+        log(`   数据目录：${ack.store_dir}`);
+        if (ack.country) CURRENT_SHOP.country = ack.country;
+      }
+    } catch (e) { /* 桥不在也不影响识别本身 */ }
+
+    try { await chrome.storage.local.set({ currentShop: CURRENT_SHOP }); } catch (e) {}
+    return CURRENT_SHOP;
+  } catch (e) {
+    log(`店铺识别失败：${(e && e.message) || e}（数据会存到公共目录）`);
+    return CURRENT_SHOP;
+  }
+}
+
 async function uploadToBridge(name, arrayBuffer, dir) {
   // 分块 base64，避免一次拼串把内存打爆
   const bytes = new Uint8Array(arrayBuffer);
@@ -483,7 +538,14 @@ async function uploadToBridge(name, arrayBuffer, dir) {
   const resp = await fetch(`${BRIDGE}/upload`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, b64, dir: dir || "" }),
+    body: JSON.stringify({
+      name, b64,
+      dir: dir || "",
+      // 映射类文件是店铺无关的（dir=mapping），带上也无害；
+      // 其余文件按 shop_id 落到这家店自己的目录
+      shop_id: CURRENT_SHOP.shop_id || "",
+      shop_name: CURRENT_SHOP.shop_name || "",
+    }),
   });
   const j = await resp.json();
   if (!j.ok) throw new Error(j.error || "上传失败");
@@ -1973,6 +2035,16 @@ async function runTask(task, range, log, opts = {}) {
 
   const impl = TASK_IMPL[task];
   if (!impl) throw new Error(`不支持的取数任务：${task}`);
+
+  // 先确认这是哪家店——数据要按店铺分开存，混在一起就全乱了
+  if (!CURRENT_SHOP.shop_id) {
+    try {
+      const host = await ensureHost(TASK_HINT[task] || "seller", log);
+      await identifyShop(host, log);
+    } catch (e) {
+      log(`店铺识别跳过：${(e && e.message) || e}`);
+    }
+  }
 
   try {
     return await impl(range, log, opts);

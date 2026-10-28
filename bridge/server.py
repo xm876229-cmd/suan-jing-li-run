@@ -157,6 +157,122 @@ def rebuild_endpoints() -> dict:
     return data
 
 
+# 国家代码 → 中文名（自动识别到的店铺要有个看得懂的国家）
+REGION_NAMES = {
+    "MY": "马来西亚", "PH": "菲律宾", "TH": "泰国", "VN": "越南",
+    "SG": "新加坡", "ID": "印尼", "US": "美国", "GB": "英国",
+    "DE": "德国", "FR": "法国", "IT": "意大利", "ES": "西班牙",
+}
+
+
+def remember_store(shop_id: str, info: dict) -> None:
+    """记下这家店是谁。
+
+    扩展每次上报身份都会调这里，所以 meta.json 里永远是最新的店名与国家。
+    第一次见到的店铺会自动登记，不用手工往 stores.json 里填。
+    """
+    sid = (shop_id or "").strip()
+    if not sid:
+        return
+    meta_file = paths.store_meta_file(sid)
+    cur: dict = {}
+    try:
+        cur = json.loads(meta_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        cur = {}
+    region = str(info.get("region") or info.get("country") or "").upper()
+    cur.update({
+        "shop_id": sid,
+        "shop_name": str(info.get("shop_name") or info.get("store_name") or cur.get("shop_name") or ""),
+        "shop_code": str(info.get("shop_code") or cur.get("shop_code") or ""),
+        "region": region,
+        "country": REGION_NAMES.get(region, cur.get("country") or ""),
+        "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    try:
+        meta_file.parent.mkdir(parents=True, exist_ok=True)
+        meta_file.write_text(json.dumps(cur, ensure_ascii=False, indent=2) + "\n",
+                             encoding="utf-8")
+    except OSError:
+        pass
+
+
+def discovered_stores() -> list[dict]:
+    """扫 data/stores/*/meta.json，把自动识别到的店铺列出来。"""
+    out: list[dict] = []
+    root = paths.STORES_ROOT
+    if not root.is_dir():
+        return out
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        meta = d / "meta.json"
+        if not meta.is_file():
+            continue
+        try:
+            m = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        inbox = d / "inbox"
+        files = [f for f in inbox.iterdir() if f.is_file()] if inbox.is_dir() else []
+        out.append({
+            "shop_id": m.get("shop_id") or d.name,
+            "shop_name": m.get("shop_name") or d.name,
+            "shop_code": m.get("shop_code") or "",
+            "region": m.get("region") or "",
+            "country": m.get("country") or REGION_NAMES.get(m.get("region") or "", ""),
+            "last_seen": m.get("last_seen") or "",
+            "inbox_count": len(files),
+            "inbox_latest": max((f.stat().st_mtime for f in files), default=0),
+        })
+    out.sort(key=lambda x: x.get("last_seen") or "", reverse=True)
+    return out
+
+
+def rename_store(shop_id: str, alias: str) -> dict:
+    """给店铺起个自己看得懂的名字。
+
+    shop_id 是一长串数字，认不出来。所以用 shop_id 做键、名字做值，
+    存进 config/stores.json —— 那是用户自己的配置文件，
+    程序不会覆盖它（自动发现的店铺只在 meta.json 里记原名）。
+    """
+    sid = (shop_id or "").strip()
+    alias = (alias or "").strip()
+    if not sid:
+        return {"ok": False, "error": "缺少 shop_id"}
+
+    try:
+        cfg = json.loads(paths.STORES_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        cfg = {"stores": []}
+    stores = cfg.setdefault("stores", [])
+
+    hit = next((x for x in stores if str(x.get("id")) == sid), None)
+    if hit is None:
+        # 没登记过：从自动发现里补齐国家等信息，再起名
+        info = next((d for d in discovered_stores() if d["shop_id"] == sid), {})
+        hit = {
+            "id": sid,
+            "name": alias or info.get("shop_name") or sid,
+            "country": info.get("country") or "",
+            "shop_code": info.get("shop_code") or "",
+            "shop_name": info.get("shop_name") or "",
+        }
+        stores.append(hit)
+    else:
+        hit["name"] = alias or hit.get("name") or sid
+
+    try:
+        paths.STORES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        paths.STORES_FILE.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        return {"ok": False, "error": f"写入 stores.json 失败：{e}"}
+
+    _append_log(f"[store] 店铺改名：{sid} → {hit['name']}")
+    return {"ok": True, "shop_id": sid, "name": hit["name"]}
+
+
 def store_list() -> dict:
     """给扩展用的店铺清单：每家店的国家已经写在配置里，界面上选店即可。
 
@@ -184,6 +300,24 @@ def store_list() -> dict:
         countries = list(rates.get("countries", {}).keys())
     except Exception:
         pass
+
+    # 自动识别到的店铺（扩展上报过身份的那些）合并进来。
+    # 手工配置的优先——店名、国家以 config/stores.json 为准，那是用户自己起的名字。
+    seen = {s.get("id") for s in stores}
+    for d in discovered_stores():
+        if d["shop_id"] in seen:
+            continue
+        stores.append({
+            "id": d["shop_id"],
+            "name": d["shop_name"] or d["shop_id"],
+            "country": d["country"],
+            "browserId": "",
+            "shop_id": d["shop_id"],
+            "shop_code": d["shop_code"],
+            "auto": True,
+            "inbox_count": d["inbox_count"],
+            "last_seen": d["last_seen"],
+        })
 
     default = ""
     try:
@@ -219,7 +353,7 @@ class Handler(BaseHTTPRequestHandler):
                 job = dict(_PENDING) if _PENDING else None
                 _PENDING.clear()
             _json(self, {"ok": True, "job": job})
-        elif self.path.startswith("/stores"):
+        elif self.path.startswith("/stores") or self.path.startswith("/api/stores"):
             _json(self, store_list())
         elif self.path == "/" or self.path.startswith("/index"):
             try:
@@ -263,6 +397,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "/#/params")
             self.end_headers()
+        elif self.path.startswith("/api/settings"):
+            from src import settings as cfg_settings
+            _json(self, {"ok": True, "settings": cfg_settings.load()})
+        elif self.path.startswith("/api/rates"):
+            from bridge import settings_api
+            _json(self, settings_api.read_rates())
+        elif self.path.startswith("/api/report-view"):
+            from bridge import settings_api
+            from urllib.parse import parse_qs, urlparse as _up
+            q = parse_qs(_up(self.path).query)
+            _json(self, settings_api.report_view((q.get("name") or [""])[0]))
+        elif self.path.startswith("/api/trends"):
+            from bridge import ui
+            _json(self, ui.trends())
+        elif self.path.startswith("/api/history"):
+            from bridge import settings_api
+            _json(self, settings_api.history())
+        elif self.path.startswith("/api/debug"):
+            from bridge import settings_api
+            _json(self, settings_api.debug_info())
         elif self.path.startswith("/api/config"):
             from bridge import config_page
             _json(self, config_page.read_config())
@@ -270,7 +424,15 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
     def do_POST(self):
-        if self.path.startswith("/api/config/preview"):
+        if self.path.startswith("/api/stores/rename"):
+            self._post_rename_store()
+        elif self.path.startswith("/identify"):
+            self._post_identify()
+        elif self.path.startswith("/api/settings"):
+            self._post_settings()
+        elif self.path.startswith("/api/rates"):
+            self._post_rates()
+        elif self.path.startswith("/api/config/preview"):
             self._post_config(preview=True)
         elif self.path.startswith("/api/config/save"):
             self._post_config(preview=False)
@@ -368,7 +530,18 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": f"invalid payload: {e}"}, 400)
             return
 
-        target_dir = MAPPING_DIR if str(payload.get("dir") or "").lower() == "mapping" else INBOX_DIR
+        kind = str(payload.get("dir") or "").lower()
+        shop_id = str(payload.get("shop_id") or "").strip()
+
+        if kind == "mapping":
+            target_dir = MAPPING_DIR
+        elif shop_id:
+            # 多店铺：一家店一个目录，数据不混
+            target_dir = paths.store_dir(shop_id)
+            remember_store(shop_id, payload)
+        else:
+            target_dir = INBOX_DIR
+
         safe = re.sub(r'[\\/:*?"<>|]', "_", name)
         target_dir.mkdir(parents=True, exist_ok=True)
         path = target_dir / safe
@@ -379,8 +552,80 @@ class Handler(BaseHTTPRequestHandler):
                 path = target_dir / f"{stem} ({i}){suf}"
                 i += 1
         path.write_bytes(data)
-        _append_log(f"文件已保存：{path.name}（{len(data)/1024:.0f} KB）")
-        _json(self, {"ok": True, "path": str(path), "bytes": len(data)})
+        who = f"[{shop_id}] " if shop_id else ""
+        _append_log(f"{who}文件已保存：{path.name}（{len(data)/1024:.0f} KB）")
+        _json(self, {"ok": True, "path": str(path), "bytes": len(data),
+                     "shop_id": shop_id, "store_dir": str(target_dir)})
+
+    def _post_rename_store(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+        _json(self, rename_store(str(payload.get("shop_id") or ""),
+                                 str(payload.get("name") or "")))
+
+    def _post_identify(self):
+        """扩展上报「我现在登的是哪家店」。
+
+        扩展在 seller 域页面里调 /api/v1/affiliate/account/info_v2，
+        把 shop_id / shop_name / region 带过来。桥据此：
+          · 记住这家店（以后不用手工登记）
+          · 后续上传的数据落到 data/stores/<shop_id>/inbox
+        多店铺就靠这个分开，不同店的数据永远不会混在一个文件夹里。
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+
+        shop_id = str(payload.get("shop_id") or payload.get("shopId") or "").strip()
+        if not shop_id:
+            _json(self, {"ok": False, "error": "缺少 shop_id"}, 400)
+            return
+
+        remember_store(shop_id, payload)
+        d = discovered_stores()
+        mine = next((x for x in d if x["shop_id"] == shop_id), {})
+        _append_log(f"[identify] 店铺 {mine.get('shop_name') or shop_id}"
+                    f"（{mine.get('country') or mine.get('region') or '?'}）")
+        _json(self, {
+            "ok": True,
+            "shop_id": shop_id,
+            "shop_name": mine.get("shop_name") or "",
+            "country": mine.get("country") or "",
+            "store_dir": str(paths.store_dir(shop_id)),
+        })
+
+    def _post_settings(self):
+        from src import settings as cfg_settings
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+        try:
+            _json(self, cfg_settings.save(payload))
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
+
+    def _post_rates(self):
+        from bridge import settings_api
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+        try:
+            _json(self, settings_api.save_rates(payload))
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
 
     def _post_spec(self):
         """给扩展发取数规格。
@@ -468,22 +713,53 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            from src import settings as cfg_settings
+
             country = str(payload.get("country") or "")
             store = str(payload.get("store") or "").strip()
+            shop_id = str(payload.get("shop_id") or store or "").strip()
             dfrom = payload.get("from") or None
             dto = payload.get("to") or None
 
-            # 给了店铺就以店铺配置为准：国家、费率、报表命名全跟着它走，
-            # 避免面板上填的国家和配置里的对不上。
+            # 店铺信息：名字给人看，shop_id 给程序用。
+            # 名字优先用用户在 stores.json 里起的别名，没有就用平台原名。
+            store_name = ""
+            shop_code = ""
             if store:
-                for s in store_list().get("stores", []):
-                    if s.get("id") == store:
-                        country = s.get("country") or country
+                for st in store_list().get("stores", []):
+                    if st.get("id") == store:
+                        country = st.get("country") or country
+                        store_name = st.get("name") or ""
+                        shop_code = st.get("shop_code") or ""
+                        shop_id = st.get("shop_id") or shop_id or store
                         break
+            if not store_name:
+                store_name = country or "未识别店铺"
             country = country or "马来西亚"
 
-            stamp = f"{dfrom or 'all'}_{dto or 'all'}".replace("-", "")
-            out = paths.OUTPUT / f"净利报表_{country}_{stamp}.xlsx"
+            # 数据来源：有 shop_id 就读它自己的目录，各店数据不混
+            data_dir = paths.store_dir(shop_id)
+            if not data_dir.is_dir() or not any(data_dir.iterdir()):
+                # 没识别到店铺（或该店还没抓过数据）就退回公共目录
+                data_dir = INBOX_DIR
+
+            # 报表放到该店铺自己的子目录，文件名按设置里的模板生成
+            cfg_settings.load()
+            out_dir = paths.OUTPUT / re.sub(r'[\\/:*?"<>|]', "_", store_name)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            stg = cfg_settings.load().get("report", {})
+            base_name = cfg_settings.render_report_name(
+                stg.get("name_template") or "{店铺}_{区间}",
+                store=store_name, shop_id=shop_id, shop_code=shop_code,
+                country=country, dfrom=dfrom or "", dto=dto or "",
+            )
+            out = out_dir / f"{base_name}.xlsx"
+            if out.exists():
+                i = 2
+                while out.exists():
+                    out = out_dir / f"{base_name} ({i}).xlsx"
+                    i += 1
 
             # 打包后 sys.executable 是 exe 本身，`-m src.cli` 不再有效，
             # 改成 exe 自己的 run 子命令。两种模式参数完全一致。
@@ -492,7 +768,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 base = [sys.executable, "-m", "src.cli"]
             cmd = base + [
-                "--dir", str(INBOX_DIR),
+                "--dir", str(data_dir),
                 # 有店铺就只传店铺：国家由 config/stores.json 决定，
                 # 两处都传容易打架（--country 会覆盖 --store）
                 *(["--store", store] if store else ["--country", country]),
@@ -546,6 +822,39 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 summary["report_path"] = str(out)
                 summary["report_name"] = out.name
+                summary["store_name"] = store_name
+                summary["shop_id"] = shop_id
+
+                # 记一笔历史，界面画走势用
+                try:
+                    from bridge import settings_api
+                    settings_api.append_history({
+                        "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "store": store_name,
+                        "shop_id": shop_id,
+                        "from": dfrom or "",
+                        "to": dto or "",
+                        "gmv": summary.get("gmv"),
+                        "cost": summary.get("cost"),
+                        "fees": summary.get("fees"),
+                        "net": summary.get("net_local"),
+                        "net_cny": summary.get("net_cny"),
+                        "report": out.name,
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
+
+                # 自动复制到用户指定的位置（比如 D://净利报表）
+                copied = None
+                try:
+                    copied = cfg_settings.copy_to_download_dir(
+                        out, stg.get("download_dir") or "")
+                except Exception:  # noqa: BLE001
+                    copied = None
+                if copied:
+                    summary["copied_to"] = str(copied)
+                    _append_log(f"[run] 已复制到 {copied}")
+
                 _json(self, {"ok": True, **summary})
             else:
                 tail = "\n".join((stdout + "\n" + stderr).strip().splitlines()[-12:])

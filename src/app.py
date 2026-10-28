@@ -149,16 +149,22 @@ def _serve_daemon() -> int:
     print("取数桥守护已启动（桥意外退出会自动拉起，Ctrl+C 退出守护者）")
 
     def _stamp() -> tuple:
+        """把所有会改的源码都盯上。
+
+        早先只盯了四个文件，结果新加的 bridge/settings_api.py、
+        bridge/ui.py 改了不重启，出现「代码明明改了、行为没变」的怪事。
+        干脆整个目录扫一遍：多扫几个文件的开销可以忽略，
+        漏掉一个才麻烦。
+        """
         out = []
-        for f in (paths.ROOT / "bridge" / "server.py",
-                  paths.ROOT / "src" / "cli.py",
-                  paths.ROOT / "src" / "loader.py",
-                  paths.ROOT / "src" / "calc.py"):
-            try:
-                st = f.stat()
-                out.append((f.name, st.st_mtime_ns))
-            except OSError:
-                out.append((f.name, 0))
+        for d in (paths.ROOT / "bridge", paths.ROOT / "src"):
+            if not d.is_dir():
+                continue
+            for f in sorted(d.glob("*.py")):
+                try:
+                    out.append((f.name, f.stat().st_mtime_ns))
+                except OSError:
+                    out.append((f.name, 0))
         return tuple(out)
 
     last = _stamp()

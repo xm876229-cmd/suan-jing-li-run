@@ -46,6 +46,11 @@ COSTS = DATA / "costs"
 MAPPING = DATA / "mapping"
 LOGS = DATA / "logs"
 
+# 多店铺：一家店一个目录，互不干扰
+#   data/stores/<shop_id>/inbox/    这家店的原始导出
+#   data/stores/<shop_id>/meta.json 店名、国家、最后活动时间
+STORES_ROOT = DATA / "stores"
+
 # ---- 产出 ----
 OUTPUT = Path(os.environ.get("JINGLI_OUTPUT") or (ROOT / "output")).resolve()
 
@@ -56,9 +61,22 @@ RATES_FILE = CONFIG / "rates.json"
 STORES_FILE = CONFIG / "stores.json"
 
 
+def store_dir(shop_id: str) -> Path:
+    """某家店的数据目录。shop_id 为空时退回旧的公共目录。"""
+    sid = (shop_id or "").strip()
+    if not sid:
+        return INBOX
+    safe = "".join(c for c in sid if c.isalnum() or c in "-_")
+    return STORES_ROOT / (safe or "unknown") / "inbox"
+
+
+def store_meta_file(shop_id: str) -> Path:
+    return store_dir(shop_id).parent / "meta.json"
+
+
 def ensure_dirs() -> None:
     """创建所有需要的目录。打包后首次运行必须调用一次。"""
-    for d in (DATA, CAPTURE, EXPORTS, INBOX, COSTS, MAPPING, LOGS, OUTPUT):
+    for d in (DATA, CAPTURE, EXPORTS, INBOX, COSTS, MAPPING, LOGS, OUTPUT, STORES_ROOT):
         try:
             d.mkdir(parents=True, exist_ok=True)
         except OSError:
