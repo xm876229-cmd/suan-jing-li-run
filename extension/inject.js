@@ -8,8 +8,10 @@
 */
 (() => {
   const TAG = "__jingli_capture__";
-  const MAX_BODY = 8000;
-  const MAX_RESP = 6000;
+  const MAX_BODY = 20000;
+  // 响应样本原来只留 6000 字符，很多接口的返回（尤其是带分页的列表）
+  // 正好在这一截断，导致字段看不全，只能靠猜。放宽到 30K。
+  const MAX_RESP = 30000;
   let enabled = true;
 
   const emit = (payload) => {

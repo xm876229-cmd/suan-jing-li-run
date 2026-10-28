@@ -130,7 +130,7 @@ function summarizeRequestBody(rb) {
       for (const [k, vs] of Object.entries(rb.formData)) {
         parts.push(`${k}=${(vs || []).join(",").slice(0, 200)}`);
       }
-      return parts.join("&").slice(0, 4000);
+      return parts.join("&").slice(0, 20000);
     }
     if (rb.raw && rb.raw.length) {
       const chunks = rb.raw.map((r) => {
@@ -138,7 +138,7 @@ function summarizeRequestBody(rb) {
         const dec = new TextDecoder("utf-8", { fatal: false });
         return dec.decode(new Uint8Array(r.bytes));
       });
-      return chunks.join("").slice(0, 4000);
+      return chunks.join("").slice(0, 20000);
     }
   } catch (e) { /* 二进制或读不出来就算了 */ }
   return null;
@@ -153,47 +153,68 @@ let adsWatch = null;
 // 关键：extraInfoSpec 必须带 "requestBody"，否则 details.requestBody 是 undefined，
 // 记下来的只有 URL 没有请求体——而我们需要的恰恰是请求体（导出接口传了什么参数）。
 //
-// 域名范围放到 <all_urls>：广告「创建导出任务」的接口至今没被抓到过一次，
-// 路径到底挂在哪个域（seller 域？ads 域？还是别的）完全未知，
-// 只盯 *.tiktok.com 就会一直漏。抓包期间把非 GET 请求全记下来，才能定位。
+// 域名范围：广告接口实测挂在**店铺主域**下（seller-my.tiktok.com/oec_ads/…），
+// *.tiktok.com 就覆盖得到。之前想过加 <all_urls> 抓更全，但那样 Chrome 会要求用户
+// 单独批准新权限，不批准就把扩展整个禁用（表现为开关变灰、抓包全无）——
+// 得不偿失，这里保持明确域名。
+const CAPTURE_URLS = [
+  "*://*.tiktok.com/*",
+  "*://*.tiktokglobalshop.com/*",
+  "*://*.tiktokv.com/*",
+  "*://*.byteoversea.com/*",
+];
+
 if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
-  chrome.webRequest.onBeforeRequest.addListener(
-    (details) => {
-      if (!enabled) return;
-      const u = details.url || "";
-      const kw = /export|download|task|insight|stat\//i.test(u);
-      const watching = !!adsWatch;
-      // 平时只收关键词命中的；抓广告任务期间，所有非 GET 请求都收
-      if (!kw && !(watching && details.method !== "GET")) return;
+  const onBefore = (details) => {
+    if (!enabled) return;
+    const u = details.url || "";
+    const kw = /export|download|task|insight|stat\//i.test(u);
+    const watching = !!adsWatch;
+    // 平时只收关键词命中的；抓广告任务期间，所有非 GET 请求都收
+    if (!kw && !(watching && details.method !== "GET")) return;
 
-      const reqBody = summarizeRequestBody(details.requestBody);
-      const rec = {
-        kind: "webrequest",
-        url: u,
-        method: details.method,
-        status: null,
-        contentType: details.type || "",
-        ms: 0,
-        reqBody,
-        respSample: null,
-        page: details.initiator || "",
-        at: new Date().toISOString(),
-      };
-      recordCapture(rec);
+    const reqBody = summarizeRequestBody(details.requestBody);
+    const rec = {
+      kind: "webrequest",
+      url: u,
+      method: details.method,
+      status: null,
+      contentType: details.type || "",
+      ms: 0,
+      reqBody,
+      respSample: null,
+      page: details.initiator || "",
+      at: new Date().toISOString(),
+    };
+    recordCapture(rec);
 
-      // 抓广告导出任务时，命中的请求单独回传一份，
-      // 免得事后在几十万条日常流量里翻。
-      // GET 也要记：有些导出接口是用 GET 带参数触发的。
-      if (adsWatch && isAdsUrl(u) && /export|download|task|stat|generate|create/i.test(u)) {
-        rec.kind = "ads-export";
-        adsWatch.recs.push(rec);
-        adsWatch.log(`★ 捕获广告请求：${details.method} ${u.split("?")[0]}`);
-        pushAdsCapture(rec);
-      }
-    },
-    { urls: ["<all_urls>"] },
-    ["requestBody"]
-  );
+    // 抓广告导出任务时，命中的请求单独回传一份，
+    // 免得事后在几十万条日常流量里翻。
+    // GET 也要记：有些导出接口是用 GET 带参数触发的。
+    if (adsWatch && isAdsUrl(u) && /export|download|task|stat|generate|create/i.test(u)) {
+      rec.kind = "ads-export";
+      adsWatch.recs.push(rec);
+      adsWatch.log(`★ 捕获广告请求：${details.method} ${u.split("?")[0]}`);
+      pushAdsCapture(rec);
+    }
+  };
+
+  // 注册失败不能让整个扩展挂掉：顶层抛错会让 background script 直接死，
+  // 扩展被 Chrome 判为「崩溃」，开关变灰，什么都不工作。
+  let ok = false;
+  try {
+    chrome.webRequest.onBeforeRequest.addListener(onBefore, { urls: CAPTURE_URLS }, ["requestBody"]);
+    ok = true;
+  } catch (e) {
+    console.warn("webRequest 监听注册失败（降级为不带请求体）", e);
+    try {
+      chrome.webRequest.onBeforeRequest.addListener(onBefore, { urls: CAPTURE_URLS });
+      ok = true;
+    } catch (e2) {
+      console.warn("webRequest 监听彻底不可用", e2);
+    }
+  }
+  if (!ok) reportCrash("webRequest 监听注册失败", "抓包功能不可用");
 }
 
 /** 广告相关的域名/路径判定。
