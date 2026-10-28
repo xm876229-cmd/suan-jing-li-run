@@ -225,6 +225,18 @@ def _daily(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: str
 
 # ---------------- 异常 ----------------
 
+# 参数表里 base 的中文名
+BASE_LABELS = {
+    "gmv": "GMV",
+    "buyer_paid": "买家实付",
+    "order_count": "订单数",
+    "items": "件数",
+    "cost": "商品成本",
+    "refund": "退款金额",
+    "commission": "达人佣金（直接取数）",
+    "ads": "广告花费（直接取数）",
+}
+
 ISSUE_RULES = [
     ("缺成本", "成本表里查不到该 SKU，且无法推导；成本按 0 计，净利偏高", "补录成本表"),
     ("未付款", "订单实付为 0，未产生收入与成本", "确认是否为赠品或异常单"),
@@ -273,12 +285,12 @@ def _issues(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: st
             summary["未付款"] = summary.get("未付款", 0) + 1
 
     desc = {k: (d, a) for k, d, a in ISSUE_RULES}
-    # 取消/退货的说明改成「按当前口径实际怎么算的」，
-    # 不能写死成「已排除」——用户可能已把成本计入了
-    for cat, kind in (("已取消", "cancelled"), ("退货退款", "refunded"), ("未付款", "unpaid")):
+    # 不要在这里下结论说「已排除」或「已计入」——现在每个参数各管各的，
+    # 同一类订单的发单费可能算、成本可能不算。统一指到口径页去看。
+    for cat in ("已取消", "退货退款", "未付款"):
         if cat in desc:
             d, a = desc[cat]
-            desc[cat] = (f"{d}：{order_scope_desc(of.get(kind))}", a)
+            desc[cat] = (f"{d}。各参数是否计入这类订单，见「口径」页逐条列出的适用范围", a)
     row = 3
 
     for (cat, obj), n in sorted(detail.items(), key=lambda x: (-x[1], x[0])):
@@ -375,22 +387,46 @@ def _meta(ws: Worksheet, res: CalcResult, params: Params, switches: Switches,
         ("广告口径", "广告花费(美金) × 美金汇率", "按商品ID汇总"),
     ]
 
-    # 订单口径：按本次实际生效的配置动态生成。
-    # 写死说明的时代已经过去了——用户改了配置，报表必须跟着变，
-    # 否则事后对账会拿一份「说明和数不符」的表去查，越查越乱。
-    of = res.order_filter or {}
+    # ── 参数表：这次每个参数算的是哪些订单类别 ──
+    # 必须按实际生效的配置生成。写死说明会让报表「说明和数不符」，
+    # 事后对账越查越乱。
     stats = res.kind_stats or {}
-    _kind_names = {
-        "cancelled": "已取消", "refunded": "退货退款",
-        "zero_amount": "0 元样品", "unpaid": "未付款", "normal": "正常",
-    }
-    for kind, label in _kind_names.items():
-        spec = of.get(kind) or {}
-        n = stats.get(kind, 0)
-        if not spec and not n:
+    labels = res.kind_labels or {}
+    order_seq = ("normal", "cancelled", "refunded", "zero_amount", "unpaid")
+
+    if stats:
+        brief = "；".join(
+            f"{labels.get(k, k)} {stats[k]} 行"
+            for k in order_seq if stats.get(k)
+        )
+        rows.append(("本次订单构成", brief, "每一行订单只归一类，优先级：已取消 > 退货退款 > 0元样品 > 未付款 > 正常"))
+
+    for it in res.params_cfg or []:
+        if not isinstance(it, dict):
             continue
-        rows.append((f"{label}订单（{n} 行）", order_scope_desc(spec),
-                     "四关：收入=GMV/实付，成本=商品成本，发单费=订单数基数，平台抽成=按比例费用的基数"))
+        pid = str(it.get("id") or "")
+        if not pid:
+            continue
+        label = str(it.get("label") or pid)
+        kinds = it.get("kinds")
+        if kinds is None:
+            scope = "全部订单类别"
+        elif not kinds:
+            scope = "不算（关掉了）"
+        else:
+            scope = "、".join(labels.get(k, k) for k in kinds)
+        base = str(it.get("base") or "gmv")
+        rate = it.get("rate")
+        if rate in (None, 1, 1.0, "1", "1.0"):
+            formula_txt = BASE_LABELS.get(base, base)
+        else:
+            rt = str(rate)
+            if rt.startswith("params."):
+                rt = "国家费率 " + rt.split(".", 1)[1]
+            formula_txt = f"{BASE_LABELS.get(base, base)} × {rt}"
+        if not it.get("enabled", True):
+            scope = "已停用"
+        rows.append((label, scope, formula_txt))
     row = 3
     for k, v, note in rows:
         ws.cell(row=row, column=1, value=k).font = Font(bold=True)

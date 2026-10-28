@@ -171,11 +171,15 @@ class ProductMetrics:
     items: float = ZERO
     refund: float = ZERO
     cost_local: float = ZERO
-    # 计费基数：算平台抽成等按比例费用的基数，可以与 gmv / buyer_paid 不同。
-    # 为什么需要它：取消单和退货单的收入不算（钱退了），但平台抽成往往照收，
-    # 所以「收入」和「计费基数」必须是两个独立的量，否则一关就全关了。
+    # 计费基数（保留兼容旧配置，新配置请直接用费用的 kinds）
     fee_base_gmv: float = ZERO
     fee_base_paid: float = ZERO
+    # 按订单类别分开记的原始明细：{类别: {gmv, buyer_paid, orders, items, cost, refund}}
+    #
+    # 为什么要这么存：用户要能「发单费只算正常单和退货单，取消单不算」，
+    # 也就是每一项费用各自挑订单类别。汇总成一个数就再也拆不开了，
+    # 所以这里把每类订单的原始量都留着，算费用时按需合计。
+    by_kind: dict[str, dict[str, float]] = field(default_factory=dict)
     # 费用明细：费用 id → 金额。id 与 config/formulas.json 的 fees 对应，
     # 所以用户加一项「订单服务费」这里就自动多一个键，不用改代码。
     fees: dict[str, float] = field(default_factory=dict)
@@ -190,6 +194,9 @@ class ProductMetrics:
     creator_commission: float = ZERO
     ad_spend: float = ZERO
     lines: int = 0
+    # 公式算出来的净利。由 config/formulas.json 的 net 决定；
+    # 为 None 时退回下面的默认算法（保证没有配置也能跑）。
+    net_value: float | None = None
 
     @property
     def aov(self) -> float:
@@ -214,11 +221,15 @@ class ProductMetrics:
 
     @property
     def net_local(self) -> float:
-        """绝对额口径：(GMV − 成本) − 各项费用。
+        """净利（本地货币）。
 
+        优先用 config/formulas.json 里 net 公式算出的值——这样用户改公式就真的改了算法。
+        没配公式时退回默认：(GMV − 成本) − 各项费用。
         用绝对额而不是「GMV × 净利率」，这样零 GMV 但有广告花费的链接
         也能正确算出亏损，而不是被算成 0。
         """
+        if self.net_value is not None:
+            return self.net_value
         return (self.gmv - self.cost_local) - self.fee_total
 
     def net_cny(self, cny_to_local: float) -> float:
@@ -239,6 +250,10 @@ class CalcResult:
     kind_stats: dict = field(default_factory=dict)
     # 判定「退货」的关键词（配置里可改，报表分类要用同一套，不能各写一份）
     refund_keywords: tuple = ()
+    # 本次生效的参数表（报表口径页要逐行展示：每个参数只算哪些订单类别）
+    params_cfg: list = field(default_factory=list)
+    # 类别中文名（配置里可改）
+    kind_labels: dict = field(default_factory=dict)
 
     @property
     def total(self) -> ProductMetrics:
@@ -249,6 +264,13 @@ class CalcResult:
             t.buyer_paid += p.buyer_paid
             t.fee_base_gmv += p.fee_base_gmv
             t.fee_base_paid += p.fee_base_paid
+            for k, d in p.by_kind.items():
+                td = t.by_kind.get(k)
+                if td is None:
+                    td = {kk: ZERO for kk in d}
+                    t.by_kind[k] = td
+                for kk, vv in d.items():
+                    td[kk] = td.get(kk, ZERO) + vv
             t.orders += p.orders
             t.items += p.items
             t.refund += p.refund
@@ -441,6 +463,23 @@ def compute(data: RawData, params: Params, switches: Switches,
 
         paid_amt = alloc_paid(l)
 
+        # 不管口径怎么设，都先把这一行的原始量按类别记下来。
+        # 费用项各自的 kinds 就是从这里取数的——
+        # 这样「发单费只算正常+退货」「平台佣金只算正常」才能各自成立。
+        bk = m.by_kind.get(kind)
+        if bk is None:
+            bk = {"gmv": ZERO, "buyer_paid": ZERO, "orders": ZERO,
+                  "items": ZERO, "cost": ZERO, "refund": ZERO}
+            m.by_kind[kind] = bk
+        bk["gmv"] += l.gmv
+        bk["buyer_paid"] += paid_amt
+        bk["orders"] += l.allocated_orders
+        bk["items"] += l.qty
+        bk["refund"] += l.order_amount if kind in ("cancelled", "refunded") else ZERO
+        cost_cny = l.cost_total_cny
+        cost_line = (cost_cny * params.cny_to_local) if cost_cny is not None else ZERO
+        bk["cost"] += cost_line
+
         # ① 收入：GMV 与买家实付
         if sw_k["income"]:
             m.gmv += l.gmv
@@ -471,48 +510,73 @@ def compute(data: RawData, params: Params, switches: Switches,
             buckets[pid] = ProductMetrics(product_id=pid)
             orphans.append(pid)
 
-    # 费用项：按 formulas.json 的 fees 列表逐项算。
-    # 用户想加一项「订单服务费」，在那个列表里加一条就会自动参与净利计算，
-    # 不用改这里的代码。
-    fee_cfg = list(fcfg.get("fees") or [])
-    # 老开关仍然生效：超级优惠券原来由 switches 控制，这里映射到费用项的 enabled
+    # ── 参数表：GMV、买家实付、订单数、件数、商品成本、各项费用，全在这张表里 ──
+    #
+    # 每一项都自带 kinds（只算哪些订单类别），所以「发单费只算正常单和退货单」
+    # 「平台佣金只算正常单」这类口径，都是改配置里的一个数组，不改代码。
+    # 加一项新支出也是加一条，自动参与 net 的计算。
+    param_cfg = list(fcfg.get("params") or [])
+    # 老开关仍然生效：超级优惠券原来由 switches 控制
     if switches.super_coupon_enabled:
-        for it in fee_cfg:
+        for it in param_cfg:
             if isinstance(it, dict) and it.get("id") == "super_coupon":
                 it["enabled"] = True
+
+    # 这些 id 有固定去处（报表要按列展示），其余的都进「费用明细」
+    _RESERVED = {
+        "gmv": "gmv",
+        "cost": "cost_local",
+        "order_count": "orders",
+        "items": "items",
+        "buyer_paid": "buyer_paid",
+    }
 
     fee_issues: list[str] = []
     for pid, m in buckets.items():
         m.product_name = names.get(pid, "")
         ctx = {
-            "gmv": m.gmv,
-            "buyer_paid": m.buyer_paid,
-            # 计费基数：与收入不同（取消单/退货单收入不算，但平台抽成照收）
-            "fee_base": m.fee_base_gmv,
-            "fee_base_paid": m.fee_base_paid,
-            "order_count": m.orders,
-            "orders": m.orders,
-            "items": m.items,
-            "cost": m.cost_local,
-            "refund": m.refund,
             "commission": data.commissions.get(pid, ZERO),
             "ads": data.ads.get(pid, ZERO),
+            # 每一行订单按类别记的原始量，参数表的 kinds 就是从这里取数
+            "by_kind": m.by_kind,
             "params": params,
         }
-        fees, one_issues = formula.compute_fees(fee_cfg, ctx)
-        m.fees = fees
+        vals, one_issues = formula.compute_params(param_cfg, ctx)
         if one_issues:
             fee_issues.extend(one_issues[:1])
+
+        # 归位：报表按列展示的那几个量单独放，其余都算「费用」
+        for pid_key, attr in _RESERVED.items():
+            if pid_key in vals:
+                setattr(m, attr, vals[pid_key])
+        m.fees = {k: v for k, v in vals.items() if k not in _RESERVED}
+
+        # 退款金额只是统计量，永远取原始值（不受 kinds 影响，否则对账看不出退了多少）
+        m.refund = sum(d.get("refund", ZERO) for d in m.by_kind.values())
+
         # 同步到老字段：报表模板与历史代码还在读这些名字
-        m.dispatch_fee = fees.get("dispatch", ZERO)
-        m.platform_commission = fees.get("platform_commission", ZERO)
-        m.tx_fee = fees.get("tx_fee", ZERO)
-        m.cashback = fees.get("cashback", ZERO)
-        m.super_coupon = fees.get("super_coupon", ZERO)
-        m.growth_fee = fees.get("growth_fee", ZERO)
-        m.logistics = fees.get("logistics", ZERO)
-        m.creator_commission = fees.get("affiliate", ZERO)
-        m.ad_spend = fees.get("ads", ZERO)
+        m.dispatch_fee = m.fees.get("dispatch", ZERO)
+        m.platform_commission = m.fees.get("platform_commission", ZERO)
+        m.tx_fee = m.fees.get("tx_fee", ZERO)
+        m.cashback = m.fees.get("cashback", ZERO)
+        m.super_coupon = m.fees.get("super_coupon", ZERO)
+        m.growth_fee = m.fees.get("growth_fee", ZERO)
+        m.logistics = m.fees.get("logistics", ZERO)
+        m.creator_commission = m.fees.get("affiliate", ZERO)
+        m.ad_spend = m.fees.get("ads", ZERO)
+
+        # 公式：gross_profit / total_fees / net / net_rate 都在这算。
+        # 之前这段代码根本没被调用过（formulas 配了却不生效），
+        # 净利一直是写死的属性。现在接上，改公式才真的改了算法。
+        fctx = {**m.fees, "gmv": m.gmv, "cost": m.cost_local,
+                "buyer_paid": m.buyer_paid, "order_count": m.orders,
+                "items": m.items, "refund": m.refund,
+                "fees": m.fees, "params": params}
+        fvals, f_issues = formula.compute_formulas(fcfg.get("formulas") or {}, fctx)
+        if f_issues:
+            fee_issues.extend(f_issues[:1])
+        if "net" in fvals:
+            m.net_value = fvals["net"]
 
     for msg in dict.fromkeys(fee_issues):
         issues.append(msg)
@@ -536,4 +600,6 @@ def compute(data: RawData, params: Params, switches: Switches,
     return CalcResult(params=params, products=products, issues=issues,
                       line_count=len(lines), order_count=len(order_ids), lines=lines,
                       order_filter=kfilter, kind_stats=dict(kind_stats),
-                      refund_keywords=refund_kw)
+                      refund_keywords=refund_kw,
+                      params_cfg=[it for it in param_cfg if isinstance(it, dict)],
+                      kind_labels=dict(fcfg.get("kinds") or KIND_LABELS))

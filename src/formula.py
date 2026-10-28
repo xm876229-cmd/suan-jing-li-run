@@ -203,34 +203,45 @@ def safe_eval(expr: str, ctx: dict) -> tuple[float, set[str]]:
 # ---------------- 配置读取 ----------------
 
 DEFAULTS: dict = {
-    "order_filter": {
-        "cancelled": {"income": False, "cost": True, "order_count": True, "fee_base": True},
-        "refunded": {"income": False, "cost": True, "order_count": True, "fee_base": True},
-        "zero_amount": {"income": True, "cost": True, "order_count": True, "fee_base": False},
-        "unpaid": {"income": False, "cost": False, "order_count": False, "fee_base": False},
-        "refund_keywords": ["return", "refund"],
+    "kinds": {
+        "cancelled": "已取消订单",
+        "refunded": "退货退款订单",
+        "zero_amount": "0 元样品单",
+        "unpaid": "未付款订单",
+        "normal": "正常订单",
     },
-    "fees": [
+    # 参数表：每项自己声明「只算哪些订单类别」。
+    # 默认值按业务实情——取消/退货的收入不算，但成本、发单费、平台抽成照算。
+    "params": [
+        {"id": "gmv", "label": "GMV（收入）", "base": "gmv",
+         "kinds": ["normal", "zero_amount"]},
+        {"id": "buyer_paid", "label": "买家实付", "base": "buyer_paid",
+         "kinds": ["normal", "zero_amount"]},
+        {"id": "order_count", "label": "订单数", "base": "order_count",
+         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
+        {"id": "items", "label": "件数", "base": "items",
+         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
+        {"id": "cost", "label": "商品成本", "base": "cost",
+         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
         {"id": "dispatch", "label": "发单费", "base": "order_count",
-         "rate": "params.dispatch_fee_local", "enabled": True},
-        {"id": "platform_commission", "label": "平台佣金", "base": "fee_base",
-         "rate": "params.platform_commission", "enabled": True},
-        {"id": "tx_fee", "label": "交易手续费", "base": "fee_base_paid",
-         "rate": "params.tx_fee", "enabled": True},
+         "rate": "params.dispatch_fee_local",
+         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
+        {"id": "platform_commission", "label": "平台佣金", "base": "gmv",
+         "rate": "params.platform_commission", "kinds": ["normal", "cancelled", "refunded"]},
+        {"id": "tx_fee", "label": "交易手续费", "base": "buyer_paid",
+         "rate": "params.tx_fee", "kinds": ["normal", "cancelled", "refunded"]},
         {"id": "cashback", "label": "奖金返现", "base": "gmv",
-         "rate": "params.cashback", "enabled": True},
+         "rate": "params.cashback", "kinds": ["normal"]},
         {"id": "super_coupon", "label": "超级优惠券", "base": "gmv",
-         "rate": "params.super_coupon", "enabled": False},
+         "rate": "params.super_coupon", "kinds": ["normal"], "enabled": False},
         {"id": "growth_fee", "label": "商家成长", "base": "gmv",
-         "rate": "params.growth_fee", "enabled": True},
+         "rate": "params.growth_fee", "kinds": ["normal"]},
         {"id": "logistics", "label": "物流", "base": "gmv",
-         "rate": "params.logistics", "enabled": True},
-        {"id": "affiliate", "label": "达人佣金", "base": "commission", "enabled": True},
-        {"id": "ads", "label": "广告花费", "base": "ads", "enabled": True},
+         "rate": "params.logistics", "kinds": ["normal"]},
+        {"id": "affiliate", "label": "达人佣金", "base": "commission"},
+        {"id": "ads", "label": "广告花费", "base": "ads"},
     ],
     "formulas": {
-        "gmv": "sum(subtotal_before) - sum(seller_discount)",
-        "cost": "sum(cost_local)",
         "gross_profit": "gmv - cost",
         "total_fees": "sum(fees)",
         "net": "gross_profit - total_fees",
@@ -254,8 +265,14 @@ def load_config(path: Path) -> dict:
         # 具体的键校验交给 calc.resolve_order_filter()，那边会按默认值补齐。
         for k, v in doc["order_filter"].items():
             out["order_filter"][k] = v
-    if isinstance(doc.get("fees"), list) and doc["fees"]:
-        out["fees"] = doc["fees"]
+    # params = 参数表（GMV / 成本 / 各项费用都在这张表里，每项自己选订单类别）
+    # fees 是早期的名字，保留兼容：有 params 就用 params
+    if isinstance(doc.get("params"), list) and doc["params"]:
+        out["params"] = doc["params"]
+    elif isinstance(doc.get("fees"), list) and doc["fees"]:
+        out["params"] = doc["fees"]
+    if isinstance(doc.get("kinds"), dict) and doc["kinds"]:
+        out["kinds"] = doc["kinds"]
     if isinstance(doc.get("formulas"), dict) and doc["formulas"]:
         out["formulas"].update(doc["formulas"])
     return out
@@ -279,18 +296,64 @@ FEE_BASES = {
 }
 
 
-def compute_fees(fees_cfg: list[dict], ctx: dict) -> tuple[dict[str, float], list[str]]:
-    """按费用项列表逐项算钱。返回 ({费用id: 金额}, [问题说明])。
+# 费用基数在「按类别明细」里的字段名（对不上时要映射一下）
+_BASE_TO_STAT = {
+    "order_count": "orders",
+    "orders": "orders",
+    "gmv": "gmv",
+    "buyer_paid": "buyer_paid",
+    "items": "items",
+    "cost": "cost",
+    "refund": "refund",
+    "order_amount": "buyer_paid",
+}
 
-    基数(rate) 的写法：
-      · 数字                    → 固定费率/固定额
-      · "params.xxx"            → 引用 per-国家 参数
-      · 表达式，如 "0.02+0.01"  → 也能算（走同一个求值器）
+
+def _base_value(base: str, ctx: dict, kinds) -> float:
+    """算一条费用的基数。
+
+    分两种情况：
+      · 没写 kinds  → 直接取汇总值（ctx[base]），这是旧配置的行为
+      · 写了 kinds  → 从「按订单类别分开的明细」里挑出这些类别求和
+
+    为什么要按类别分开：用户要能「发单费只算正常单和退货单，
+    取消单的发单费不算」——汇总值是一坨，挑不出来，
+    所以每一行订单都按类别分别记账，取基数时再按需要合计。
+    """
+    if not kinds:
+        return _to_num(ctx.get(base))
+
+    stat = _BASE_TO_STAT.get(base)
+    if stat is None:
+        # 不认识的基数就退回汇总值，宁可按旧行为算，也不要静默变 0
+        return _to_num(ctx.get(base))
+
+    agg = ctx.get("by_kind") or {}
+    total = 0.0
+    for k in kinds:
+        total += _to_num((agg.get(k) or {}).get(stat))
+    return total
+
+
+def compute_params(params_cfg: list[dict], ctx: dict) -> tuple[dict[str, float], list[str]]:
+    """按「参数表」逐项算出金额。返回 ({参数id: 金额}, [问题说明])。
+
+    这张表里什么都能放：GMV、买家实付、订单数、件数、商品成本、各项费用。
+    每一项自己声明「只算哪些订单类别」（kinds），所以口径完全由使用者决定。
+
+    每项字段：
+      id       唯一标识，公式里用它引用金额
+      label    中文名
+      base     基数：gmv / buyer_paid / order_count / items / cost / refund
+               / commission / ads（后两个是直接取数，与订单类别无关）
+      rate     乘数。不写 = 1（原样取数）。可以写数字、params.xxx 或表达式
+      kinds    只在这些订单类别上算；不写 = 全部类别
+      enabled  默认 true
     """
     out: dict[str, float] = {}
     issues: list[str] = []
 
-    for item in fees_cfg or []:
+    for item in params_cfg or []:
         if not isinstance(item, dict):
             continue
         fid = str(item.get("id") or "").strip()
@@ -309,22 +372,34 @@ def compute_fees(fees_cfg: list[dict], ctx: dict) -> tuple[dict[str, float], lis
             out[fid] = amt
             continue
 
-        base_val = _to_num(ctx.get(base))
+        # kinds：这条费用只在列出的订单类别上计算。
+        # 例如发单费只想算「正常 + 退货退款」，就写
+        #   "kinds": ["normal","refunded"]
+        # 不写 = 全部类别都算（旧配置的行为）。
+        kinds = item.get("kinds")
+        base_val = _base_value(base, ctx, kinds)
         rate_raw = item.get("rate")
         if rate_raw is None:
-            # 没写 rate 就认为费率取国家参数里的同名项（方便老配置迁移）
-            rate_raw = f"params.{fid}"
+            # 没写 rate = 1，即「原样取这个基数」。
+            # GMV、成本、订单数这类统计量就是这样用的。
+            # （早期版本会去取国家参数里的同名项，结果 GMV 被当成费率算成 0，
+            #   所以这里改掉了——要引用国家费率就显式写 "rate":"params.xxx"）
+            rate_raw = 1.0
         try:
             rate, _ = safe_eval(str(rate_raw), ctx) if not isinstance(rate_raw, (int, float)) \
                 else (float(rate_raw), set())
         except FormulaError as e:
-            issues.append(f"费用「{label}」的费率写错了：{e}（该项按 0 计）")
+            issues.append(f"参数「{label}」的费率写错了：{e}（该项按 0 计）")
             out[fid] = 0.0
             continue
 
         out[fid] = base_val * rate
 
     return out, issues
+
+
+# 旧名字保留：早期代码按「费用」称呼这张表
+compute_fees = compute_params
 
 
 def compute_formulas(formulas: dict, ctx: dict) -> tuple[dict[str, float], list[str]]:
