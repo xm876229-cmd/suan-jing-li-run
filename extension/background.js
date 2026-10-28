@@ -1206,8 +1206,10 @@ async function pagePullAdsProducts(host, startDate, endDate, log) {
     const pickRows = (j) => {
       const d = j && j.data;
       if (!d) return null;
-      for (const k of ["table", "items", "list", "rows", "data_list"]) {
-        if (Array.isArray(d[k])) return d[k];
+      // table_v2 是这个接口实际的行数据键（实测：不带 action 参数也直接返回它）。
+      // table / items / list 是同类接口的其他版本，一并兜住。
+      for (const k of ["table_v2", "table", "items", "list", "rows", "data_list"]) {
+        if (Array.isArray(d[k]) && d[k].length) return d[k];
       }
       return null;
     };
@@ -1264,6 +1266,34 @@ async function pagePullAdsProducts(host, startDate, endDate, log) {
   return out;
 }
 
+/** 从一行里按候选名取字段：先精确匹配，再按 key 包含关系模糊匹配。 */
+function pickField(row, cands) {
+  if (!row) return "";
+  for (const c of cands) {
+    const v = row[c];
+    if (v != null && v !== "") return v;
+  }
+  const keys = Object.keys(row);
+  for (const c of cands) {
+    const lc = c.toLowerCase();
+    for (const k of keys) {
+      // 模糊匹配时排除「衍生指标」：cost_per_xxx / xxx_boost_cost / creative_nobid_cost
+      // 这些是花费的分项或比率，累加进去会把花费算大好几倍
+      if (/_per_|_boost_|nobid|_rate|_ratio|_cnt|_count|_value|_sku$/i.test(k)) continue;
+      if (k.toLowerCase().includes(lc) && row[k] != null && row[k] !== "") return row[k];
+    }
+  }
+  return "";
+}
+
+/** 金额转数字：兼容 "1,234.56" 这类带逗号的字符串。 */
+function numOf(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (v == null || v === "") return null;
+  const n = parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
 /** 把商品维度广告行汇总成核算引擎能吃的 CSV（按商品ID 汇总花费）。 */
 function adsRowsToCsv(rows) {
   const esc = (v) => {
@@ -1272,16 +1302,15 @@ function adsRowsToCsv(rows) {
   };
   const agg = new Map();
   for (const r of rows) {
-    const pid = String(r.product_id || r.spu_id || "");
+    const pid = String(pickField(r, ["product_id", "spu_id", "productid"]) || "");
     if (!pid) continue;
-    const raw = r.mixed_real_cost != null ? r.mixed_real_cost
-      : (r.cost != null ? r.cost : (r.basic_cost != null ? r.basic_cost : ""));
-    const cur = String(r.extra_currency || r.currency || "").trim();
-    const name = String(r.product_name || "");
+    const raw = pickField(r, ["mixed_real_cost", "cost", "billed_cost", "basic_cost", "spend"]);
+    const cur = String(pickField(r, ["extra_currency", "currency"]) || "").trim();
+    const name = String(pickField(r, ["product_name", "title"]) || "");
     const key = `${pid}\u0001${cur}`;
     const agg0 = agg.get(key) || { pid, cur, name: "", sum: 0, has: false };
-    const n = Number(raw);
-    if (raw !== "" && Number.isFinite(n)) { agg0.sum += n; agg0.has = true; }
+    const n = numOf(raw);
+    if (n !== null) { agg0.sum += n; agg0.has = true; }
     if (name && !agg0.name) agg0.name = name;
     agg.set(key, agg0);
   }
