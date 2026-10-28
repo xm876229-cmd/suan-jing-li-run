@@ -152,13 +152,19 @@ let adsWatch = null;
 //
 // 关键：extraInfoSpec 必须带 "requestBody"，否则 details.requestBody 是 undefined，
 // 记下来的只有 URL 没有请求体——而我们需要的恰恰是请求体（导出接口传了什么参数）。
-// 之前广告「创建导出任务」接口抓不到，多半就是卡在这儿。
+//
+// 域名范围放到 <all_urls>：广告「创建导出任务」的接口至今没被抓到过一次，
+// 路径到底挂在哪个域（seller 域？ads 域？还是别的）完全未知，
+// 只盯 *.tiktok.com 就会一直漏。抓包期间把非 GET 请求全记下来，才能定位。
 if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
   chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
       if (!enabled) return;
       const u = details.url || "";
-      if (!/export|download|task|insight|stat\//i.test(u)) return;
+      const kw = /export|download|task|insight|stat\//i.test(u);
+      const watching = !!adsWatch;
+      // 平时只收关键词命中的；抓广告任务期间，所有非 GET 请求都收
+      if (!kw && !(watching && details.method !== "GET")) return;
 
       const reqBody = summarizeRequestBody(details.requestBody);
       const rec = {
@@ -175,7 +181,7 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
       };
       recordCapture(rec);
 
-      // 抓广告导出任务时，命中广告相关的请求就单独回传一份，
+      // 抓广告导出任务时，命中的请求单独回传一份，
       // 免得事后在几十万条日常流量里翻。
       // GET 也要记：有些导出接口是用 GET 带参数触发的。
       if (adsWatch && isAdsUrl(u) && /export|download|task|stat|generate|create/i.test(u)) {
@@ -185,7 +191,7 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
         pushAdsCapture(rec);
       }
     },
-    { urls: ["*://*.tiktok.com/*", "*://*.tiktokglobalshop.com/*"] },
+    { urls: ["<all_urls>"] },
     ["requestBody"]
   );
 }
@@ -198,6 +204,54 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
  */
 function isAdsUrl(u) {
   return /oec_ads|ads\.tiktok\.com|\/ads\/|advertis|ad_?center|\/stat\//i.test(u || "");
+}
+
+/**
+ * 扫描所有店铺标签页上的按钮文案，找含「导出」的。
+ *
+ * 为什么需要它：TikTok Shop 里有好几个「导出」——订单导出、商品分析导出、
+ * 广告数据导出，还有「导出记录」页面上的「下载」。点错地方就只会触发
+ * download_task/query，永远抓不到创建接口。扫一遍把候选摆出来，
+ * 用户一眼就知道该点哪个。
+ */
+async function scanExportButtons() {
+  const tabs = await chrome.tabs.query({});
+  const out = [];
+  for (const tb of tabs) {
+    const u = tb.url || "";
+    if (!/tiktok\.com|tiktokglobalshop\.com/i.test(u)) continue;
+    try {
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId: tb.id },
+        func: () => {
+          const found = [];
+          const seen = new Set();
+          const nodes = document.querySelectorAll(
+            "button,[role=button],a,[class*=btn],[class*=Btn],[class*=button]",
+          );
+          for (const el of nodes) {
+            const txt = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ");
+            if (!txt || txt.length > 24 || seen.has(txt)) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width < 20 || r.height < 10) continue;
+            seen.add(txt);
+            found.push(txt);
+          }
+          return found.slice(0, 120);
+        },
+      });
+      const list = (res && res.result) || [];
+      if (!list.length) continue;
+      out.push({
+        url: u,
+        title: tb.title || "",
+        total: list.length,
+        exportButtons: list.filter((t) => /导出|export|eksport|xuất/i.test(t)),
+        downloadButtons: list.filter((t) => /下载|download/i.test(t)),
+      });
+    } catch (e) { /* 页面不允许注入就跳过 */ }
+  }
+  return out;
 }
 
 /** 把一条广告请求实时推给本地桥，落到单独的 ads_export.jsonl。 */
@@ -1144,21 +1198,21 @@ try {
 async function captureAds(seconds, log) {
   const secs = Math.max(30, Math.min(600, seconds || 180));
 
-  // 列出候选标签页只是为了给人指路，**不强制要求广告页已经打开**：
-  // webRequest 是全局监听的，用户什么时候切到广告页点导出，都能抓到。
-  // 之前这里因为「找不到广告页」直接抛错，把整件事卡死了。
-  const tabs = await chrome.tabs.query({});
-  const tiktokTabs = tabs.filter((t) => /tiktok\.com|tiktokglobalshop\.com/i.test(t.url || ""));
-  const adsTabs = tiktokTabs.filter(
-    (t) => isAdsUrl(t.url || "") || /广告|advertis|\bad\b/i.test(t.title || ""),
-  );
-  log(`当前开着 ${tiktokTabs.length} 个店铺标签页，其中 ${adsTabs.length} 个像广告页`);
-  for (const t of adsTabs.slice(0, 5)) {
-    log(`  · ${(t.title || "").slice(0, 30)}　${(t.url || "").slice(0, 90)}`);
-  }
-  if (!adsTabs.length) {
-    log("没认出广告页也没关系：监听是全局的。你现在切到店铺的「广告」页面，点一次「导出」照样能抓到。");
-  }
+  log("请在广告页面点「导出面板里那一行右边的『导出』小按钮」——右上角那个大的只是打开面板");
+  log("（监听已经开着，不用先点面板再回来找按钮）");
+
+  // 扫一遍各页面上的「导出」按钮，直接告诉用户点哪个
+  try {
+    const scan = await scanExportButtons();
+    let any = false;
+    for (const s of scan) {
+      if (!s.total) continue;
+      any = true;
+      const mark = s.exportButtons.length ? "★ 有导出按钮" : "无导出按钮";
+      log(`  · ${(s.title || "(无标题)").slice(0, 26)}｜${mark}｜${s.exportButtons.join(" / ") || "—"}`);
+    }
+    if (!any) log("  （没扫到可注入的店铺页面，建议把广告页面保持在前台）");
+  } catch (e) { /* 忽略 */ }
 
   const recs = [];
   adsWatch = {

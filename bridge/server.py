@@ -421,6 +421,89 @@ class Handler(BaseHTTPRequestHandler):
         _json(self, {"ok": True})
 
 
+# ---------------- 热重载 ----------------
+# 改完代码不重启桥，是最容易浪费时间的坑：桥跑着旧代码，
+# 扩展把数据按新协议发过来，老桥不认，参数被静默丢掉，
+# 表现就是「文件没落到我说的目录」「参数没生效」，极难排查。
+#
+# 这里让桥自己盯着自己的源码：变了就原地重启。
+# 用 os.execv 而不是 spawn，是为了让新进程接管同一个端口，
+# 中间不留「端口被占用」的窗口。
+
+WATCH_FILES = [
+    Path(__file__).resolve(),
+    ROOT / "src" / "cli.py",
+    ROOT / "src" / "calc.py",
+    ROOT / "src" / "loader.py",
+    ROOT / "src" / "report.py",
+    ROOT / "src" / "paths.py",
+    ROOT / "src" / "fx.py",
+]
+
+# 源码变了就置位；由主线程在 serve_forever 结束后执行重启。
+# 为什么不让监视线程自己重启：srv.shutdown() 一调，主线程的 serve_forever
+# 立刻返回、main() 走完、进程就退出了，线程里的 execv 根本轮不到，
+# 表现是「热重载触发了，但桥没了」。
+_RELOAD = [False]
+
+
+def _code_stamp() -> tuple:
+    out = []
+    for f in WATCH_FILES:
+        try:
+            st = f.stat()
+            out.append((f.name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((f.name, 0, 0))
+    return tuple(out)
+
+
+def _watch_code(srv) -> None:
+    """后台盯着源码，变了就置位并让服务循环退出。"""
+    last = _code_stamp()
+
+    def loop() -> None:
+        import time
+        # 注意：这里必须 nonlocal。last 在循环里被赋值，
+        # Python 会把它当成 loop 的局部变量，
+        # 不加 nonlocal 的话第一次比较就 UnboundLocalError
+        # （表现是日志里刷「检查出错」，热重载静默失效）。
+        nonlocal last
+        while True:
+            time.sleep(2.0)
+            try:
+                now = _code_stamp()
+                if now != last:
+                    changed = [a[0] for a, b in zip(now, last) if a[1:] != b[1:]]
+                    print(f"[热重载] 检测到源码变化：{changed} → 重启桥", flush=True)
+                    last = now
+                    _RELOAD[0] = True
+                    try:
+                        srv.shutdown()
+                    except Exception:
+                        pass
+                    return
+            except Exception as e:  # noqa: BLE001
+                print(f"[热重载] 检查出错（忽略）：{e}", flush=True)
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+
+
+def _reload_bridge() -> None:
+    """原地重启：用同一个可执行文件重新拉起服务，端口无缝接续。"""
+    exe = sys.executable
+    args = [exe, "-m", "src.app", "serve"]
+    if getattr(sys, "frozen", False):
+        args = [exe, "serve"]
+    print(f"[热重载] 重新启动：{' '.join(args)}", flush=True)
+    try:
+        os.chdir(str(ROOT))
+    except OSError:
+        pass
+    os.execv(exe, args)
+
+
 def main() -> int:
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
@@ -428,13 +511,24 @@ def main() -> int:
     print(f"抓包写入：{CAPTURE_DIR}")
     print("按 Ctrl+C 停止")
     try:
+        _watch_code(srv)
+    except Exception as e:  # noqa: BLE001
+        print(f"热重载未启用（忽略）：{e}")
+    try:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n已停止")
     finally:
         srv.server_close()
+    if _RELOAD[0]:
+        _reload_bridge()
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
+
