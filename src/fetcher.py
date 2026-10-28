@@ -84,10 +84,15 @@ def make_vars(range_: dict | None = None, store: str = "") -> dict:
         except ValueError:
             return 0
 
+    def _compact(d: str) -> str:
+        return d.replace("-", "") if d else ""
+
     return {
         "startDate": start,
         "endDate": end,
         "endDateExclusive": end_excl,
+        "startDateCompact": _compact(start),
+        "endDateCompact": _compact(end),
         "startTs": _ts(start),
         "endTs": _ts(end) + 86399 if end else 0,   # 闭区间：末日 23:59:59
         "tzOffset": tz,

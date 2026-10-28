@@ -72,9 +72,10 @@ def norm_header(s) -> str:
     return re.sub(r"[\s_\-]+", "", s).lower()
 
 
-# ---------------- 表头定位 ----------------
+# ---------------- 列映射配置 ----------------
 
-# 每个逻辑字段的可接受表头名（都会先做 norm_header）
+# 内置默认：config/mapping.json 缺失或坏了时的兜底。
+# 正常情况下用的是配置文件——那里的候选标题可以随便加。
 ALIASES: dict[str, list[str]] = {
     "order_id": ["orderid", "订单号", "订单id", "平台订单号"],
     "status": ["orderstatus", "订单状态"],
@@ -103,11 +104,72 @@ ALIASES: dict[str, list[str]] = {
 }
 
 
+MAPPING_FILE = Path(__file__).resolve().parents[1] / "config" / "mapping.json"
+_ALIASES_CACHE: dict = {"stamp": None, "data": None}
+
+
+def get_aliases() -> dict[str, list[str]]:
+    """读 config/mapping.json 里的列映射。
+
+    每个逻辑字段可以配**任意多个**候选标题，按顺序取第一个能找到的：
+        第一个标题找不到 → 试第二个 → 一直试到找到为止。
+    所以平台改列名时，在配置里加一条候选就行，不用改代码。
+
+    文件缺失或格式坏了就退回内置的 ALIASES（保证还能跑）。
+    按 mtime 缓存，改完配置不用重启程序。
+    """
+    try:
+        st = MAPPING_FILE.stat()
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return ALIASES
+    if _ALIASES_CACHE["stamp"] == stamp:
+        return _ALIASES_CACHE["data"]
+
+    try:
+        doc = json.loads(MAPPING_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ALIASES
+
+    out: dict[str, list[str]] = {}
+    for key, v in (doc.get("fields") or {}).items():
+        if isinstance(v, dict):
+            cands = v.get("candidates") or v.get("names") or []
+        elif isinstance(v, list):
+            cands = v
+        else:
+            continue
+        # 去重但保持顺序（第一个优先级最高）
+        seen: set = set()
+        clean: list[str] = []
+        for c in cands:
+            c = str(c).strip()
+            if not c:
+                continue
+            k = norm_header(c)
+            if k in seen:
+                continue
+            seen.add(k)
+            clean.append(c)
+        if clean:
+            out[key] = clean
+
+    if not out:
+        return ALIASES
+    _ALIASES_CACHE["stamp"] = stamp
+    _ALIASES_CACHE["data"] = out
+    return out
+
+
 def build_colmap(header_row: Iterable) -> dict[str, int]:
-    """把表头行映射成 {逻辑字段: 列号}。同名字段取最左一列。"""
+    """把表头行映射成 {逻辑字段: 列号}。
+
+    每个逻辑字段按候选顺序逐个试：第一个找不到就试下一个，
+    直到找到为止（所以可以配很多个标题防表格改版）。
+    """
     norm = [norm_header(c) for c in header_row]
     colmap: dict[str, int] = {}
-    for key, names in ALIASES.items():
+    for key, names in get_aliases().items():
         for want in names:
             w = norm_header(want)
             hit = next((i for i, h in enumerate(norm) if h == w), None)

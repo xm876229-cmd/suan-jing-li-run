@@ -22,7 +22,9 @@
     "endDate": "区间结束日（含），如 2026-10-15",
     "endDateExclusive": "结束日的次日（开区间），如 2026-10-16",
     "tzOffset": "时区偏移（秒）",
-    "storeId": "店铺 id"
+    "storeId": "店铺 id",
+    "startDateCompact": "起始日紧凑格式，如 20261001",
+    "endDateCompact": "结束日紧凑格式，如 20261015"
   },
   "tasks": {
     "ads": {
@@ -225,7 +227,7 @@
             "refund_gmv"
           ],
           "output": {
-            "file": "Transaction_Analysis_Product_List_{{startDate}}_{{endDate}}.csv",
+            "file": "Transaction_Analysis_Product_List_{{startDateCompact}}_{{endDateCompact}}.csv",
             "header": [
               "Product ID",
               "Est. commission",
