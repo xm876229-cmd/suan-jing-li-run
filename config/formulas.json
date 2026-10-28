@@ -254,8 +254,7 @@
       "label": "交易手续费",
       "expr": "paid * params.tx_fee",
       "kinds": [
-        "normal",
-        "zero_amount"
+        "normal"
       ]
     },
     {
@@ -283,8 +282,7 @@
       "expr": "orders * params.order_service",
       "kinds": [
         "normal",
-        "refunded",
-        "zero_amount"
+        "refunded"
       ]
     }
   ],
