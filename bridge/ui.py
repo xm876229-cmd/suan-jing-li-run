@@ -426,7 +426,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.17.1</span></div>
+      <div class="row"><span>版本</span><span>0.17.2</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -616,6 +616,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <div>汇率方向</div><div><b>1 人民币 = 多少本地货币</b>。马来西亚填 0.61，意思是 1 元人民币换 0.61 马币</div>
           <div>发单费</div><div>按<b>人民币</b>定价（国内结算），核算时 × 汇率换成本地货币。
             所以改汇率，发单费会自动跟着变。「发单费(本地)」那列是算出来的，不用填</div>
+          <div>订单服务费</div><div>每单固定收多少，直接填<b>本地货币</b>（马来西亚 0.54、菲律宾 5）。
+            它和发单费分开算，报表里也是两列</div>
           <div>其余费率</div><div>写小数，比如 <b>0.081</b> 表示 8.1%，都是按成交额比例收的</div>
           <div>增删费率项</div><div>「＋ 新增费率项」给所有国家加一列；列标题右上角的 × 删掉整列。
             新增的项在「计算参数」里用 <span class="mono">params.字段名</span> 引用</div>
