@@ -440,13 +440,6 @@ WATCH_FILES = [
     ROOT / "src" / "fx.py",
 ]
 
-# 源码变了就置位；由主线程在 serve_forever 结束后执行重启。
-# 为什么不让监视线程自己重启：srv.shutdown() 一调，主线程的 serve_forever
-# 立刻返回、main() 走完、进程就退出了，线程里的 execv 根本轮不到，
-# 表现是「热重载触发了，但桥没了」。
-_RELOAD = [False]
-
-
 def _code_stamp() -> tuple:
     out = []
     for f in WATCH_FILES:
@@ -459,30 +452,35 @@ def _code_stamp() -> tuple:
 
 
 def _watch_code(srv) -> None:
-    """后台盯着源码，变了就置位并让服务循环退出。"""
+    """后台盯着源码，变了就在日志里提示。
+
+    这里**不自动重启**。试过 in-process 的 os.execv 自重启，三种方式都会出事：
+      · execv 后新进程起不来（端口/句柄竞争），桥直接没了
+      · 连续改几次文件会连锁重启，最后把桥重启到死
+      · 桥是后台常驻进程，重启后不再挂在任何任务管理器下，日志也跟着丢
+    宁可让人手动重启一次，也不要桥在干活的时候凭空消失。
+    重启命令：python -m src.app serve
+    """
     last = _code_stamp()
 
     def loop() -> None:
         import time
-        # 注意：这里必须 nonlocal。last 在循环里被赋值，
-        # Python 会把它当成 loop 的局部变量，
-        # 不加 nonlocal 的话第一次比较就 UnboundLocalError
-        # （表现是日志里刷「检查出错」，热重载静默失效）。
         nonlocal last
+        started = time.time()
         while True:
             time.sleep(2.0)
             try:
+                if time.time() - started < 6:
+                    continue
                 now = _code_stamp()
                 if now != last:
                     changed = [a[0] for a, b in zip(now, last) if a[1:] != b[1:]]
-                    print(f"[热重载] 检测到源码变化：{changed} → 重启桥", flush=True)
+                    print(
+                        f"[提示] 检测到源码变化：{changed}。"
+                        f"当前桥仍跑着旧代码，改动要生效请重启：python -m src.app serve",
+                        flush=True,
+                    )
                     last = now
-                    _RELOAD[0] = True
-                    try:
-                        srv.shutdown()
-                    except Exception:
-                        pass
-                    return
             except Exception as e:  # noqa: BLE001
                 print(f"[热重载] 检查出错（忽略）：{e}", flush=True)
 
@@ -490,21 +488,53 @@ def _watch_code(srv) -> None:
     t.start()
 
 
-def _reload_bridge() -> None:
-    """原地重启：用同一个可执行文件重新拉起服务，端口无缝接续。"""
-    exe = sys.executable
-    args = [exe, "-m", "src.app", "serve"]
-    if getattr(sys, "frozen", False):
-        args = [exe, "serve"]
-    print(f"[热重载] 重新启动：{' '.join(args)}", flush=True)
+class _Tee:
+    """同时写到控制台和日志文件。
+
+    为什么需要：桥是后台常驻进程，热重载后就不再挂在任何任务管理器下，
+    一旦它悄悄死了，日志也跟着没了——上次就是这样，桥死在半路，
+    扩展的抓包请求全部发不出去，排查时连个错误线索都没有。
+    """
+
+    def __init__(self, a, b):
+        self.a = a
+        self.b = b
+
+    def write(self, s):
+        for x in (self.a, self.b):
+            try:
+                x.write(s)
+            except Exception:
+                pass
+        return len(s)
+
+    def flush(self):
+        for x in (self.a, self.b):
+            try:
+                x.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        try:
+            return self.a.isatty()
+        except Exception:
+            return False
+
+
+def _setup_log_file():
+    """把 stdout/stderr 接到 data/capture/bridge_run.log。"""
     try:
-        os.chdir(str(ROOT))
-    except OSError:
-        pass
-    os.execv(exe, args)
+        CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+        f = (CAPTURE_DIR / "bridge_run.log").open("a", encoding="utf-8", errors="replace")
+        sys.stdout = _Tee(sys.stdout, f)
+        sys.stderr = _Tee(sys.stderr, f)
+    except Exception as e:  # noqa: BLE001
+        print(f"日志文件不可用（忽略）：{e}")
 
 
 def main() -> int:
+    _setup_log_file()
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"本地桥已启动：http://127.0.0.1:{PORT}")
@@ -520,8 +550,6 @@ def main() -> int:
         print("\n已停止")
     finally:
         srv.server_close()
-    if _RELOAD[0]:
-        _reload_bridge()
     return 0
 
 
@@ -532,3 +560,9 @@ if __name__ == "__main__":
 
 
 
+
+# test0
+
+# test1
+
+# test2
