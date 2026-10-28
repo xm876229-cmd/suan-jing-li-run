@@ -811,8 +811,8 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     log(`   商品管理接口失败：${(e && e.message) || e}`);
   }
 
-  // ② 区间内 SKU：归属按所选区间，更准确。
-  //    后上传，合并时会覆盖①里的「当前归属」——所以区间内改绑过的 SKU 会按区间归属。
+  // ② 区间内 SKU：只补①里没有的 SKU（例如已删除、但区间内仍有订单的链接）。
+  //    归属冲突时以①为准——①是 SKU ID 全量表，属于主来源。
   try {
     log("② 取区间内 SKU（归属按所选区间）…");
     const saved = await pagePullSkuByExport(host, startDate, endDateExclusive);

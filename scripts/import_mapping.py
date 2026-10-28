@@ -82,7 +82,20 @@ def find_sources() -> list[Path]:
     return sorted(out, key=lambda f: f.stat().st_mtime)
 
 
-def merge_file(path: Path, master: dict[str, dict], events: list[dict], now: str) -> tuple[int, int, int]:
+# 来源优先级（用户明确）：
+#   主来源 = 商品管理接口的全量 SKU 表（sku_id / product_id / seller_sku）
+#   补充   = 主工作簿「链接资料」表、区间内的 SKU 分析导出
+# 归属冲突时以主来源为准；补充来源只补主表里没有的 SKU，不改已有归属。
+# 两边都找不到，才归入「无ID」。
+PRIMARY_HINTS = ("商品管理",)
+
+
+def is_primary(path: Path) -> bool:
+    return any(h in path.name for h in PRIMARY_HINTS)
+
+
+def merge_file(path: Path, master: dict[str, dict], events: list[dict], now: str,
+               overwrite: bool = True) -> tuple[int, int, int]:
     if path.suffix.lower() in (".xlsx", ".xls", ".csv"):
         idx = parse_mapping(read_table(path))
     else:
@@ -112,6 +125,10 @@ def merge_file(path: Path, master: dict[str, dict], events: list[dict], now: str
                            "old": None, "new": row["product_id"],
                            "seller_sku": row["seller_sku"]})
         elif old["product_id"] != row["product_id"]:
+            if not overwrite:
+                # 非主来源：只补缺，不改已有归属（归属以主来源为准）
+                same += 1
+                continue
             # 链接改绑了商品：这是必须留痕的一类变更
             events.append({"at": now, "kind": "rebind", "sku_id": sid,
                            "old": old["product_id"], "new": row["product_id"],
@@ -145,7 +162,9 @@ def main(argv: list[str] | None = None) -> int:
         if not src.exists():
             print(f"跳过不存在的文件：{src}")
             continue
-        added, rebound, same = merge_file(src, master, events, now)
+        primary = is_primary(src)
+        added, rebound, same = merge_file(src, master, events, now, overwrite=primary)
+        print(f"      {'主来源' if primary else '补充（只补缺）'}")
         total[0] += added
         total[1] += rebound
         total[2] += same
