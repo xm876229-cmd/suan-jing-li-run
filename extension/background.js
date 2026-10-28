@@ -1143,9 +1143,177 @@ async function pullAdsTasks(host, log) {
   return { saved, running: running.length, total: tasks.length, ready: ready.length };
 }
 
+// ---------------- 任务：广告商品维度花费（直接取数，不等导出） ----------------
+
+/**
+ * 广告花费：直接调数据接口拿商品维度数据，不再等平台生成导出文件。
+ *
+ * 抓包实测（用户在广告页面点「导出」时，页面自己发的请求）：
+ *
+ * POST /oec_ads/shopping/v1/oec/stat/post_product_list_v2
+ * {"query_list":["product_name","campaign_id","campaign_name","product_id","mixed_real_cost",
+ *               "onsite_roi2_shopping_sku","mixed_real_cost_per_onsite_roi2_shopping_sku",
+ *               "onsite_roi2_shopping_value","onsite_mixed_real_roi2_shopping","extra_currency"],
+ *  "action":"download",
+ *  "start_time":"2026-10-01","end_time":"2026-10-15",
+ *  "order_field":"mixed_real_cost","order_type":1,
+ *  "page":1,"page_size":-1,
+ *  "filters":[{"field":"campaign_status","filter_type":0,"in_field_values":["no_delete"]},
+ *             {"field":"gmv_roi_mode","filter_type":10,"in_field_values":["2"]}],
+ *  "dims":["spu_id","campaign_id"]}
+ *
+ * 三个关键点：
+ *  · action="download" 是「创建导出任务」，只返回 task_id，要等平台生成文件（慢、且要人点）
+ *  · page_size=-1 表示一次取全，不用翻页
+ *  · dims=["spu_id","campaign_id"] 说明一行 = 一个「商品 × 计划」，
+ *    同一商品会有多行（每个计划一行），花费要按商品ID 汇总
+ *
+ * 换成查询动作应该能直接拿到 data.table。到底是哪个 action 值能查，
+ * 接口没写文档，所以这里自动探测：逐个试，看谁返回商品行。
+ */
+const ADS_QUERY_FIELDS = [
+  "product_name", "campaign_id", "campaign_name", "product_id", "mixed_real_cost",
+  "onsite_roi2_shopping_sku", "mixed_real_cost_per_onsite_roi2_shopping_sku",
+  "onsite_roi2_shopping_value", "onsite_mixed_real_roi2_shopping", "extra_currency",
+];
+
+const ADS_FILTERS = [
+  { field: "campaign_status", filter_type: 0, in_field_values: ["no_delete"] },
+  { field: "gmv_roi_mode", filter_type: 10, in_field_values: ["2"] },
+];
+
+async function pagePullAdsProducts(host, startDate, endDate, log) {
+  const url = await buildUrl(host, "/oec_ads/shopping/v1/oec/stat/post_product_list_v2");
+  // 先试查询类动作，最后才试 download（download 会真的创建导出任务，别乱试）
+  const ACTIONS = ["", "query", "list", "preview", "get"];
+
+  const r = await runInPage(host, async (u, s, e, query, filters, actions) => {
+    const mkBody = (action) => {
+      const b = {
+        query_list: query,
+        start_time: s,
+        end_time: e,
+        order_field: "mixed_real_cost",
+        order_type: 1,
+        page: 1,
+        page_size: -1,
+        filters,
+        dims: ["spu_id", "campaign_id"],
+      };
+      if (action) b.action = action;
+      return b;
+    };
+    const pickRows = (j) => {
+      const d = j && j.data;
+      if (!d) return null;
+      for (const k of ["table", "items", "list", "rows", "data_list"]) {
+        if (Array.isArray(d[k])) return d[k];
+      }
+      return null;
+    };
+
+    const out = { tried: [], rows: [], action: "", pagination: null };
+    for (const a of actions) {
+      let j = null;
+      let err = "";
+      try {
+        const resp = await fetch(u, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(mkBody(a)),
+        });
+        j = JSON.parse(await resp.text());
+      } catch (ex) {
+        err = String((ex && ex.message) || ex);
+      }
+      const info = {
+        action: a || "(不带 action)",
+        code: j && j.code,
+        msg: String((j && (j.message || j.msg)) || err).slice(0, 70),
+        dataKeys: j && j.data ? Object.keys(j.data).slice(0, 8) : [],
+        extra: j && j.extra ? JSON.stringify(j.extra).slice(0, 120) : "",
+      };
+      const rows = pickRows(j);
+      if (rows && rows.length) {
+        info.rowCount = rows.length;
+        info.rowKeys = Object.keys(rows[0]).slice(0, 26);
+        out.tried.push(info);
+        out.rows = rows;
+        out.action = a;
+        out.pagination = (j.data && j.data.pagination) || null;
+        return out;
+      }
+      out.tried.push(info);
+    }
+    return out;
+  }, [url, startDate, endDate, ADS_QUERY_FIELDS, ADS_FILTERS, ACTIONS]);
+
+  if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
+  if (r.error) throw new Error(r.error);
+  const out = r.result || {};
+  for (const t of out.tried || []) {
+    log(`  · action=${t.action} → code=${t.code} ${t.msg}｜data键=${(t.dataKeys || []).join(",") || "无"}`
+      + `${t.extra ? "｜" + t.extra : ""}${t.rowCount ? `｜**${t.rowCount} 行**` : ""}`);
+    if (t.rowKeys && t.rowKeys.length) log(`    字段：${t.rowKeys.join(", ")}`);
+  }
+  if (!out.rows || !out.rows.length) {
+    throw new Error("广告数据接口没返回商品行（各 action 的返回见上方日志）");
+  }
+  log(`商品维度广告数据：action="${out.action || "(不带)"}"，${out.rows.length} 行`);
+  return out;
+}
+
+/** 把商品维度广告行汇总成核算引擎能吃的 CSV（按商品ID 汇总花费）。 */
+function adsRowsToCsv(rows) {
+  const esc = (v) => {
+    const s = String(v == null ? "" : v);
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const agg = new Map();
+  for (const r of rows) {
+    const pid = String(r.product_id || r.spu_id || "");
+    if (!pid) continue;
+    const raw = r.mixed_real_cost != null ? r.mixed_real_cost
+      : (r.cost != null ? r.cost : (r.basic_cost != null ? r.basic_cost : ""));
+    const cur = String(r.extra_currency || r.currency || "").trim();
+    const name = String(r.product_name || "");
+    const key = `${pid}\u0001${cur}`;
+    const agg0 = agg.get(key) || { pid, cur, name: "", sum: 0, has: false };
+    const n = Number(raw);
+    if (raw !== "" && Number.isFinite(n)) { agg0.sum += n; agg0.has = true; }
+    if (name && !agg0.name) agg0.name = name;
+    agg.set(key, agg0);
+  }
+  // 表头用英文：核算引擎按归一化列名匹配（productid / spend / currency）
+  const lines = ["\uFEFFProduct ID,Spend,Currency,Product name"];
+  for (const v of agg.values()) {
+    lines.push([v.pid, v.has ? v.sum : "", v.cur, v.name].map(esc).join(","));
+  }
+  return lines.join("\r\n");
+}
+
 async function runAds(range, log, opts = {}) {
   const quick = !!opts.quick;
   const host = await ensureHost("seller", log);
+
+  // 优先直取数据接口：一次拿全，不用等平台生成文件
+  if (!opts.noDirect) {
+    try {
+      log("直取商品维度广告数据…");
+      const endDate = range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : range.to;
+      const res = await pagePullAdsProducts(host, range.startDate, endDate, log);
+      const csv = adsRowsToCsv(res.rows);
+      const bytes = new TextEncoder().encode(csv);
+      const name = `creative data for product campaigns (${range.startDate} 00 ~ ${endDate} 23).csv`;
+      const saved = await uploadToBridge(name, bytes.buffer);
+      log(`已保存：${saved.path}`);
+      return { via: "接口直取", rows: res.rows.length, saved: saved.path };
+    } catch (e) {
+      log(`接口直取失败：${(e && e.message) || e}`);
+      if (quick) return { skipped: true, reason: String((e && e.message) || e) };
+    }
+  }
 
   log("查询广告导出任务…");
   const maxRounds = quick ? 1 : 20;      // 非快查模式最多等 5 分钟
