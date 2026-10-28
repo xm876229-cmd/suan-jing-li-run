@@ -1184,18 +1184,19 @@ const ADS_FILTERS = [
 
 async function pagePullAdsProducts(host, startDate, endDate, log) {
   const url = await buildUrl(host, "/oec_ads/shopping/v1/oec/stat/post_product_list_v2");
-  // 先试查询类动作，最后才试 download（download 会真的创建导出任务，别乱试）
-  const ACTIONS = ["", "query", "list", "preview", "get"];
+  // 不带 action 参数实测就能直接返回数据（data.table_v2），
+  // 所以只用这一个动作就够
+  const ACTIONS = [""];
 
   const r = await runInPage(host, async (u, s, e, query, filters, actions) => {
-    const mkBody = (action) => {
+    const mkBody = (action, page) => {
       const b = {
         query_list: query,
         start_time: s,
         end_time: e,
         order_field: "mixed_real_cost",
         order_type: 1,
-        page: 1,
+        page: page || 1,
         page_size: -1,
         filters,
         dims: ["spu_id", "campaign_id"],
@@ -1206,26 +1207,28 @@ async function pagePullAdsProducts(host, startDate, endDate, log) {
     const pickRows = (j) => {
       const d = j && j.data;
       if (!d) return null;
-      // table_v2 是这个接口实际的行数据键（实测：不带 action 参数也直接返回它）。
-      // table / items / list 是同类接口的其他版本，一并兜住。
+      // table_v2 是这个接口实际的行数据键（实测：不带 action 参数也直接返回它）
       for (const k of ["table_v2", "table", "items", "list", "rows", "data_list"]) {
         if (Array.isArray(d[k]) && d[k].length) return d[k];
       }
       return null;
     };
+    const post = async (body) => {
+      const resp = await fetch(u, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return JSON.parse(await resp.text());
+    };
 
-    const out = { tried: [], rows: [], action: "", pagination: null };
+    const out = { tried: [], rows: [], action: "", pagination: null, sample: [] };
     for (const a of actions) {
       let j = null;
       let err = "";
       try {
-        const resp = await fetch(u, {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(mkBody(a)),
-        });
-        j = JSON.parse(await resp.text());
+        j = await post(mkBody(a, 1));
       } catch (ex) {
         err = String((ex && ex.message) || ex);
       }
@@ -1238,12 +1241,31 @@ async function pagePullAdsProducts(host, startDate, endDate, log) {
       };
       const rows = pickRows(j);
       if (rows && rows.length) {
-        info.rowCount = rows.length;
-        info.rowKeys = Object.keys(rows[0]).slice(0, 26);
-        out.tried.push(info);
-        out.rows = rows;
-        out.action = a;
+        // table_v2 是列式：[[表头…], [行…], …]。
+        // 先原样留两份，日志里打出来核对，别猜。
+        out.sample = rows.slice(0, 2);
         out.pagination = (j.data && j.data.pagination) || null;
+        info.rowCount = rows.length;
+        info.firstIsArray = Array.isArray(rows[0]);
+        info.rowKeys = Array.isArray(rows[0])
+          ? rows[0].map((h) => String(h)).slice(0, 26)
+          : Object.keys(rows[0]).slice(0, 26);
+
+        // pagination 说有几页就翻几页（page_size=-1 也可能仍分页）
+        let all = rows.slice();
+        const pc = Number((out.pagination || {}).page_count || 1);
+        for (let pg = 2; pg <= Math.min(pc, 50); pg++) {
+          try {
+            const j2 = await post(mkBody(a, pg));
+            const more = pickRows(j2);
+            if (!more || !more.length) break;
+            all = all.concat(more);
+          } catch (ex) { break; }
+        }
+        info.totalRows = all.length;
+        out.tried.push(info);
+        out.rows = all;
+        out.action = a;
         return out;
       }
       out.tried.push(info);
@@ -1256,8 +1278,12 @@ async function pagePullAdsProducts(host, startDate, endDate, log) {
   const out = r.result || {};
   for (const t of out.tried || []) {
     log(`  · action=${t.action} → code=${t.code} ${t.msg}｜data键=${(t.dataKeys || []).join(",") || "无"}`
-      + `${t.extra ? "｜" + t.extra : ""}${t.rowCount ? `｜**${t.rowCount} 行**` : ""}`);
-    if (t.rowKeys && t.rowKeys.length) log(`    字段：${t.rowKeys.join(", ")}`);
+      + `${t.extra ? "｜" + t.extra : ""}${t.rowCount ? `｜**${t.rowCount} 行**` : ""}`
+      + `${t.totalRows && t.totalRows !== t.rowCount ? `｜翻页后共 ${t.totalRows} 行` : ""}`);
+    if (t.rowKeys && t.rowKeys.length) log(`    列名：${t.rowKeys.join(" | ")}`);
+  }
+  for (const smp of out.sample || []) {
+    log(`    原始行：${JSON.stringify(smp).slice(0, 400)}`);
   }
   if (!out.rows || !out.rows.length) {
     throw new Error("广告数据接口没返回商品行（各 action 的返回见上方日志）");
@@ -1294,14 +1320,31 @@ function numOf(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/** 列式转对象式。
+ *
+ * table_v2 实际是「列式」：第一行是列名，后面每行是一个数组，
+ * 而不是每行一个对象。所以取字段前要先转一道。
+ */
+function rowsToObjects(rows) {
+  if (!rows || !rows.length) return [];
+  if (!Array.isArray(rows[0])) return rows;        // 已经是对象数组
+  const head = rows[0].map((h) => String(h));
+  return rows.slice(1).map((r) => {
+    const o = {};
+    head.forEach((h, i) => { o[h] = Array.isArray(r) ? r[i] : r; });
+    return o;
+  });
+}
+
 /** 把商品维度广告行汇总成核算引擎能吃的 CSV（按商品ID 汇总花费）。 */
 function adsRowsToCsv(rows) {
   const esc = (v) => {
     const s = String(v == null ? "" : v);
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
+  const objs = rowsToObjects(rows);
   const agg = new Map();
-  for (const r of rows) {
+  for (const r of objs) {
     const pid = String(pickField(r, ["product_id", "spu_id", "productid"]) || "");
     if (!pid) continue;
     const raw = pickField(r, ["mixed_real_cost", "cost", "billed_cost", "basic_cost", "spend"]);
@@ -1313,6 +1356,12 @@ function adsRowsToCsv(rows) {
     if (n !== null) { agg0.sum += n; agg0.has = true; }
     if (name && !agg0.name) agg0.name = name;
     agg.set(key, agg0);
+  }
+  // 一个商品ID都没取到 = 结构判断错了。
+  // 这时把原始前两行带出来，日志里能直接看出该按哪列取，别让问题悄悄过去。
+  if (!agg.size) {
+    const raw = (rows || []).slice(0, 2).map((r) => JSON.stringify(r).slice(0, 300)).join(" / ");
+    throw new Error(`广告行里取不到商品ID（列式转换后仍为空）。原始行：${raw}`);
   }
   // 表头用英文：核算引擎按归一化列名匹配（productid / spend / currency）
   const lines = ["\uFEFFProduct ID,Spend,Currency,Product name"];
@@ -1328,10 +1377,17 @@ async function runAds(range, log, opts = {}) {
 
   // 优先直取数据接口：一次拿全，不用等平台生成文件
   if (!opts.noDirect) {
+    // 区间缺失时不能硬发：executeScript 的 args 里有 undefined 会报
+    // "Value is unserializable"，看不出是哪个参数的问题。
+    // 没有区间就只能走「下载已完成的导出任务」那条路。
+    const startDate = range && range.startDate;
+    const endDate = range && (range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : range.to);
+    if (!startDate || !endDate) {
+      log("没有日期区间，跳过接口直取（只能下载已完成的导出任务）");
+    } else {
     try {
       log("直取商品维度广告数据…");
-      const endDate = range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : range.to;
-      const res = await pagePullAdsProducts(host, range.startDate, endDate, log);
+      const res = await pagePullAdsProducts(host, startDate, endDate, log);
       const csv = adsRowsToCsv(res.rows);
       const bytes = new TextEncoder().encode(csv);
       const name = `creative data for product campaigns (${range.startDate} 00 ~ ${endDate} 23).csv`;
@@ -1341,6 +1397,7 @@ async function runAds(range, log, opts = {}) {
     } catch (e) {
       log(`接口直取失败：${(e && e.message) || e}`);
       if (quick) return { skipped: true, reason: String((e && e.message) || e) };
+    }
     }
   }
 
