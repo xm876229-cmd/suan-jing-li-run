@@ -7,6 +7,80 @@ TikTok Shop 跨境电商（马来西亚 / 菲律宾 / 泰国）**按商品（链
 
 ---
 
+
+## 安装到其他电脑
+
+程序已经打包好，产物在 `release/`：
+
+| 文件 | 用途 |
+| --- | --- |
+| `净利助手-安装包.exe` | 双击安装。装到 `%LOCALAPPDATA%\JingLiHelper`，建桌面快捷方式、开机自启、写入卸载信息 |
+| `净利助手-免安装.zip` | 解压即用，不写注册表、不建快捷方式 |
+| `净利助手/` | 上面那个 zip 的内容，可直接拷走 |
+
+**安装后只有一件事需要手工做：在战斧浏览器里加载扩展**（只需一次）
+
+```
+chrome://extensions → 开发者模式 → 加载已解压的扩展程序
+→ 选 <安装目录>\extension
+```
+
+装完在扩展面板选日期点「立即运行」，就会自动取数并出报表。
+
+### 安装目录长这样
+
+```
+%LOCALAPPDATA%\JingLiHelper\
+├── jingli.exe              程序本体（唯一入口）
+├── _internal\              Python 运行库，不用管
+├── config\                 费率与店铺配置（可直接改）
+├── extension\              浏览器扩展，战斧里加载这个目录
+├── src\ scripts\ bridge\   源码（装到别的电脑也能继续维护）
+├── docs\ README.md         文档
+├── data\                   数据：成本表 / 映射表 / 导出的原始文件
+└── output\                 报表产出
+```
+
+> 安装目录名用 `JingLiHelper` 而不是中文，是为了避开 VBS、计划任务、注册表三处的编码差异；
+> 你看到的名字仍然是中文（快捷方式叫「净利助手」）。
+
+### 程序菜单（双击快捷方式）
+
+```
+ 净利助手
+ 取数桥：运行中    开机自启：开
+ 1. 启动取数桥（后台运行，不占窗口）
+ 2. 立即核算（用已有文件出报表）
+ 3. 导入成本表
+ 4. 导入映射表
+ 5. 打开数据目录
+ 6. 打开报表目录
+ 7. 开 / 关开机自启
+ 8. 加载浏览器扩展说明
+ 9. 诊断信息
+```
+
+### 命令行（等价，排障时用）
+
+```bash
+jingli.exe                 # 菜单
+jingli.exe serve           # 只起本地桥（开机自启用它，无窗口）
+jingli.exe run --dir data\exports\_inbox --country 马来西亚 --from 2026-10-01 --to 2026-10-15
+jingli.exe install         # 注册自启、建快捷方式
+jingli.exe uninstall       # 移除自启、快捷方式、卸载信息
+jingli.exe doctor          # 路径、桥、自启、数据量一次看全
+```
+
+### 重新打包
+
+```bash
+python -m scripts.build_app            # 完整构建 → release/
+python -m scripts.build_app --app-only # 只重建 exe，不重打安装包
+```
+
+构建只用 PyInstaller + 标准库，不需要额外安装打包工具。
+
+---
 ## 一、快速开始
 
 ### 方式一：命令行（最灵活）
@@ -296,24 +370,32 @@ python -m src.cli --dir data/exports/_inbox --costs "V1-净利  -15.xlsx" --coun
 ## 六、目录结构
 
 ```
-.
+算净利润/                     项目（源码 + 文档 + 本机运行数据）
+├── jingli.py                 打包入口（也是程序入口）
 ├── src/
-│   ├── loader.py     原始数据读取、SKU→商品映射、成本解析
-│   ├── calc.py       净利核算（口径在这一层，改口径只改这里）
-│   ├── report.py     Excel 报表输出（六页模板）
-│   └── cli.py        命令行入口
+│   ├── app.py                程序入口：菜单 / serve / run / install / doctor
+│   ├── paths.py              路径解析（源码模式与打包模式统一）
+│   ├── setup_core.py         安装、卸载、开机自启、快捷方式
+│   ├── loader.py             原始数据读取、SKU→商品映射、成本解析
+│   ├── calc.py               净利核算（口径在这一层，改口径只改这里）
+│   ├── report.py             Excel 报表输出（六页模板）
+│   └── cli.py                命令行入口
+├── installer/installer.py    安装包程序
 ├── scripts/
-│   ├── validate.py            口径校验（对你的旧表）
-│   ├── run_default.py         一键运行的默认参数
-│   ├── run.bat                双击入口
-│   └── install_scheduled_task.ps1   注册定时任务
-├── extension/        战斧浏览器扩展（抓包）
-├── bridge/           本地桥服务
+│   ├── build_app.py          一键打包（免安装版 + 安装包）
+│   ├── validate.py           口径校验（对你的旧表）
+│   ├── run_default.py        一键运行的默认参数
+│   ├── run.bat               双击入口（源码模式）
+│   ├── install_bridge_autostart.ps1  源码模式下注册桥自启
+│   └── install_scheduled_task.ps1    源码模式下注册定时核算
+├── extension/                战斧浏览器扩展（取数）
+├── bridge/                   本地桥服务
 ├── config/
-│   ├── rates.json    国家汇率与费率（改参数不用改代码）
-│   └── stores.json   店铺清单（加店铺不用改代码）
-├── data/capture/     抓包原始记录与接口清单
-├── output/           生成的报表（不入库）
+│   ├── rates.json            国家汇率与费率（加国家不用改代码）
+│   └── stores.json           店铺清单（加店铺不用改代码）
+├── data/                     成本表 / 映射表 / 导出文件 / 抓包（不入库）
+├── output/                   生成的报表（不入库）
+├── release/                  打包产物：安装包 + 免安装版（不入库）
 └── docs/GIT-WORKFLOW.md
 ```
 

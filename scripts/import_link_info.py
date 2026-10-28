@@ -22,12 +22,17 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+# 源码模式把项目根加进 sys.path；打包后模块已在 exe 内，不需要也不能这么做
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src import paths  # noqa: E402
+
+ROOT = paths.ROOT
 
 from src.loader import parse_mapping, read_table  # noqa: E402
 
-MAPPING_DIR = ROOT / "data" / "mapping"
+MAPPING_DIR = paths.MAPPING
 OUT = MAPPING_DIR / "sku_list_链接资料.csv"
 SHEET = "链接资料"
 FIELDS = ["sku_id", "product_id", "seller_sku", "product_name", "style_code"]

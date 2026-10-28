@@ -14,7 +14,13 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+# 源码模式把项目根加进 sys.path；打包后模块已在 exe 内，不需要也不能这么做
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src import paths  # noqa: E402
+
+ROOT = paths.ROOT
 FILES = ["extension/background.js", "extension/popup.js", "extension/inject.js", "extension/relay.js"]
 
 # 语言内置与浏览器 API，不算缺失

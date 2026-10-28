@@ -18,10 +18,13 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# 源码模式要把项目根加进 sys.path；打包后模块已在 exe 里，不需要也不能这么做
+if not getattr(sys, "frozen", False):
+    _root = Path(__file__).resolve().parents[1]
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
 
+from src import paths  # noqa: E402
 from src.calc import compute, load_rates  # noqa: E402
 from src.loader import load_from_dir, load_from_files, load_from_workbook  # noqa: E402
 from src.report import build_report  # noqa: E402
@@ -39,7 +42,8 @@ def parse_date(s: str | None) -> date | None:
 
 
 
-COST_DIR = ROOT / "data" / "costs"
+ROOT = paths.ROOT
+COST_DIR = paths.COSTS
 
 
 def pick_costs(explicit: Path | None) -> tuple[Path | None, str]:
@@ -89,8 +93,8 @@ def pick_costs(explicit: Path | None) -> tuple[Path | None, str]:
 
 
 
-MAPPING_DIR = ROOT / "data" / "mapping"
-INBOX_DIR = ROOT / "data" / "exports" / "_inbox"
+MAPPING_DIR = paths.MAPPING
+INBOX_DIR = paths.INBOX
 
 
 
@@ -200,8 +204,8 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="按哪个时间字段筛选区间（默认订单创建时间）")
     ap.add_argument("--out", type=Path, help="输出 Excel 路径；不填则自动命名到 output/")
     ap.add_argument("--json", action="store_true", help="只输出一行 JSON 摘要（供本地桥调用）")
-    ap.add_argument("--rates", type=Path, default=ROOT / "config" / "rates.json")
-    ap.add_argument("--stores", type=Path, default=ROOT / "config" / "stores.json")
+    ap.add_argument("--rates", type=Path, default=paths.RATES_FILE)
+    ap.add_argument("--stores", type=Path, default=paths.STORES_FILE)
     return ap
 
 
@@ -282,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dfrom or args.dto:
         period = f"{args.dfrom or '起'}~{args.dto or '今'}"
     stamp = f"{args.dfrom or 'all'}_{args.dto or 'all'}".replace("-", "")
-    out = args.out or (ROOT / "output" / f"净利报表_{country}_{stamp}.xlsx")
+    out = args.out or (paths.OUTPUT / f"净利报表_{country}_{stamp}.xlsx")
 
     subtitle = f"{country}｜{period}｜{source}"
     extra = {
@@ -301,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
     t = res.total
 
     if getattr(args, "json", False):
-        print(json.dumps({
+        line = json.dumps({
             "ok": True,
             "file": str(path),
             "country": country,
@@ -315,7 +319,17 @@ def main(argv: list[str] | None = None) -> int:
             "lines": res.line_count,
             "issues": len(res.issues),
             "sources": data.sources,
-        }, ensure_ascii=False))
+        }, ensure_ascii=False)
+        # 直接写 UTF-8 字节，不走 stdout 的文本编码。
+        # 打包成 exe 后，中文 Windows 下 stdout 是 GBK，且 PYTHONIOENCODING
+        # 不一定生效——那样本地桥按 UTF-8 解析会拿到一堆替换符，
+        # 国家名、文件名全变乱码。这里绕开编码层，结果就是确定的。
+        try:
+            sys.stdout.flush()
+            sys.stdout.buffer.write(line.encode("utf-8") + b"\n")
+            sys.stdout.buffer.flush()
+        except (AttributeError, OSError, ValueError):
+            print(line)
         return 0
 
     print(f"已生成：{path}")

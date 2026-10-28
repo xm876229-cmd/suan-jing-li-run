@@ -17,8 +17,13 @@ from pathlib import Path
 
 import openpyxl
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+# 源码模式把项目根加进 sys.path；打包后模块已在 exe 内，不需要也不能这么做
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src import paths  # noqa: E402
+
+ROOT = paths.ROOT
 
 from src.calc import compute, load_rates  # noqa: E402
 from src.loader import load_from_workbook, to_num, to_str  # noqa: E402
@@ -47,7 +52,7 @@ def main() -> int:
         return 2
 
     print(f"校验对象：{wb_path.name}")
-    rates, switches = load_rates(ROOT / "config" / "rates.json")
+    rates, switches = load_rates(paths.RATES_FILE)
     params = rates["马来西亚"]
     data = load_from_workbook(wb_path, params.usd_to_local)
     print(f"订单行数 {len(data.orders)}｜成本编码 {len(data.costs)}｜SKU 索引 {len(data.sku_index)}｜"

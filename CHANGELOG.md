@@ -4,6 +4,57 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.7.0] - 2026-10-28
+
+### 新增：可分发程序与安装包
+
+程序不再只能跑在源码目录里。`python -m scripts.build_app` 一次产出：
+
+| 产物 | 说明 |
+| --- | --- |
+| `release/净利助手/` | 免安装版，拷走即用（含源码与文档） |
+| `release/净利助手-免安装.zip` | 上面那个目录的压缩包 |
+| `release/净利助手-安装包.exe` | 单文件安装包，双击安装 |
+
+安装包行为：
+
+- 装到 `%LOCALAPPDATA%\JingLiHelper`，**按用户安装、不需要管理员权限**
+- 建桌面与开始菜单快捷方式、注册开机自启、写入「设置 → 应用」里的卸载项
+- 升级时替换程序文件，`data` 与 `output` 保持不变
+- 支持 `--silent` 静默安装
+
+### 新增：统一程序入口 `jingli.exe`
+
+```
+jingli.exe                 菜单（启动桥 / 立即核算 / 导入成本表 / 导入映射表 / 诊断 / 开自启）
+jingli.exe serve           只起本地桥（开机自启用它）
+jingli.exe run [参数]      核算，参数与 src.cli 一致
+jingli.exe install         注册自启、建快捷方式、写卸载信息
+jingli.exe uninstall       移除自启、快捷方式、卸载信息
+jingli.exe doctor          路径 / 桥 / 自启 / 数据量一次看全
+```
+
+### 重构
+
+- 新增 `src/paths.py`：统一「程序目录 / 数据目录 / 产出目录」的解析，
+  源码模式与打包模式一致；可用 `JINGLI_DATA`、`JINGLI_OUTPUT` 环境变量把数据挪走
+- `src/cli.py`、`scripts/*.py`、`bridge/server.py` 全部改用该模块，不再各自推算路径
+- 本地桥调核算时按模式切换命令：打包后调 `jingli.exe run`，源码模式调 `python -m src.cli`
+
+### 修复
+
+- **打包后一跑就崩**：中文 Windows 控制台是 GBK，打印 `⚠` 触发
+  `UnicodeEncodeError` 直接退出。现在统一 `errors="replace"`
+- **安装包输出全是问号**：子进程输出经过一次转码导致丢字，改为直接继承控制台
+- 构建脚本不再整目录删除 `release/`，改为逐文件覆盖
+  （批量删除既会被安全策略拦下，也可能误删用户自己放进去的文件）
+
+### 已知限制
+
+- 浏览器扩展**无法静默安装**：战斧/Chromium 不支持从命令行加载未打包扩展，
+  装完必须手工在 `chrome://extensions` 加载一次 `<安装目录>\extension`
+- 联盟佣金的导出接口只返回任务 ID、没有下载地址，自动取数仍未打通（本轮已加接口探测）
+
 ## [Unreleased]
 
 ### 待办

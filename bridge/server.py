@@ -27,11 +27,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-ROOT = Path(__file__).resolve().parents[1]
-CAPTURE_DIR = ROOT / "data" / "capture"
-INBOX_DIR = ROOT / "data" / "exports" / "_inbox"
-LOG_FILE = ROOT / "data" / "capture" / "task.log"
-PORT = 8765
+if not getattr(sys, "frozen", False):
+    _root = Path(__file__).resolve().parents[1]
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+
+from src import paths  # noqa: E402
+
+ROOT = paths.ROOT
+CAPTURE_DIR = paths.CAPTURE
+INBOX_DIR = paths.INBOX
+LOG_FILE = paths.CAPTURE / "task.log"
+PORT = int(os.environ.get("JINGLI_PORT") or 8765)
 
 TASK_LOG: list[str] = []
 _RUN_LOCK = threading.Lock()
@@ -256,10 +263,15 @@ class Handler(BaseHTTPRequestHandler):
             dto = payload.get("to") or None
 
             stamp = f"{dfrom or 'all'}_{dto or 'all'}".replace("-", "")
-            out = ROOT / "output" / f"净利报表_{country}_{stamp}.xlsx"
+            out = paths.OUTPUT / f"净利报表_{country}_{stamp}.xlsx"
 
-            cmd = [
-                sys.executable, "-m", "src.cli",
+            # 打包后 sys.executable 是 exe 本身，`-m src.cli` 不再有效，
+            # 改成 exe 自己的 run 子命令。两种模式参数完全一致。
+            if paths.is_frozen():
+                base = [sys.executable, "run"]
+            else:
+                base = [sys.executable, "-m", "src.cli"]
+            cmd = base + [
                 "--dir", str(INBOX_DIR),
                 "--country", country,
                 "--out", str(out),

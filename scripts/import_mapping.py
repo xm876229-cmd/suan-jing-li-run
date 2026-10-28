@@ -24,15 +24,20 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+# 源码模式把项目根加进 sys.path；打包后模块已在 exe 内，不需要也不能这么做
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src import paths  # noqa: E402
+
+ROOT = paths.ROOT
 
 from src.loader import parse_mapping, parse_mapping_json, read_table  # noqa: E402
 
-MAPPING_DIR = ROOT / "data" / "mapping"
+MAPPING_DIR = paths.MAPPING
 MASTER = MAPPING_DIR / "master.csv"
 HISTORY = MAPPING_DIR / "history.jsonl"
-INBOX = ROOT / "data" / "exports" / "_inbox"
+INBOX = paths.INBOX
 FIELDS = ["sku_id", "product_id", "seller_sku", "product_name", "style_code", "updated_at"]
 
 

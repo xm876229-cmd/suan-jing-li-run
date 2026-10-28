@@ -17,7 +17,13 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+# 源码模式把项目根加进 sys.path；打包后模块已在 exe 内，不需要也不能这么做
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src import paths  # noqa: E402
+
+ROOT = paths.ROOT
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
