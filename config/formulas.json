@@ -194,7 +194,8 @@
       "role": "cost",
       "expr": "cost_cny * params.cny_to_local",
       "kinds": [
-        "normal"
+        "normal",
+        "zero_amount"
       ]
     },
     {
@@ -203,7 +204,9 @@
       "role": "order_count",
       "expr": "orders",
       "kinds": [
-        "normal"
+        "normal",
+        "refunded",
+        "zero_amount"
       ]
     },
     {
@@ -212,7 +215,9 @@
       "role": "items",
       "expr": "qty",
       "kinds": [
-        "normal"
+        "normal",
+        "refunded",
+        "zero_amount"
       ]
     },
     {
@@ -221,7 +226,8 @@
       "role": "buyer_paid",
       "expr": "paid",
       "kinds": [
-        "normal"
+        "normal",
+        "zero_amount"
       ]
     },
     {
@@ -229,7 +235,9 @@
       "label": "发单费",
       "expr": "orders * params.dispatch_fee_cny * params.cny_to_local",
       "kinds": [
-        "normal"
+        "normal",
+        "refunded",
+        "zero_amount"
       ]
     },
     {
@@ -237,13 +245,18 @@
       "label": "平台佣金",
       "expr": "gmv * params.platform_commission",
       "kinds": [
-        "normal"
+        "normal",
+        "zero_amount"
       ]
     },
     {
       "id": "tx_fee",
       "label": "交易手续费",
-      "expr": "paid * params.tx_fee"
+      "expr": "paid * params.tx_fee",
+      "kinds": [
+        "normal",
+        "zero_amount"
+      ]
     },
     {
       "id": "ads",
@@ -260,7 +273,8 @@
       "label": "奖金返现",
       "expr": "gmv * params.cashback",
       "kinds": [
-        "normal"
+        "normal",
+        "zero_amount"
       ]
     },
     {
@@ -268,7 +282,9 @@
       "label": "订单服务费",
       "expr": "orders * params.order_service",
       "kinds": [
-        "normal"
+        "normal",
+        "refunded",
+        "zero_amount"
       ]
     }
   ],
