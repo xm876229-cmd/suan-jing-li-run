@@ -45,6 +45,7 @@ class Params:
     country: str
     cny_to_local: float
     usd_to_local: float
+    dispatch_fee_cny: float
     dispatch_fee_local: float
     platform_commission: float
     tx_fee: float
@@ -86,11 +87,20 @@ def load_rates(path: Path) -> tuple[dict[str, Params], Switches]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     out: dict[str, Params] = {}
     for name, c in data.get("countries", {}).items():
+        cny = _f(c, "cny_to_local")
+        dcny = _f(c, "dispatch_fee_cny")
+
+        # 发单费按**人民币**定价，再按汇率换成本地货币。
+        # 所以汇率一变，发单费跟着变——这是业务上的实际规则（发单费在国内结算）。
+        # 只在没填人民币价时才退回本地值，兼容老配置。
+        dlocal = round(dcny * cny, 6) if (dcny and cny) else _f(c, "dispatch_fee_local")
+
         out[name] = Params(
             country=name,
-            cny_to_local=_f(c, "cny_to_local"),
+            cny_to_local=cny,
             usd_to_local=_f(c, "usd_to_local"),
-            dispatch_fee_local=_f(c, "dispatch_fee_local"),
+            dispatch_fee_cny=dcny,
+            dispatch_fee_local=dlocal,
             platform_commission=_f(c, "platform_commission"),
             tx_fee=_f(c, "tx_fee"),
             cashback=_f(c, "cashback"),
@@ -259,7 +269,15 @@ class CalcResult:
     def total(self) -> ProductMetrics:
         t = ProductMetrics(product_id="合计", style_codes="")
         agg: dict[str, float] = {}
+        net_sum = ZERO
+        net_any = False
         for p in self.products:
+            # 净利是公式算出来的（net_value），必须单独累加。
+            # 不累加的话「合计」这一行会退回硬编码算法：
+            # 改了公式，明细行变了、报表总额却没变。
+            if p.net_value is not None:
+                net_sum += p.net_value
+                net_any = True
             t.gmv += p.gmv
             t.buyer_paid += p.buyer_paid
             t.fee_base_gmv += p.fee_base_gmv
@@ -288,6 +306,8 @@ class CalcResult:
             for k, v in (p.fees or {}).items():
                 agg[k] = agg.get(k, 0.0) + v
         t.fees = agg
+        if net_any:
+            t.net_value = net_sum
         return t
 
     @property
@@ -515,7 +535,12 @@ def compute(data: RawData, params: Params, switches: Switches,
     # 每一项都自带 kinds（只算哪些订单类别），所以「发单费只算正常单和退货单」
     # 「平台佣金只算正常单」这类口径，都是改配置里的一个数组，不改代码。
     # 加一项新支出也是加一条，自动参与 net 的计算。
+    # 每个国家可以有自己的参数表（不同国家收的费用不一样）。
+    # 有就用该国的，没有就退回全局那套。
     param_cfg = list(fcfg.get("params") or [])
+    per_country = (fcfg.get("by_country") or {}).get(params.country) or {}
+    if isinstance(per_country.get("params"), list) and per_country["params"]:
+        param_cfg = list(per_country["params"])
     # 老开关仍然生效：超级优惠券原来由 switches 控制
     if switches.super_coupon_enabled:
         for it in param_cfg:

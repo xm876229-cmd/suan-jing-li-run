@@ -397,6 +397,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "/#/params")
             self.end_headers()
+        elif self.path.startswith("/api/mapping"):
+            from bridge import settings_api
+            _json(self, settings_api.read_mapping())
         elif self.path.startswith("/api/settings"):
             from src import settings as cfg_settings
             _json(self, {"ok": True, "settings": cfg_settings.load()})
@@ -424,7 +427,9 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
     def do_POST(self):
-        if self.path.startswith("/api/stores/rename"):
+        if self.path.startswith("/api/mapping"):
+            self._post_mapping()
+        elif self.path.startswith("/api/stores/rename"):
             self._post_rename_store()
         elif self.path.startswith("/identify"):
             self._post_identify()
@@ -503,11 +508,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if preview:
-            _json(self, config_page.preview(params, payload.get("formulas")))
+            _json(self, config_page.preview(
+                params, payload.get("formulas"),
+                str(payload.get("country") or ""),
+                payload.get("by_country")))
             return
 
         try:
-            _json(self, config_page.save_config(params, payload.get("formulas") or {}))
+            _json(self, config_page.save_config(
+                params, payload.get("formulas") or {},
+                by_country=payload.get("by_country")))
         except Exception as e:  # noqa: BLE001
             _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
 
@@ -556,6 +566,19 @@ class Handler(BaseHTTPRequestHandler):
         _append_log(f"{who}文件已保存：{path.name}（{len(data)/1024:.0f} KB）")
         _json(self, {"ok": True, "path": str(path), "bytes": len(data),
                      "shop_id": shop_id, "store_dir": str(target_dir)})
+
+    def _post_mapping(self):
+        from bridge import settings_api
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+        try:
+            _json(self, settings_api.save_mapping(payload.get("fields") or []))
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
 
     def _post_rename_store(self):
         try:

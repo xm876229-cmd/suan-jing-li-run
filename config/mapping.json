@@ -49,8 +49,7 @@
     "sku_id": {
       "label": "SKU ID",
       "candidates": [
-        "skuid",
-        "sku id"
+        "skuid"
       ]
     },
     "seller_sku": {
@@ -65,7 +64,6 @@
       "label": "商品ID",
       "candidates": [
         "productid",
-        "商品id",
         "商品id"
       ]
     },

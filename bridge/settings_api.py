@@ -249,3 +249,65 @@ def debug_info() -> dict:
         "paths": paths.describe(),
         "python": f"{os.sys.version_info.major}.{os.sys.version_info.minor}.{os.sys.version_info.micro}",
     }
+
+# ---------------- 列映射 ----------------
+
+def read_mapping() -> dict:
+    """读 config/mapping.json：列标题 → 逻辑字段。
+
+    每行订单表的列名会变（平台改版、多语言），所以一个逻辑字段可以配
+    任意多个候选标题，按顺序取第一个能对上的。
+    """
+    from src.loader import get_aliases
+
+    doc: dict = {}
+    try:
+        doc = json.loads(paths.CONFIG.joinpath("mapping.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        doc = {}
+
+    aliases = get_aliases()
+    fields = []
+    for key, cands in aliases.items():
+        meta = (doc.get("fields") or {}).get(key) or {}
+        fields.append({
+            "id": key,
+            "label": str(meta.get("label") or key),
+            "candidates": list(cands),
+        })
+    return {"ok": True, "fields": fields}
+
+
+def save_mapping(fields: list) -> dict:
+    """保存列映射。保留文件里的 _readme 说明，别冲掉。"""
+    target = paths.CONFIG / "mapping.json"
+    old: dict = {}
+    try:
+        old = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        old = {}
+
+    out: dict = {}
+    if old.get("_readme"):
+        out["_readme"] = old["_readme"]
+    clean: dict = {}
+    for f in fields or []:
+        if not isinstance(f, dict):
+            continue
+        fid = str(f.get("id") or "").strip()
+        if not fid:
+            continue
+        cands = [str(c).strip() for c in (f.get("candidates") or []) if str(c).strip()]
+        # 去重但保持顺序
+        seen: set = set()
+        uniq = []
+        for c in cands:
+            if c.lower() in seen:
+                continue
+            seen.add(c.lower())
+            uniq.append(c)
+        clean[fid] = {"label": str(f.get("label") or fid), "candidates": uniq}
+    out["fields"] = clean
+
+    target.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"ok": True, "fields": len(clean)}

@@ -57,13 +57,15 @@ def read_config() -> dict:
     cfg = formula.load_config(config_path())
     return {
         "params": cfg.get("params") or [],
+        "by_country": cfg.get("by_country") or {},
         "formulas": cfg.get("formulas") or {},
         "kinds": cfg.get("kinds") or dict(KINDS),
         "raw_note": doc.get("_readme") or [],
     }
 
 
-def save_config(params: list, formulas: dict, keep_readme: bool = True) -> dict:
+def save_config(params: list, formulas: dict, keep_readme: bool = True,
+                by_country: dict | None = None) -> dict:
     """保存参数表。保留原来的 _readme 说明文字，别把它冲掉。"""
     old: dict = {}
     try:
@@ -76,6 +78,12 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True) -> dict:
         out["_readme"] = old["_readme"]
     out["kinds"] = old.get("kinds") or dict(KINDS)
     out["params"] = params
+    if by_country is not None:
+        # 只留真有内容的：空数组等于「这个国家没定制」，删掉让全局生效
+        clean = {k: v for k, v in (by_country or {}).items()
+                 if isinstance(v, dict) and v.get("params")}
+        if clean:
+            out["by_country"] = clean
     out["formulas"] = formulas or {}
 
     config_path().write_text(
@@ -122,7 +130,8 @@ def _load_data():
     return data, None
 
 
-def preview(params: list, formulas: dict | None = None) -> dict:
+def preview(params: list, formulas: dict | None = None,
+            country: str = "", by_country: dict | None = None) -> dict:
     """用给定的参数表试算，并与当前配置对比。
 
     这是配口径时最重要的功能：改一个勾选，立刻看到净利差多少。
@@ -133,7 +142,15 @@ def preview(params: list, formulas: dict | None = None) -> dict:
 
     from src.calc import compute
 
-    country, p, sw = _CACHE["params"]
+    # 试算哪个国家：前端选了就用它，没选就用费率表里的第一个
+    _c, p, sw = _CACHE["params"]
+    if country:
+        from src.calc import load_rates
+        rates, sw2 = load_rates(paths.RATES_FILE)
+        if country in rates:
+            p, sw = rates[country], sw2
+            _c = country
+    country = _c
     cfg_now = formula.load_config(config_path())
 
     def run(cfg: dict) -> dict:
@@ -153,6 +170,8 @@ def preview(params: list, formulas: dict | None = None) -> dict:
     before = run(cfg_now)
     trial_cfg = dict(cfg_now)
     trial_cfg["params"] = params
+    if by_country is not None:
+        trial_cfg["by_country"] = by_country
     if formulas:
         trial_cfg["formulas"] = {**cfg_now.get("formulas", {}), **formulas}
     after = run(trial_cfg)

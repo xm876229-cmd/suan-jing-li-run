@@ -241,6 +241,7 @@ DEFAULTS: dict = {
         {"id": "affiliate", "label": "达人佣金", "base": "commission"},
         {"id": "ads", "label": "广告花费", "base": "ads"},
     ],
+    "by_country": {},
     "formulas": {
         "gross_profit": "gmv - cost",
         "total_fees": "sum(fees)",
@@ -273,6 +274,9 @@ def load_config(path: Path) -> dict:
         out["params"] = doc["fees"]
     if isinstance(doc.get("kinds"), dict) and doc["kinds"]:
         out["kinds"] = doc["kinds"]
+    # 每个国家自己的参数表：{国家: {params: [...]}}，有就优先用
+    if isinstance(doc.get("by_country"), dict) and doc["by_country"]:
+        out["by_country"] = doc["by_country"]
     if isinstance(doc.get("formulas"), dict) and doc["formulas"]:
         out["formulas"].update(doc["formulas"])
     return out

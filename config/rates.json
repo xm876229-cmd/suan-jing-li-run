@@ -19,7 +19,7 @@
     "马来西亚": {
       "cny_to_local": 0.61,
       "usd_to_local": 4.04,
-      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_cny": 3.8852,
       "dispatch_fee_local": 2.37,
       "platform_commission": 0.081,
       "tx_fee": 0.0378,
@@ -29,12 +29,13 @@
       "logistics": 0.0,
       "region": "东南亚",
       "currency": "MYR",
-      "rates_verified": true
+      "rates_verified": true,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     },
     "菲律宾": {
       "cny_to_local": 9.3,
       "usd_to_local": 62.48,
-      "dispatch_fee_cny": 2.0,
+      "dispatch_fee_cny": 2.5376,
       "dispatch_fee_local": 23.6,
       "platform_commission": 0.062,
       "tx_fee": 0.0224,
@@ -44,7 +45,8 @@
       "logistics": 0.055,
       "region": "东南亚",
       "currency": "PHP",
-      "rates_verified": false
+      "rates_verified": false,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     },
     "泰国": {
       "cny_to_local": 4.91,
@@ -59,7 +61,8 @@
       "logistics": 0.0,
       "region": "东南亚",
       "currency": "THB",
-      "rates_verified": false
+      "rates_verified": false,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     },
     "越南": {
       "region": "东南亚",
@@ -67,14 +70,15 @@
       "rates_verified": false,
       "cny_to_local": 3560.0,
       "usd_to_local": 25400.0,
-      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_cny": 1.9663,
       "dispatch_fee_local": 7000.0,
       "platform_commission": 0.08,
       "tx_fee": 0.03,
       "cashback": 0.0,
       "super_coupon": 0.0,
       "growth_fee": 0.0,
-      "logistics": 0.0
+      "logistics": 0.0,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     },
     "新加坡": {
       "region": "东南亚",
@@ -82,14 +86,15 @@
       "rates_verified": false,
       "cny_to_local": 0.185,
       "usd_to_local": 1.29,
-      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_cny": 2.973,
       "dispatch_fee_local": 0.55,
       "platform_commission": 0.08,
       "tx_fee": 0.03,
       "cashback": 0.0,
       "super_coupon": 0.0,
       "growth_fee": 0.0,
-      "logistics": 0.0
+      "logistics": 0.0,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     },
     "印尼": {
       "region": "东南亚",
@@ -97,14 +102,15 @@
       "rates_verified": false,
       "cny_to_local": 2280.0,
       "usd_to_local": 15800.0,
-      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_cny": 1.9737,
       "dispatch_fee_local": 4500.0,
       "platform_commission": 0.08,
       "tx_fee": 0.03,
       "cashback": 0.0,
       "super_coupon": 0.0,
       "growth_fee": 0.0,
-      "logistics": 0.0
+      "logistics": 0.0,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     },
     "美国": {
       "region": "欧美",
@@ -119,7 +125,8 @@
       "cashback": 0.0,
       "super_coupon": 0.0,
       "growth_fee": 0.0,
-      "logistics": 0.0
+      "logistics": 0.0,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     },
     "英国": {
       "region": "欧美",
@@ -134,7 +141,8 @@
       "cashback": 0.0,
       "super_coupon": 0.0,
       "growth_fee": 0.0,
-      "logistics": 0.0
+      "logistics": 0.0,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     },
     "德国": {
       "region": "欧美",
@@ -149,7 +157,8 @@
       "cashback": 0.0,
       "super_coupon": 0.0,
       "growth_fee": 0.0,
-      "logistics": 0.0
+      "logistics": 0.0,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     },
     "法国": {
       "region": "欧美",
@@ -164,7 +173,8 @@
       "cashback": 0.0,
       "super_coupon": 0.0,
       "growth_fee": 0.0,
-      "logistics": 0.0
+      "logistics": 0.0,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     },
     "意大利": {
       "region": "欧美",
@@ -179,7 +189,8 @@
       "cashback": 0.0,
       "super_coupon": 0.0,
       "growth_fee": 0.0,
-      "logistics": 0.0
+      "logistics": 0.0,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     },
     "西班牙": {
       "region": "欧美",
@@ -194,7 +205,8 @@
       "cashback": 0.0,
       "super_coupon": 0.0,
       "growth_fee": 0.0,
-      "logistics": 0.0
+      "logistics": 0.0,
+      "_dispatch_note": "发单费按人民币定价，本地值 = 本值 × 汇率，改汇率会自动跟着变"
     }
   },
   "switches": {

@@ -41,7 +41,6 @@
     "           gross_profit / total_fees / net 等已定义的结果。",
     "  可用函数：sum / abs / min / max / round。"
   ],
-
   "kinds": {
     "cancelled": "已取消订单",
     "refunded": "退货退款订单",
@@ -49,72 +48,109 @@
     "unpaid": "未付款订单",
     "normal": "正常订单"
   },
-
   "params": [
     {
       "id": "gmv",
       "label": "GMV（收入）",
       "base": "gmv",
-      "kinds": ["normal", "zero_amount"]
+      "kinds": [
+        "normal",
+        "zero_amount"
+      ]
     },
     {
       "id": "buyer_paid",
       "label": "买家实付",
       "base": "buyer_paid",
-      "kinds": ["normal", "zero_amount"]
+      "kinds": [
+        "normal",
+        "zero_amount"
+      ]
     },
     {
       "id": "order_count",
       "label": "订单数",
       "base": "order_count",
-      "kinds": ["normal", "cancelled", "refunded", "zero_amount"]
+      "kinds": [
+        "normal",
+        "cancelled",
+        "refunded",
+        "zero_amount"
+      ]
     },
     {
       "id": "items",
       "label": "件数",
       "base": "items",
-      "kinds": ["normal", "cancelled", "refunded", "zero_amount"]
+      "kinds": [
+        "normal",
+        "cancelled",
+        "refunded",
+        "zero_amount"
+      ]
     },
     {
       "id": "cost",
       "label": "商品成本",
       "base": "cost",
-      "kinds": ["normal", "cancelled", "refunded", "zero_amount"]
+      "kinds": [
+        "normal",
+        "cancelled",
+        "refunded",
+        "zero_amount"
+      ]
     },
     {
       "id": "dispatch",
       "label": "发单费",
       "base": "order_count",
       "rate": "params.dispatch_fee_local",
-      "kinds": ["normal", "cancelled", "refunded", "zero_amount"]
+      "kinds": [
+        "normal",
+        "cancelled",
+        "refunded",
+        "zero_amount"
+      ]
     },
     {
       "id": "platform_commission",
       "label": "平台佣金",
       "base": "gmv",
       "rate": "params.platform_commission",
-      "kinds": ["normal", "cancelled", "refunded"]
+      "kinds": [
+        "normal",
+        "cancelled",
+        "refunded"
+      ]
     },
     {
       "id": "tx_fee",
       "label": "交易手续费",
       "base": "buyer_paid",
       "rate": "params.tx_fee",
-      "kinds": ["normal", "cancelled", "refunded"]
+      "kinds": [
+        "normal",
+        "cancelled",
+        "refunded"
+      ]
     },
     {
       "id": "cashback",
       "label": "奖金返现",
       "base": "gmv",
       "rate": "params.cashback",
-      "kinds": ["normal"]
+      "kinds": [
+        "normal"
+      ]
     },
     {
       "id": "super_coupon",
       "label": "超级优惠券",
       "base": "gmv",
       "rate": "params.super_coupon",
-      "kinds": ["normal"],
+      "kinds": [
+        "normal"
+      ],
       "enabled": false
     },
     {
@@ -122,14 +158,18 @@
       "label": "商家成长",
       "base": "gmv",
       "rate": "params.growth_fee",
-      "kinds": ["normal"]
+      "kinds": [
+        "normal"
+      ]
     },
     {
       "id": "logistics",
       "label": "物流",
       "base": "gmv",
       "rate": "params.logistics",
-      "kinds": ["normal"]
+      "kinds": [
+        "normal"
+      ]
     },
     {
       "id": "affiliate",
@@ -142,7 +182,6 @@
       "base": "ads"
     }
   ],
-
   "formulas": {
     "gross_profit": "gmv - cost",
     "total_fees": "sum(fees)",

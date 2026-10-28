@@ -253,6 +253,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
   button.primary:hover{background:var(--accent-hover)}
   button:disabled{opacity:.45;cursor:not-allowed}
   button.mini{padding:5px 11px;font-size:12.5px;border-radius:8px}
+  .tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--line)}
+  .tabs button{border:none;background:none;border-bottom:2px solid transparent;border-radius:0;
+    padding:9px 16px;font-size:13.5px;color:var(--text-2);margin-bottom:-1px}
+  .tabs button:hover{background:none;color:var(--text)}
+  .tabs button.on{border-bottom-color:var(--accent);color:var(--accent);font-weight:500}
+  .tags{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .tags .t{display:inline-flex;align-items:center;gap:5px;padding:3px 4px 3px 10px;
+    background:var(--accent-soft);color:var(--accent);border-radius:20px;font-size:12px}
+  .tags .t b{font-weight:400}
+  .tags .t span{cursor:pointer;padding:0 5px;color:var(--warn);font-weight:500}
+  .tags .add{padding:3px 10px;border:1px dashed var(--line);border-radius:20px;
+    font-size:12px;color:var(--text-3);background:none;cursor:pointer}
+  .tags .add:hover{background:var(--line-soft)}
   .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
   .chips button{border-radius:20px;padding:6px 15px;font-size:12.5px;color:var(--text-2)}
   .chips button.on{background:var(--accent-soft);border-color:#b7ddd0;color:var(--accent);font-weight:500}
@@ -383,7 +396,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.13.0</span></div>
+      <div class="row"><span>版本</span><span>0.14.0</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -446,7 +459,16 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <section class="page" id="view-params" hidden>
       <div class="head"><h1>参数配置</h1>
         <p>每个参数自己选算哪些订单类别。勾上=计入，取消=不计入。改完先试算，满意再保存。</p></div>
-      <div class="card"><h2>参数表<span class="hint">一行一个参数</span></h2>
+      <div class="tabs" id="ptabs">
+        <button data-tab="basic" class="on">参数表</button>
+        <button data-tab="mapping">列映射</button>
+        <button data-tab="formulas">计算公式</button>
+      </div>
+
+      <div id="tab-basic">
+      <div class="card"><h2>参数表
+        <select id="pscope" style="font-size:12.5px;padding:4px 9px;min-width:170px;margin-left:6px"></select>
+        <span class="hint" id="pscope-hint">选中哪个国家就编哪套</span></h2>
         <div class="body tight"><div class="tbl-wrap">
           <table class="cfg-tbl" id="ptbl"><thead><tr>
             <th style="min-width:140px">参数</th><th style="width:110px">基数</th><th style="width:110px">费率</th>
@@ -466,6 +488,55 @@ _TEMPLATE = r"""<!DOCTYPE html>
           费率可以写数字（如 <b>2</b> 表示每单 2 元），也可以写 <b>params.xxx</b> 引用国家费率；留空表示原样取基数。</p>
         <div class="diff" id="diff"><h3>试算结果</h3><div id="diff-body"></div></div>
       </div></div>
+      </div>
+
+      <div id="tab-mapping" hidden>
+        <div class="card"><h2>列映射<span class="hint" id="map-hint"></span></h2>
+          <div class="body tight"><div class="tbl-wrap">
+            <table class="cfg-tbl" id="mtbl"><thead><tr>
+              <th style="width:150px">逻辑字段</th><th style="width:130px">显示名</th>
+              <th>候选列标题（按顺序取第一个能对上的）</th>
+            </tr></thead><tbody id="mbody"></tbody></table>
+          </div></div>
+        </div>
+        <div class="card"><h2>说明</h2><div class="body">
+          <p class="muted" style="font-size:12.5px;margin:0">
+            平台导出的表头会变（改版、多语言、中英文混用）。这里给每个字段配<b>任意多个</b>候选标题，
+            按顺序取第一个能对上的——第一个找不到就试第二个，直到找到为止。<br>
+            匹配时会忽略空格、下划线、大小写和全角半角，所以
+            <span class="mono">Product ID</span> / <span class="mono">product_id</span> /
+            <span class="mono">商品ID</span> 通常都能对上同一个字段。
+          </p>
+          <div class="tools" style="margin-top:16px">
+            <button class="primary" id="btn-map-save">保存列映射</button>
+          </div>
+        </div></div>
+      </div>
+
+      <div id="tab-formulas" hidden>
+        <div class="card"><h2>计算公式<span class="hint">改这里 = 改算法</span></h2>
+          <div class="body tight"><div class="tbl-wrap">
+            <table class="cfg-tbl" id="ftbl"><thead><tr>
+              <th style="width:170px">结果</th><th>公式</th><th style="width:40px"></th>
+            </tr></thead><tbody id="fbody"></tbody></table>
+          </div></div>
+        </div>
+        <div class="card"><h2>说明</h2><div class="body">
+          <p class="muted" style="font-size:12.5px;margin:0 0 10px">
+            可用变量：参数表里每一项的 <span class="mono">id</span>（如
+            <span class="mono">gmv cost dispatch platform_commission</span> …）、
+            <span class="mono">params.字段名</span>（国家费率）、
+            以及已经算出来的结果（如 <span class="mono">gross_profit total_fees</span>）。<br>
+            可用函数：<span class="mono">sum() abs() min() max() round()</span>，
+            支持 <span class="mono">+ - * /</span> 和括号。<br>
+            改完点「保存公式」，下次核算就按新算法算。改错了不会崩，报表里会提示哪条公式有问题。
+          </p>
+          <div class="tools">
+            <button class="primary" id="btn-fml-save">保存公式</button>
+            <button class="mini" id="btn-fml-add">＋ 新增公式</button>
+          </div>
+        </div></div>
+      </div>
     </section>
 
     <section class="page" id="view-rates" hidden>
@@ -473,19 +544,20 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <p>每个国家的佣金、发单费、手续费都在这改。改完点保存，下次核算就用新费率。</p></div>
       <div class="card"><h2>国家费率<span class="hint" id="rate-hint"></span></h2>
         <div class="body tight"><div class="tbl-wrap">
-          <table class="cfg-tbl" id="rtbl"><thead><tr>
-            <th style="min-width:90px">国家</th><th style="width:56px">币种</th>
-            <th style="width:84px">汇率CNY</th><th style="width:84px">汇率USD</th>
-            <th style="width:84px">发单费</th><th style="width:80px">平台佣金</th>
-            <th style="width:80px">手续费</th><th style="width:72px">返现</th>
-            <th style="width:72px">成长</th><th style="width:64px">物流</th><th style="width:40px"></th>
-          </tr></thead><tbody id="rbody"></tbody></table>
+          <table class="cfg-tbl" id="rtbl"><thead id="rhead"></thead><tbody id="rbody"></tbody></table>
         </div></div></div>
       <div class="card"><h2>操作<span class="hint">汇率的自动抓取在「设置」里</span></h2><div class="body">
         <div class="tools"><button class="primary" id="btn-rate-save">保存费率</button>
-          <button class="mini" id="btn-rate-add">＋ 新增国家</button></div>
-        <p class="muted" style="font-size:12.5px;margin:14px 0 0">
-          费率写小数，比如 <b>0.081</b> 表示 8.1%。发单费是按单收的金额（本地货币），不是比例。</p>
+          <button class="mini" id="btn-rate-add">＋ 新增国家</button>
+          <button class="mini" id="btn-fee-add">＋ 新增费率项</button></div>
+        <div class="kv" style="margin-top:18px;border:1px solid var(--line);border-radius:10px;overflow:hidden">
+          <div>汇率方向</div><div><b>1 人民币 = 多少本地货币</b>。马来西亚填 0.61，意思是 1 元人民币换 0.61 马币</div>
+          <div>发单费</div><div>按<b>人民币</b>定价（国内结算），核算时 × 汇率换成本地货币。
+            所以改汇率，发单费会自动跟着变。「发单费(本地)」那列是算出来的，不用填</div>
+          <div>其余费率</div><div>写小数，比如 <b>0.081</b> 表示 8.1%，都是按成交额比例收的</div>
+          <div>增删费率项</div><div>「＋ 新增费率项」给所有国家加一列；列标题右上角的 × 删掉整列。
+            新增的项可以在「参数配置」里用 <span class="mono">params.字段名</span> 引用</div>
+        </div>
       </div></div>
     </section>
 
@@ -546,8 +618,13 @@ const KINDS = [{id:'normal',label:'正常'},{id:'cancelled',label:'已取消'},{
 const BASES = [{id:'gmv',label:'GMV'},{id:'buyer_paid',label:'买家实付'},{id:'order_count',label:'订单数'},
   {id:'items',label:'件数'},{id:'cost',label:'商品成本'},{id:'refund',label:'退款金额'},
   {id:'commission',label:'达人佣金'},{id:'ads',label:'广告花费'}];
-const RATE_FIELDS = ['cny_to_local','usd_to_local','dispatch_fee_local','platform_commission',
-  'tx_fee','cashback','growth_fee','logistics'];
+const RATE_META = ['currency', 'rates_verified', 'dispatch_fee_local', 'dispatch_fee_cny',
+  '_dispatch_note', 'region', 'cny_to_local', 'usd_to_local'];
+const RATE_LABELS = {
+  platform_commission: '平台佣金', tx_fee: '交易手续费', cashback: '奖金返现',
+  super_coupon: '超级优惠券', growth_fee: '商家成长', logistics: '物流'
+};
+let feeFields = [];
 let rows = [], formulas = {}, rateRows = {}, storesCache = [];
 
 function go(view){
@@ -796,14 +873,180 @@ async function renameStore(shopId, btn){
   btn.disabled = false;
 }
 
-async function loadParams(){
-  if(rows.length) return;
+/* ---------- 参数页的三个标签 ---------- */
+document.querySelectorAll('#ptabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#ptabs button').forEach(x => x.classList.toggle('on', x === b));
+  ['basic', 'mapping', 'formulas'].forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if(el) el.hidden = (t !== b.dataset.tab);
+  });
+  if(b.dataset.tab === 'mapping') loadMapping();
+  if(b.dataset.tab === 'formulas') loadFormulas();
+});
+
+let mapFields = [];
+
+async function loadMapping(){
+  if(mapFields.length){ renderMapping(); return; }
+  try{
+    const j = await (await fetch('/api/mapping')).json();
+    mapFields = j.fields || [];
+    renderMapping();
+  }catch(e){ toast('读取列映射失败'); }
+}
+
+function renderMapping(){
+  $('#map-hint').textContent = mapFields.length + ' 个字段';
+  $('#mbody').innerHTML = mapFields.map((f, i) => {
+    const tags = (f.candidates || []).map((c, j) =>
+      `<span class="t"><b>${esc(c)}</b><span data-mdel="${i}:${j}" title="删除这个候选">×</span></span>`
+    ).join('');
+    return `<tr>
+      <td><div class="mono" style="font-size:12px">${esc(f.id)}</div></td>
+      <td><input type="text" data-mi="${i}" value="${esc(f.label || '')}"></td>
+      <td><div class="tags">${tags}<button class="add" data-madd="${i}">＋ 添加标题</button></div></td>
+    </tr>`;
+  }).join('');
+
+  $('#mbody').querySelectorAll('[data-mi]').forEach(inp => {
+    inp.oninput = () => { mapFields[Number(inp.dataset.mi)].label = inp.value; };
+  });
+  $('#mbody').querySelectorAll('[data-mdel]').forEach(el => el.onclick = () => {
+    const parts = el.dataset.mdel.split(':').map(Number);
+    mapFields[parts[0]].candidates.splice(parts[1], 1);
+    renderMapping();
+  });
+  $('#mbody').querySelectorAll('[data-madd]').forEach(b => b.onclick = () => {
+    const i = Number(b.dataset.madd);
+    const v = prompt('要加的列标题（导出表里那一列的表头原文）');
+    if(!v || !v.trim()) return;
+    if(!mapFields[i].candidates) mapFields[i].candidates = [];
+    mapFields[i].candidates.push(v.trim());
+    renderMapping();
+  });
+}
+
+$('#btn-map-save').onclick = async () => {
+  try{
+    const r = await fetch('/api/mapping', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({fields: mapFields})});
+    const j = await r.json();
+    toast(j.ok ? ('列映射已保存（' + j.fields + ' 个字段）') : ('保存失败：' + j.error));
+  }catch(e){ toast('出错：' + e.message); }
+};
+
+let fmls = {};
+
+async function loadFormulas(){
   try{
     const j = await (await fetch('/api/config')).json();
-    rows = (j.params || []).map(p => ({...p, kinds: (p.kinds === undefined || p.kinds === null) ? null : [...p.kinds]}));
+    fmls = j.formulas || {};
+    // 参数也要一起拿到，保存公式时要原样带回去，否则会被清空
+    if(!rows.length && (j.params || []).length){
+      rows = j.params.map(p => ({...p, kinds: (p.kinds === undefined || p.kinds === null) ? null : [...p.kinds]}));
+    }
+    renderFormulas();
+  }catch(e){ toast('读取公式失败'); }
+}
+
+function renderFormulas(){
+  const keys = Object.keys(fmls);
+  $('#fbody').innerHTML = keys.map((k, i) => `<tr>
+    <td><span class="mono" style="font-size:12.5px">${esc(k)}</span></td>
+    <td><input type="text" data-fi="${i}" value="${esc(fmls[k])}"
+         style="font-family:ui-monospace,Consolas,monospace"></td>
+    <td><button class="mini" data-fdel="${i}"
+         style="padding:3px 7px;font-size:12px;color:var(--warn)">删</button></td>
+  </tr>`).join('');
+
+  $('#fbody').querySelectorAll('[data-fi]').forEach(inp => {
+    inp.oninput = () => { fmls[Object.keys(fmls)[Number(inp.dataset.fi)]] = inp.value; };
+  });
+  $('#fbody').querySelectorAll('[data-fdel]').forEach(b => b.onclick = () => {
+    const k = Object.keys(fmls)[Number(b.dataset.fdel)];
+    if(!confirm('删掉公式「' + k + '」？')) return;
+    delete fmls[k];
+    renderFormulas();
+  });
+}
+
+$('#btn-fml-add').onclick = () => {
+  const k = prompt('公式名（英文小写，如 net_rate2）');
+  if(!k) return;
+  if(fmls[k] !== undefined){ toast('这个名字已经有了'); return; }
+  fmls[k] = 'net / gmv';
+  renderFormulas();
+};
+
+$('#btn-fml-save').onclick = async () => {
+  try{
+    if(!rows.length) await loadParams();
+    const r = await fetch('/api/config/save', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({params: paramsByScope[""] || paramPayload(),
+                            by_country: collectByCountry(), formulas: fmls})});
+    const j = await r.json();
+    toast(j.ok ? '公式已保存，下次核算按新算法算' : ('保存失败：' + j.error));
+  }catch(e){ toast('出错：' + e.message); }
+};
+
+let scope = "";                       // "" = 通用，其他国家 = 该国定制
+let paramsByScope = { "": [] };       // 每个范围一套参数表
+
+const normParams = list => (list || []).map(p => ({
+  ...p, kinds: (p.kinds === undefined || p.kinds === null) ? null : [...p.kinds]
+}));
+
+async function loadParams(){
+  if(rows.length){
+    await buildScopeSelect();
+    return;
+  }
+  try{
+    const j = await (await fetch('/api/config')).json();
     formulas = j.formulas || {};
+    paramsByScope[""] = normParams(j.params);
+    Object.entries(j.by_country || {}).forEach(([k, v]) => {
+      paramsByScope[k] = normParams(v.params);
+    });
+    await buildScopeSelect();
+    rows = paramsByScope[""] || [];
     renderParams();
   }catch(e){ toast('读取配置失败'); }
+}
+
+async function buildScopeSelect(){
+  try{
+    const r = await (await fetch('/api/rates')).json();
+    const sel = $('#pscope');
+    sel.innerHTML = '<option value="">通用（没定制的国家都用这套）</option>';
+    Object.keys(r.countries || {}).forEach(c => {
+      const o = document.createElement('option');
+      o.value = c;
+      o.textContent = c + (paramsByScope[c] ? ' · 已定制' : '');
+      sel.append(o);
+    });
+    sel.value = scope;
+    sel.onchange = () => switchScope(sel.value);
+    $('#pscope-hint').textContent = scope
+      ? ('正在编辑「' + scope + '」专用的参数')
+      : '选中哪个国家就编哪套';
+  }catch(e){}
+}
+
+function switchScope(next){
+  // 先把当前这套存回内存，再换
+  if(rows.length) paramsByScope[scope] = paramPayload();
+  scope = next || "";
+  if(!paramsByScope[scope]){
+    // 第一次给某个国家定制：从通用那套复制一份，不用从零加
+    paramsByScope[scope] = JSON.parse(JSON.stringify(paramsByScope[""] || []));
+  }
+  rows = paramsByScope[scope];
+  renderParams();
+  buildScopeSelect();
+  toast(scope ? ('已切到「' + scope + '」，改完点保存') : '已切回通用参数');
 }
 
 function renderParams(){
@@ -868,6 +1111,16 @@ function renderParams(){
   });
 }
 
+function collectByCountry(){
+  // 保存前先把正在编辑的那套存回内存，别丢了刚改的
+  if(rows.length) paramsByScope[scope] = paramPayload();
+  const out = {};
+  Object.entries(paramsByScope).forEach(([k, v]) => {
+    if(k) out[k] = {params: v};
+  });
+  return out;
+}
+
 function paramPayload(){
   return rows.map(r => {
     const o = {id:r.id, label:r.label, base:r.base || 'gmv'};
@@ -894,7 +1147,9 @@ $('#btn-preview').onclick = async () => {
   box.classList.add('show'); body.innerHTML = '<div class="empty">计算中…</div>';
   try{
     const r = await fetch('/api/config/preview', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({params: paramPayload()})});
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({params: paramPayload(), country: scope,
+                            by_country: collectByCountry()})});
     const j = await r.json();
     if(!j.ok){ body.innerHTML = '<div class="empty">' + esc(j.error || '试算失败') + '</div>'; return; }
     const b = j.before, a = j.after, d = j.delta;
@@ -917,10 +1172,15 @@ $('#btn-preview').onclick = async () => {
 
 $('#btn-save').onclick = async () => {
   try{
+    const byCountry = collectByCountry();
     const r = await fetch('/api/config/save', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({params: paramPayload(), formulas})});
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({params: paramsByScope[""] || paramPayload(),
+                            by_country: byCountry, formulas})});
     const j = await r.json();
-    toast(j.ok ? '已保存，下次核算立即生效' : ('保存失败：' + j.error));
+    const n = Object.keys(byCountry).length;
+    toast(j.ok ? ('已保存（通用 + ' + n + ' 个国家定制），下次核算立即生效')
+               : ('保存失败：' + j.error));
   }catch(e){ toast('保存出错：' + e.message); }
 };
 
@@ -928,50 +1188,131 @@ async function loadRates(){
   try{
     const j = await (await fetch('/api/rates')).json();
     rateRows = j.countries || {};
-    const names = Object.keys(rateRows);
-    $('#rate-hint').textContent = names.length + ' 个国家';
-    $('#rbody').innerHTML = names.map((name, i) => {
-      const c = rateRows[name];
-      const cells = RATE_FIELDS.map(k =>
-        `<td><input type="text" data-i="${i}" data-k="${k}"
-           value="${c[k] === undefined || c[k] === null ? '' : c[k]}"></td>`).join('');
-      return `<tr><td><input type="text" data-i="${i}" data-k="__name" value="${esc(name)}"></td>
-        <td class="muted" style="text-align:center">${esc(c.currency || '')}</td>${cells}
-        <td><button class="mini" style="padding:3px 7px;font-size:12px;color:var(--warn)"
-             data-del="${i}">删</button></td></tr>`;
+    // 费率项从数据里自动收集：谁有这一列就渲染这一列，
+    // 这样新增的费率项（比如订单服务费）不用改代码就能出现在表里。
+    const set = new Set();
+    Object.values(rateRows).forEach(c => {
+      Object.keys(c).forEach(k => {
+        if(RATE_META.includes(k) || k.startsWith('_')) return;
+        if(c[k] !== null && typeof c[k] === 'object') return;
+        set.add(k);
+      });
+    });
+    feeFields = [...set];
+    renderRates();
+  }catch(e){ toast('读取费率失败'); }
+}
+
+function renderRates(){
+  const names = Object.keys(rateRows);
+  $('#rate-hint').textContent = names.length + ' 个国家 / ' + feeFields.length + ' 项费率';
+
+  $('#rhead').innerHTML = '<tr>'
+    + '<th style="min-width:86px">国家</th>'
+    + '<th style="width:50px">币种</th>'
+    + '<th style="width:104px">1 人民币<br><span class="muted" style="font-weight:400">= ? 本地</span></th>'
+    + '<th style="width:104px">1 美元<br><span class="muted" style="font-weight:400">= ? 本地</span></th>'
+    + '<th style="width:104px">发单费<br><span class="muted" style="font-weight:400">人民币</span></th>'
+    + '<th style="width:96px">发单费(本地)<br><span class="muted" style="font-weight:400">自动算</span></th>'
+    + feeFields.map(f => `<th style="width:92px">${RATE_LABELS[f] || f}
+        <span class="muted" style="font-weight:400;cursor:pointer;color:var(--warn);margin-left:3px"
+              data-delfee="${f}" title="删掉这一列">×</span>
+        <div class="pid">${f}</div></th>`).join('')
+    + '<th style="width:38px"></th></tr>';
+
+  $('#rbody').innerHTML = names.map((name, i) => {
+    const c = rateRows[name] || {};
+    const cny = Number(c.cny_to_local) || 0;
+    const dcny = Number(c.dispatch_fee_cny) || 0;
+    const local = (cny && dcny) ? (dcny * cny) : (Number(c.dispatch_fee_local) || 0);
+    const feeCells = feeFields.map(f => {
+      const v = c[f];
+      return `<td><input type="text" data-i="${i}" data-k="${f}"
+        value="${v === undefined || v === null ? '' : v}"></td>`;
     }).join('');
-    document.querySelectorAll('#rbody input').forEach(inp => {
-      inp.oninput = () => {
-        const i = Number(inp.dataset.i), k = inp.dataset.k;
-        const key = Object.keys(rateRows)[i];
-        if(!key) return;
-        const raw = inp.value.trim();
-        if(k === '__name'){ rateRows[key].__newName = raw; return; }
-        const n = Number(raw);
-        rateRows[key][k] = raw === '' ? 0 : (Number.isFinite(n) ? n : raw);
-      };
-    });
-    document.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
-      const key = Object.keys(rateRows)[Number(b.dataset.del)];
+    return `<tr>
+      <td><input type="text" data-i="${i}" data-k="__name" value="${esc(name)}"></td>
+      <td class="muted" style="text-align:center;font-size:12px">${esc(c.currency || '')}</td>
+      <td><input type="text" data-i="${i}" data-k="cny_to_local" value="${c.cny_to_local ?? ''}"></td>
+      <td><input type="text" data-i="${i}" data-k="usd_to_local" value="${c.usd_to_local ?? ''}"></td>
+      <td><input type="text" data-i="${i}" data-k="dispatch_fee_cny" value="${c.dispatch_fee_cny ?? ''}"></td>
+      <td class="muted" style="text-align:center;font-size:12px" data-local="${i}">${local ? local.toFixed(2) : '—'}</td>
+      ${feeCells}
+      <td><button class="mini" style="padding:3px 7px;font-size:12px;color:var(--warn)"
+           data-delcountry="${i}">删</button></td></tr>`;
+  }).join('');
+
+  $('#rbody').querySelectorAll('input').forEach(inp => {
+    inp.oninput = () => {
+      const i = Number(inp.dataset.i), k = inp.dataset.k;
+      const key = Object.keys(rateRows)[i];
       if(!key) return;
-      if(!confirm('删掉「' + key + '」这个国家的费率？')) return;
-      delete rateRows[key]; loadRates();
-    });
-  }catch(e){}
+      const raw = inp.value.trim();
+      if(k === '__name'){ rateRows[key].__newName = raw; return; }
+      const n = Number(raw);
+      rateRows[key][k] = raw === '' ? 0 : (Number.isFinite(n) ? n : raw);
+      // 汇率或人民币发单费一改，本地值跟着重算给人看
+      if(k === 'cny_to_local' || k === 'dispatch_fee_cny'){
+        const c = rateRows[key];
+        const v = (Number(c.cny_to_local) || 0) * (Number(c.dispatch_fee_cny) || 0);
+        const cell = $('#rbody').querySelector(`[data-local="${i}"]`);
+        if(cell) cell.textContent = v ? v.toFixed(2) : '—';
+      }
+    };
+  });
+
+  $('#rbody').querySelectorAll('[data-delcountry]').forEach(b => b.onclick = () => {
+    const key = Object.keys(rateRows)[Number(b.dataset.delcountry)];
+    if(!key) return;
+    if(!confirm('删掉「' + key + '」这个国家的费率？')) return;
+    delete rateRows[key];
+    renderRates();
+  });
+
+  $('#rhead').querySelectorAll('[data-delfee]').forEach(b => b.onclick = () => {
+    const f = b.dataset.delfee;
+    if(!confirm('从所有国家删掉「' + (RATE_LABELS[f] || f) + '」这一项？')) return;
+    Object.values(rateRows).forEach(c => { delete c[f]; });
+    feeFields = feeFields.filter(x => x !== f);
+    renderRates();
+  });
 }
 
 $('#btn-rate-add').onclick = () => {
   const name = prompt('国家名（如：日本）');
-  if(!name) return;
-  rateRows[name] = {currency:'', cny_to_local:0, usd_to_local:0, dispatch_fee_local:0,
-    platform_commission:0, tx_fee:0, cashback:0, growth_fee:0, logistics:0, rates_verified:false};
-  loadRates();
+  if(!name || rateRows[name]) { if(name) toast('这个国家已经有了'); return; }
+  const row = {currency:'', cny_to_local:0, usd_to_local:0,
+               dispatch_fee_cny:0, dispatch_fee_local:0, rates_verified:false};
+  feeFields.forEach(f => { if(f !== 'dispatch_fee_cny') row[f] = 0; });
+  rateRows[name] = row;
+  renderRates();
+};
+
+$('#btn-fee-add').onclick = () => {
+  const field = prompt('费率项字段名（英文小写，参数配置里用 params.字段名 引用）\n例如 order_service');
+  if(!field) return;
+  const f = field.trim().replace(/\s+/g, '_');
+  if(feeFields.includes(f) || RATE_META.includes(f)){ toast('已经有这一项了'); return; }
+  const label = prompt('显示名称', f);
+  RATE_LABELS[f] = (label || f).trim() || f;
+  Object.values(rateRows).forEach(c => { c[f] = 0; });
+  feeFields.push(f);
+  renderRates();
+  toast('已加「' + RATE_LABELS[f] + '」，填好数值后点保存');
 };
 
 $('#btn-rate-save').onclick = async () => {
   const out = {};
   Object.entries(rateRows).forEach(([k, v]) => {
-    const nk = v.__newName || k; const copy = {...v}; delete copy.__newName; out[nk] = copy;
+    const nk = v.__newName || k;
+    const copy = {...v};
+    delete copy.__newName;
+    // 本地发单费不入库靠算，但顺手同步一份进文件，
+    // 这样用记事本打开 rates.json 也能看懂实际收多少
+    const cny = Number(copy.cny_to_local) || 0;
+    const dcny = Number(copy.dispatch_fee_cny) || 0;
+    if(cny && dcny) copy.dispatch_fee_local = Math.round(dcny * cny * 10000) / 10000;
+    out[nk] = copy;
   });
   try{
     const r = await fetch('/api/rates', {method:'POST',
