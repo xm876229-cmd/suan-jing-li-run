@@ -690,6 +690,11 @@ def parse_ads(rows: list[tuple], usd_to_local: float = 1.0) -> tuple[dict[str, f
         pid = to_str(r[cm["product_id"]]) if cm["product_id"] < len(r) else ""
         if not pid:
             continue
+        # 广告表里会出现 N/A、NULL、- 这种伪商品ID（账户层级的未归属花费）。
+        # 把它们当链接会凭空多出叫「N/A」的产品行，统一归到「无ID」，
+        # 钱不丢，也不会伪造一条链接。
+        if not re.fullmatch(r"\d{6,}", pid):
+            pid = "无ID"
         cost = to_num(r[cm["ad_cost"]]) if cm["ad_cost"] < len(r) else 0.0
         cur = to_str(r[cm["ad_currency"]]).upper() if cm.get("ad_currency") is not None and cm["ad_currency"] < len(r) else ""
         currencies[cur or "未标注"] += 1
