@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 if not getattr(sys, "frozen", False):
     _root = Path(__file__).resolve().parents[1]
@@ -64,6 +64,19 @@ def _cors(handler: BaseHTTPRequestHandler) -> None:
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
     handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+
+_START_AT = datetime.now()
+
+
+def bridge_uptime() -> str:
+    """桥已经跑了多久，首页显示用。"""
+    sec = int((datetime.now() - _START_AT).total_seconds())
+    if sec < 60:
+        return f"{sec} 秒"
+    if sec < 3600:
+        return f"{sec // 60} 分钟"
+    return f"{sec // 3600} 小时 {(sec % 3600) // 60} 分"
 
 
 def _json(handler: BaseHTTPRequestHandler, obj, code: int = 200) -> None:
@@ -208,13 +221,48 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": True, "job": job})
         elif self.path.startswith("/stores"):
             _json(self, store_list())
-        elif self.path.startswith("/config"):
-            # 参数配置页：在浏览器里勾选每个参数算哪些订单类别
+        elif self.path == "/" or self.path.startswith("/index"):
             try:
-                from bridge import config_page
-                _html(self, config_page.render_html())
+                from bridge import ui
+                _html(self, ui.render_html())
             except Exception as e:  # noqa: BLE001
-                _html(self, f"<h3>配置页加载失败</h3><pre>{e}</pre>", 500)
+                _html(self, f"<h3>控制台加载失败</h3><pre>{e}</pre>", 500)
+        elif self.path.startswith("/api/status"):
+            from bridge import ui
+            _json(self, ui.status())
+        elif self.path.startswith("/api/data-files"):
+            from bridge import ui
+            _json(self, ui.data_files())
+        elif self.path.startswith("/api/reports"):
+            from bridge import ui
+            _json(self, ui.reports())
+        elif self.path.startswith("/report?"):
+            from bridge import ui
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            name = (q.get("name") or [""])[0]
+            f = ui.find_report(name)
+            if not f:
+                _json(self, {"ok": False, "error": "找不到这个报表"}, 404)
+            else:
+                data = f.read_bytes()
+                self.send_response(200)
+                self.send_header(
+                    "Content-Type",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header(
+                    "Content-Disposition",
+                    f"attachment; filename*=UTF-8''{quote(f.name)}")
+                self.end_headers()
+                self.wfile.write(data)
+        elif self.path == "/config" or self.path.startswith("/config?"):
+            # 旧地址：跳到新界面的「参数配置」页。
+            # 界面合并成一个应用后不再维护第二套页面，这里只做跳转，
+            # 免得有人收藏了旧链接打不开。
+            self.send_response(302)
+            self.send_header("Location", "/#/params")
+            self.end_headers()
         elif self.path.startswith("/api/config"):
             from bridge import config_page
             _json(self, config_page.read_config())
@@ -496,6 +544,8 @@ class Handler(BaseHTTPRequestHandler):
                     f"[run] 完成：GMV {summary.get('gmv')} 净利 {summary.get('net_local')} "
                     f"（人民币 {summary.get('net_cny')}）"
                 )
+                summary["report_path"] = str(out)
+                summary["report_name"] = out.name
                 _json(self, {"ok": True, **summary})
             else:
                 tail = "\n".join((stdout + "\n" + stderr).strip().splitlines()[-12:])

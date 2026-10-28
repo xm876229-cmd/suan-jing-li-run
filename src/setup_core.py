@@ -204,14 +204,26 @@ def unregister_autostart() -> tuple[bool, str]:
 
 
 def task_exists() -> bool:
-    r = _run(["schtasks", "/Query", "/TN", TASK_NAME])
-    return r.returncode == 0
+    """自启任务是否已注册。
+
+    宁可返回 False 也不能抛异常——菜单一进来就查这个，
+    查不到顶多显示「未注册」，抛出去会让整个程序打不开。
+    （有些安全策略会直接拦掉 schtasks 进程，连 OSError 都不给你。）
+    """
+    try:
+        r = _run(["schtasks", "/Query", "/TN", TASK_NAME])
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def can_manage_tasks() -> bool:
     """能不能调用 schtasks。被安全策略禁用时给用户明确提示，而不是静默失败。"""
-    r = _run(["schtasks", "/Query", "/TN", "___nonexistent___"])
-    return r.returncode != -1
+    try:
+        r = _run(["schtasks", "/Query", "/TN", "___nonexistent___"])
+        return r.returncode != -1
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ---------------- 卸载信息（控制面板里能看到） ----------------
@@ -221,7 +233,7 @@ def write_uninstall_entry(dest: Path) -> None:
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
             winreg.SetValueEx(k, "DisplayName", 0, winreg.REG_SZ, APP_NAME)
-            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.11.0")
+            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.12.0")
             winreg.SetValueEx(k, "Publisher", 0, winreg.REG_SZ, "净利助手")
             winreg.SetValueEx(k, "InstallLocation", 0, winreg.REG_SZ, str(dest))
             winreg.SetValueEx(k, "DisplayIcon", 0, winreg.REG_SZ, str(exe))
@@ -283,11 +295,11 @@ def install(dest: Path | None = None, source: Path | None = None,
         ok, msg = register_autostart(dest, log=note)
         note(("开机自启：" if ok else "开机自启失败：") + msg)
 
-    ok = create_shortcut(desktop_dir() / f"{APP_NAME}.lnk", exe, "menu", dest)
+    ok = create_shortcut(desktop_dir() / f"{APP_NAME}.lnk", exe, "app", dest)
     note("桌面快捷方式：" + ("已创建" if ok else "创建失败"))
     sm = start_menu_dir()
     if sm.exists():
-        create_shortcut(sm / f"{APP_NAME}.lnk", exe, "menu", dest)
+        create_shortcut(sm / f"{APP_NAME}.lnk", exe, "app", dest)
 
     write_uninstall_entry(dest)
     note("已写入卸载信息（设置 → 应用 里可卸载）")

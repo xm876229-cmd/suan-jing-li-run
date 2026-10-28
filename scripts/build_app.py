@@ -107,11 +107,20 @@ def build_app() -> Path:
     pyinstaller([
         "--onedir",
         "--name", "jingli",                      # 英文名，构建更稳；发布时再改名
+        # 程序图标：任务栏、快捷方式、文件管理器里都用它
+        "--icon", str(ROOT / "assets" / "jingli.ico"),
         "--hidden-import", "openpyxl.cell._writer",
         # cli 里为了不拖慢启动，汇率模块是函数内延迟导入的；
         # PyInstaller 一般能扫到，这里显式声明，防止它在别人的电脑上变成
         # 「只有这台机器能跑」的玄学问题
         "--hidden-import", "src.fx",
+        # 桌面窗口：pywebview 的后端是运行时才导入的，
+        # PyInstaller 静态扫不到，不显式声明就会打包出一个「点了没反应」的 exe
+        "--hidden-import", "src.desktop",
+        "--hidden-import", "webview",
+        "--hidden-import", "webview.platforms.edgechromium",
+        "--hidden-import", "webview.platforms.winforms",
+        "--collect-submodules", "webview",
         "--distpath", str(stage),
         "--workpath", str(BUILD / "pyi-app"),
         "--specpath", str(BUILD / "pyi-app"),
@@ -121,6 +130,14 @@ def build_app() -> Path:
     built = stage / "jingli"
     if not built.exists():
         raise SystemExit("构建失败：没找到输出目录")
+
+    # 图标也放进发布目录，快捷方式指向它
+    assets_src = ROOT / "assets"
+    if assets_src.is_dir():
+        for f in assets_src.iterdir():
+            if f.is_file():
+                (out / "assets").mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, out / "assets" / f.name)
 
     out.mkdir(parents=True, exist_ok=True)
     for f in built.rglob("*"):

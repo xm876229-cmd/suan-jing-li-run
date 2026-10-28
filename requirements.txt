@@ -1,0 +1,6 @@
+# 运行程序需要
+openpyxl>=3.1        # 读写 Excel 报表
+pywebview>=5.0       # 桌面窗口（Windows 用系统自带的 WebView2，不用另装浏览器内核）
+
+# 只有打包时才需要
+# pyinstaller>=6.0

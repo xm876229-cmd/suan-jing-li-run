@@ -2,7 +2,8 @@
 
 子命令：
     jingli.exe                  双击默认进菜单
-    jingli.exe menu             菜单（桌面快捷方式用这个）
+    jingli.exe                  打开窗口（双击就用这个）
+    jingli.exe menu             命令行菜单
     jingli.exe serve            启动本地桥（开机自启调这个，无窗口）
     jingli.exe run [参数]       核算（参数与 src.cli 完全一致，本地桥也用这个）
     jingli.exe install          安装 / 升级
@@ -504,10 +505,18 @@ def menu() -> int:
 def main(argv: list[str] | None = None) -> int:
     _relax_stdout()
     argv = list(sys.argv[1:] if argv is None else argv)
+
+    # 不带参数 = 打开窗口。
+    # 双击程序应该看到界面，而不是一个要输数字的黑框。
+    # 命令行菜单还在，用 `jingli.exe menu` 打开。
     if not argv:
-        return menu()
+        from src import desktop
+        return desktop.main()
 
     cmd, rest = argv[0].lower(), argv[1:]
+    if cmd in ("app", "gui", "window", "--app"):
+        from src import desktop
+        return desktop.main()
     if cmd in ("menu", "--menu"):
         return menu()
     if cmd == "serve":
