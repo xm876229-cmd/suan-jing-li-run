@@ -132,6 +132,43 @@ def rebuild_endpoints() -> dict:
     return data
 
 
+def store_list() -> dict:
+    """给扩展用的店铺清单：每家店的国家已经写在配置里，界面上选店即可。
+
+    为什么不让扩展自己读文件：扩展在浏览器沙箱里，读不到本地磁盘。
+    走 HTTP 这条路，配置改了刷新面板就生效，不用重装扩展。
+    """
+    stores: list[dict] = []
+    try:
+        cfg = json.loads(paths.STORES_FILE.read_text(encoding="utf-8"))
+        for s in cfg.get("stores", []):
+            if not s.get("enabled", True):
+                continue
+            stores.append({
+                "id": s.get("id", ""),
+                "name": s.get("name", "") or s.get("id", ""),
+                "country": s.get("country", ""),
+                "browserId": str(s.get("zhanfu_browser_id", "") or ""),
+            })
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"读取 stores.json 失败：{e}", "stores": [], "countries": []}
+
+    countries: list[str] = []
+    try:
+        rates = json.loads(paths.RATES_FILE.read_text(encoding="utf-8"))
+        countries = list(rates.get("countries", {}).keys())
+    except Exception:
+        pass
+
+    default = ""
+    try:
+        default = cfg.get("defaults", {}).get("country", "")
+    except Exception:
+        pass
+
+    return {"ok": True, "stores": stores, "countries": countries, "default": default}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "JingLiBridge/0.1"
 
@@ -157,6 +194,8 @@ class Handler(BaseHTTPRequestHandler):
                 job = dict(_PENDING) if _PENDING else None
                 _PENDING.clear()
             _json(self, {"ok": True, "job": job})
+        elif self.path.startswith("/stores"):
+            _json(self, store_list())
         else:
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
@@ -258,9 +297,19 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            country = str(payload.get("country") or "马来西亚")
+            country = str(payload.get("country") or "")
+            store = str(payload.get("store") or "").strip()
             dfrom = payload.get("from") or None
             dto = payload.get("to") or None
+
+            # 给了店铺就以店铺配置为准：国家、费率、报表命名全跟着它走，
+            # 避免面板上填的国家和配置里的对不上。
+            if store:
+                for s in store_list().get("stores", []):
+                    if s.get("id") == store:
+                        country = s.get("country") or country
+                        break
+            country = country or "马来西亚"
 
             stamp = f"{dfrom or 'all'}_{dto or 'all'}".replace("-", "")
             out = paths.OUTPUT / f"净利报表_{country}_{stamp}.xlsx"
@@ -273,7 +322,9 @@ class Handler(BaseHTTPRequestHandler):
                 base = [sys.executable, "-m", "src.cli"]
             cmd = base + [
                 "--dir", str(INBOX_DIR),
-                "--country", country,
+                # 有店铺就只传店铺：国家由 config/stores.json 决定，
+                # 两处都传容易打架（--country 会覆盖 --store）
+                *(["--store", store] if store else ["--country", country]),
                 "--out", str(out),
                 "--json",
             ]

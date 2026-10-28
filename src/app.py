@@ -123,10 +123,11 @@ def cmd_run(argv: list[str]) -> int:
 
 def cmd_install(argv: list[str]) -> int:
     from src import setup_core
-    dest = setup_core.install_dir()
+    # dest 交给 setup_core 决定：打包运行时就是 exe 所在目录，
+    # 这样安装到任意自定义路径都能正确注册自启与快捷方式。
     # 源码模式下没有 jingli.exe，install 只登记自启与快捷方式，不拷文件
     source = None if paths.is_frozen() else paths.ROOT
-    ok, _ = setup_core.install(dest=dest, source=source)
+    ok, _ = setup_core.install(source=source)
     return 0 if ok else 1
 
 
@@ -144,7 +145,7 @@ def cmd_autostart(argv: list[str]) -> int:
         ok, msg = setup_core.unregister_autostart()
         print(("已关闭开机自启" if ok else "关闭失败") + (f"：{msg}" if msg else ""))
         return 0 if ok else 1
-    ok, msg = setup_core.register_autostart(setup_core.install_dir())
+    ok, msg = setup_core.register_autostart(setup_core.target_dir())
     print(("已开启开机自启" if ok else "开启失败") + f"：{msg}")
     return 0 if ok else 1
 
@@ -186,13 +187,83 @@ def cmd_doctor() -> int:
 
 # ---------------- 菜单 ----------------
 
+def _load_stores() -> list[dict]:
+    import json
+    try:
+        d = json.loads(paths.STORES_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return [s for s in d.get("stores", []) if s.get("enabled", True)]
+
+
+def _load_countries() -> list[str]:
+    import json
+    try:
+        d = json.loads(paths.RATES_FILE.read_text(encoding="utf-8"))
+        return list(d.get("countries", {}).keys())
+    except Exception:
+        return []
+
+
+def _pick_store() -> tuple[str | None, str | None]:
+    """选店铺或选国家。返回 (store_id, country)。
+
+    店铺清单里已经写了每家店对应哪个国家，所以正常情况下只需选店铺，
+    国家自动带出。只有一个店铺时直接用它，不问。
+    返回 store_id 就表示「国家由店铺决定」，不再单独传 --country。
+    """
+    stores = _load_stores()
+
+    if len(stores) == 1:
+        s = stores[0]
+        print(f"\n店铺：{s.get('name', '')}　国家：{s.get('country', '')}")
+        return s.get("id"), s.get("country")
+
+    if stores:
+        print("\n选择店铺（国家随之确定）：")
+        for i, s in enumerate(stores, 1):
+            print(f"  {i}. {s.get('name', '')}　[{s.get('country', '')}]　id={s.get('id')}")
+        print(f"  {len(stores) + 1}. 不用店铺，手动填国家")
+        pick = _ask("请选择", "1")
+        try:
+            idx = int(pick)
+        except ValueError:
+            idx = 1
+        if 1 <= idx <= len(stores):
+            s = stores[idx - 1]
+            print(f"→ {s.get('name', '')}（{s.get('country', '')}）")
+            return s.get("id"), s.get("country")
+
+    # 手动选国家：把已配置的列出来，省得拼错
+    countries = _load_countries()
+    if countries:
+        print("\n已配置国家（费率见 config/rates.json）：")
+        for i, c in enumerate(countries, 1):
+            print(f"  {i}. {c}")
+        pick = _ask("选国家编号，或直接输入国家名", "1")
+        try:
+            idx = int(pick)
+            if 1 <= idx <= len(countries):
+                return None, countries[idx - 1]
+        except ValueError:
+            pass
+        return None, pick
+
+    return None, _ask("国家", "马来西亚")
+
+
 def _menu_calc() -> None:
     print("\n区间留空表示全部数据。日期格式 2026-10-01")
+    store_id, _country = _pick_store()
     dfrom = _ask("开始日期", "")
     dto = _ask("结束日期", "")
-    country = _ask("核算国家", "马来西亚")
 
-    argv = ["--dir", str(paths.INBOX), "--country", country]
+    argv = ["--dir", str(paths.INBOX)]
+    if store_id:
+        # 有店铺就传店铺，国家由 config/stores.json 决定，避免手填两处不一致
+        argv += ["--store", store_id]
+    else:
+        argv += ["--country", _country or "马来西亚"]
     if dfrom:
         argv += ["--from", dfrom]
     if dto:
@@ -298,7 +369,7 @@ def menu() -> int:
                 ok, msg = setup_core.unregister_autostart()
                 print(("已关闭开机自启" if ok else "关闭失败") + (f"：{msg}" if msg else ""))
             else:
-                ok, msg = setup_core.register_autostart(setup_core.install_dir())
+                ok, msg = setup_core.register_autostart(setup_core.target_dir())
                 print(("已开启开机自启" if ok else "开启失败") + f"：{msg}")
             _pause()
         elif choice == "8":

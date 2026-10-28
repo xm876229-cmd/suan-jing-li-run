@@ -210,11 +210,13 @@ function runTasks(task, btn) {
   // 后台收到就立刻回执，任务在它自己的上下文里跑完为止。
   // 以前是等任务结束才回，任务一跑几分钟，面板一关消息通道就断了，
   // 用户看到的是「没有响应」——那不是任务失败，是回执方式错了。
-  saveCountry();
+  saveStore();
 
   // 双通道：先把任务写进扩展存储（后台每分钟会来领），再发消息抢先执行。
   // 消息这条偶尔会断——断的时候存储那条兜住，任务照样跑。
   const force = task === "sku";
+  const store = currentStore();
+  const countryNow = ($("country").value || "").trim();
 
   // 第三条通道：直接投到本地桥。它走普通 HTTP，不依赖扩展的消息机制，
   // 后台每 1 分钟来取一次。
@@ -222,13 +224,13 @@ function runTasks(task, btn) {
     fetch("http://127.0.0.1:8765/pending", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ task, range, force, withCalc: true, at: Date.now() }),
+      body: JSON.stringify({ task, range, force, store, country: countryNow, withCalc: true, at: Date.now() }),
     }).catch(() => {});
   } catch (e) { /* 桥没开就算了 */ }
 
   try {
     chrome.storage.local.set(
-      { pendingTask: { task, range, force, at: Date.now() } },
+      { pendingTask: { task, range, force, store, country: countryNow, at: Date.now() } },
       () => {
         safeSend({ type: "ping" }, (pr) => {
           if (!pr || !pr.ok) {
@@ -237,7 +239,7 @@ function runTasks(task, btn) {
             return;
           }
           log(`后台在线 v${pr.version}，提交任务…`);
-          safeSend({ type: "runTask", task, range, force }, (resp) => {
+          safeSend({ type: "runTask", task, range, force, store, country: countryNow }, (resp) => {
             if (btn) btn.disabled = false;
             let lasterr = null;
             try { lasterr = chrome.runtime.lastError; } catch (e) { /* 上下文已失效 */ }
@@ -263,26 +265,90 @@ function runTasks(task, btn) {
   }, 8000);
 }
 
-function saveCountry() {
+// ---------------- 店铺 / 国家 ----------------
+// 不同店铺在不同国家，所以界面上选「店铺」，国家自动跟着走。
+// 店铺清单来自本地桥（扩展读不到磁盘文件），桥没开时退化成手填国家。
+
+function currentStore() {
+  return $("store") ? $("store").value : "";
+}
+
+function saveStore() {
+  const store = currentStore();
   const country = ($("country").value || "").trim() || "马来西亚";
   chrome.storage.local.get({ settings: {} }, (s) => {
-    chrome.storage.local.set({ settings: { ...(s.settings || {}), country } });
+    chrome.storage.local.set({ settings: { ...(s.settings || {}), store, country } });
   });
 }
 
-chrome.storage.local.get({ settings: {} }, (s) => {
-  $("country").value = (s.settings && s.settings.country) || "马来西亚";
+/** 选了店铺就把国家填成该店所属国家（仍可手改，手改后以手填为准）。 */
+function syncCountryFromStore() {
+  const sel = $("store");
+  if (!sel || !$("country")) return;
+  const opt = sel.selectedOptions && sel.selectedOptions[0];
+  const c = opt && opt.dataset ? opt.dataset.country : "";
+  if (c) $("country").value = c;
+}
+
+/** 从本地桥拉店铺清单。桥没开时只剩「按国家算」，不至于让面板报错。 */
+async function loadStores() {
+  const sel = $("store");
+  if (!sel) return;
+
+  let data = null;
+  try {
+    const resp = await fetch("http://127.0.0.1:8765/stores");
+    data = await resp.json();
+  } catch (e) {
+    data = null;
+  }
+
+  const hasStores = !!(data && data.ok && data.stores && data.stores.length);
+  sel.innerHTML = "";
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = hasStores ? "（不指定店铺，按国家算）" : "（桥未连接，按国家算）";
+  sel.appendChild(blank);
+
+  if (hasStores) {
+    for (const s of data.stores) {
+      const o = document.createElement("option");
+      o.value = s.id;
+      o.textContent = `${s.name}（${s.country}）`;
+      o.dataset.country = s.country || "";
+      sel.appendChild(o);
+    }
+  }
+
+  chrome.storage.local.get({ settings: {} }, (st) => {
+    const set = st.settings || {};
+    if (set.store && [...sel.options].some((o) => o.value === set.store)) {
+      sel.value = set.store;
+      syncCountryFromStore();
+    } else if (set.country) {
+      $("country").value = set.country;
+    } else if (data && data.default) {
+      $("country").value = data.default;
+    }
+  });
+}
+
+$("store") && $("store").addEventListener("change", () => {
+  syncCountryFromStore();
+  saveStore();
 });
-$("country") && $("country").addEventListener("change", saveCountry);
+$("country") && $("country").addEventListener("change", saveStore);
+loadStores();
 
 $("calcOnly") && $("calcOnly").addEventListener("click", (e) => {
   const range = buildRange();
   if (!range) { log("请先选日期"); return; }
-  saveCountry();
+  saveStore();
   const country = ($("country").value || "").trim() || "马来西亚";
+  const store = currentStore();
   e.target.disabled = true;
   log(`=== 只算净利：${country} ${range.startDate} ~ ${$("dto").value} ===`);
-  safeSend({ type: "calcNow", range, country }, (resp) => {
+  safeSend({ type: "calcNow", range, country, store }, (resp) => {
     e.target.disabled = false;
     if (chrome.runtime.lastError) { log(`后台未响应：${chrome.runtime.lastError.message}`); return; }
     if (resp && resp.started) log("已开始核算，用现有导出文件算，不重新取数");

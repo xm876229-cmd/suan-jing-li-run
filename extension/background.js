@@ -1346,6 +1346,8 @@ function stopKeepAlive() {
 async function calcNow(range, log, opts = {}) {
   const { settings = {} } = await chrome.storage.local.get({ settings: {} });
   const country = opts.country || settings.country || "马来西亚";
+  // 店铺决定国家：传了店铺，桥那边会以 config/stores.json 为准解析国家与费率
+  const store = opts.store || settings.store || "";
   const from = range.startDate;
   const to = range.to || (range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : "");
 
@@ -1355,7 +1357,7 @@ async function calcNow(range, log, opts = {}) {
     resp = await fetch(`${BRIDGE}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ country, from, to }),
+      body: JSON.stringify({ country, from, to, store }),
     });
   } catch (e) {
     throw new Error(`连不上本地桥（${e.message}），请确认 scripts\\start_bridge.bat 在跑`);
@@ -1427,7 +1429,9 @@ async function consumePending() {
   await skSet({ pendingTask: null });
   const log = (m) => appendTaskLog(`[${p.task}] ${m}`);
   log("从待办队列领取任务");
-  return executeTask(p.task, p.range || {}, log, { force: !!p.force, withCalc: p.withCalc });
+  return executeTask(p.task, p.range || {}, log, {
+    force: !!p.force, withCalc: p.withCalc, store: p.store, country: p.country,
+  });
 }
 
 // ---------------- 任务调度 ----------------
@@ -1590,6 +1594,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await skSet({ pendingTask: null });          // 消息到了，待办作废
         const r = await executeTask(task, msg.range || {}, log, {
           force: !!msg.force, withCalc: msg.withCalc,
+          store: msg.store, country: msg.country,
         });
         finish({ ok: r.ok, started: true, done: true, result: r.result, error: r.error });
       } catch (e) {
@@ -1609,7 +1614,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       startKeepAlive();
       await chrome.storage.local.set({ running: { task: "calc", at: Date.now() } });
       try {
-        const j = await calcNow(msg.range || {}, log, { country: msg.country });
+        const j = await calcNow(msg.range || {}, log, { country: msg.country, store: msg.store });
         await chrome.storage.local.set({ lastResult: { task: "calc", ok: true, at: Date.now() } });
         finish({ ok: true, started: true, done: true, result: j });
       } catch (e) {
