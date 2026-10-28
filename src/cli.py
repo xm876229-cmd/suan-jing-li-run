@@ -198,6 +198,9 @@ def build_argparser() -> argparse.ArgumentParser:
 
     ap.add_argument("--country", default=None, help="核算国家：马来西亚 / 菲律宾 / 泰国")
     ap.add_argument("--store", default=None, help="店铺 id（读取 config/stores.json）")
+    ap.add_argument("--fx", choices=["auto", "manual"], default=None,
+                    help="汇率来源：auto 联网取实时（抓不到就用配置值兜底）；"
+                         "manual 只用 config/rates.json 里的值。不填则按 fx.mode 走")
     ap.add_argument("--from", dest="dfrom", type=parse_date, help="起始日期，含")
     ap.add_argument("--to", dest="dto", type=parse_date, help="结束日期，含")
     ap.add_argument("--date-field", choices=["created", "paid"], default="created",
@@ -238,6 +241,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"新增方法：在 {args.rates} 的 countries 下加一段即可，键名与 --country 保持一致。")
         return 2
     params = rates[country]
+
+    # 汇率必须在读数据之前定下来：广告花费是美金额，换算要用这一次的汇率，
+    # 否则同一份数据两次跑会算出两个结果。
+    try:
+        from src import fx
+        fx_cfg = fx.load_fx_cfg(args.rates)
+        note = fx.apply_to_params(params, country, fx_cfg, mode_override=args.fx,
+                                  log=None if args.json else print)
+        if not args.json:
+            print(f"汇率：{note}")
+    except Exception as e:  # noqa: BLE001
+        # 汇率不是致命项：抓不到就用配置里的固定值，账照算，报表里会写明来源
+        params.fx_note = f"汇率获取失败，使用配置里的固定值（{e}）"
+        if not args.json:
+            print(f"⚠ {params.fx_note}")
 
     costs_path, costs_note = pick_costs(args.costs)
     if costs_path:

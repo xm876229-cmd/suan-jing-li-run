@@ -324,6 +324,8 @@ def _meta(ws: Worksheet, res: CalcResult, params: Params, switches: Switches,
     p = params
     rows = [
         ("核算国家", p.country, "汇率与费率均取该国参数"),
+        ("汇率来源", p.fx_note or "配置里的固定值",
+         "auto=联网抓实时（抓不到退回配置值），manual=手动固定，见 config/rates.json 的 fx 段"),
         ("汇率：人民币→本地", p.cny_to_local, f"1 人民币 = {p.cny_to_local} 本地货币"),
         ("汇率：美金→本地", p.usd_to_local, f"1 美金 = {p.usd_to_local} 本地货币"),
         ("发单费(本地)", p.dispatch_fee_local, "按订单数计，不按金额"),

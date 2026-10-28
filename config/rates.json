@@ -1,5 +1,5 @@
 {
-  "_comment": "国家费率参数。想加国家就在 countries 里加一段，键名随便取（要和 --country 一致），加了就能跑，不用改代码。",
+  "_comment": "国家费率参数。currency 用于自动汇率；cny_to_local / usd_to_local 在 fx.mode=auto 时会被实时汇率覆盖，抓不到网络才用这里的值兜底。rates_verified=false 表示费率是占位值，需在店铺后台核对后再用。",
   "_howto_add_country": [
     "1. 在 countries 下复制一段，把键名改成国家名（如 \"美国\"、\"德国\"）",
     "2. cny_to_local = 1 人民币兑多少该国货币；usd_to_local = 1 美金兑多少该国货币",
@@ -26,7 +26,10 @@
       "cashback": 0.0486,
       "super_coupon": 0.0108,
       "growth_fee": 0.0,
-      "logistics": 0.0
+      "logistics": 0.0,
+      "region": "东南亚",
+      "currency": "MYR",
+      "rates_verified": true
     },
     "菲律宾": {
       "cny_to_local": 9.3,
@@ -38,7 +41,10 @@
       "cashback": 0.0,
       "super_coupon": 0.0,
       "growth_fee": 0.01,
-      "logistics": 0.055
+      "logistics": 0.055,
+      "region": "东南亚",
+      "currency": "PHP",
+      "rates_verified": false
     },
     "泰国": {
       "cny_to_local": 4.91,
@@ -50,6 +56,144 @@
       "cashback": 0.0,
       "super_coupon": 0.0,
       "growth_fee": 0.0,
+      "logistics": 0.0,
+      "region": "东南亚",
+      "currency": "THB",
+      "rates_verified": false
+    },
+    "越南": {
+      "region": "东南亚",
+      "currency": "VND",
+      "rates_verified": false,
+      "cny_to_local": 3560.0,
+      "usd_to_local": 25400.0,
+      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_local": 7000.0,
+      "platform_commission": 0.08,
+      "tx_fee": 0.03,
+      "cashback": 0.0,
+      "super_coupon": 0.0,
+      "growth_fee": 0.0,
+      "logistics": 0.0
+    },
+    "新加坡": {
+      "region": "东南亚",
+      "currency": "SGD",
+      "rates_verified": false,
+      "cny_to_local": 0.185,
+      "usd_to_local": 1.29,
+      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_local": 0.55,
+      "platform_commission": 0.08,
+      "tx_fee": 0.03,
+      "cashback": 0.0,
+      "super_coupon": 0.0,
+      "growth_fee": 0.0,
+      "logistics": 0.0
+    },
+    "印尼": {
+      "region": "东南亚",
+      "currency": "IDR",
+      "rates_verified": false,
+      "cny_to_local": 2280.0,
+      "usd_to_local": 15800.0,
+      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_local": 4500.0,
+      "platform_commission": 0.08,
+      "tx_fee": 0.03,
+      "cashback": 0.0,
+      "super_coupon": 0.0,
+      "growth_fee": 0.0,
+      "logistics": 0.0
+    },
+    "美国": {
+      "region": "欧美",
+      "currency": "USD",
+      "rates_verified": false,
+      "cny_to_local": 0.14,
+      "usd_to_local": 1.0,
+      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_local": 0.42,
+      "platform_commission": 0.06,
+      "tx_fee": 0.029,
+      "cashback": 0.0,
+      "super_coupon": 0.0,
+      "growth_fee": 0.0,
+      "logistics": 0.0
+    },
+    "英国": {
+      "region": "欧美",
+      "currency": "GBP",
+      "rates_verified": false,
+      "cny_to_local": 0.11,
+      "usd_to_local": 0.79,
+      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_local": 0.33,
+      "platform_commission": 0.06,
+      "tx_fee": 0.029,
+      "cashback": 0.0,
+      "super_coupon": 0.0,
+      "growth_fee": 0.0,
+      "logistics": 0.0
+    },
+    "德国": {
+      "region": "欧美",
+      "currency": "EUR",
+      "rates_verified": false,
+      "cny_to_local": 0.13,
+      "usd_to_local": 0.92,
+      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_local": 0.39,
+      "platform_commission": 0.06,
+      "tx_fee": 0.029,
+      "cashback": 0.0,
+      "super_coupon": 0.0,
+      "growth_fee": 0.0,
+      "logistics": 0.0
+    },
+    "法国": {
+      "region": "欧美",
+      "currency": "EUR",
+      "rates_verified": false,
+      "cny_to_local": 0.13,
+      "usd_to_local": 0.92,
+      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_local": 0.39,
+      "platform_commission": 0.06,
+      "tx_fee": 0.029,
+      "cashback": 0.0,
+      "super_coupon": 0.0,
+      "growth_fee": 0.0,
+      "logistics": 0.0
+    },
+    "意大利": {
+      "region": "欧美",
+      "currency": "EUR",
+      "rates_verified": false,
+      "cny_to_local": 0.13,
+      "usd_to_local": 0.92,
+      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_local": 0.39,
+      "platform_commission": 0.06,
+      "tx_fee": 0.029,
+      "cashback": 0.0,
+      "super_coupon": 0.0,
+      "growth_fee": 0.0,
+      "logistics": 0.0
+    },
+    "西班牙": {
+      "region": "欧美",
+      "currency": "EUR",
+      "rates_verified": false,
+      "cny_to_local": 0.13,
+      "usd_to_local": 0.92,
+      "dispatch_fee_cny": 3.0,
+      "dispatch_fee_local": 0.39,
+      "platform_commission": 0.06,
+      "tx_fee": 0.029,
+      "cashback": 0.0,
+      "super_coupon": 0.0,
+      "growth_fee": 0.0,
       "logistics": 0.0
     }
   },
@@ -58,5 +202,12 @@
     "super_coupon_enabled": false,
     "only_paid_orders": true,
     "allocation_paid": "equal"
+  },
+  "fx": {
+    "_comment": "mode=auto 自动抓实时汇率（带缓存）；manual 里填了某国就固定用它；抓不到网络时退回各国家的兜底值。",
+    "mode": "auto",
+    "provider": "open.er-api.com",
+    "ttl_hours": 12,
+    "manual": {}
   }
 }

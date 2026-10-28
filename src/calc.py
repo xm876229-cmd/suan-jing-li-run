@@ -44,6 +44,13 @@ class Params:
     super_coupon: float
     growth_fee: float
     logistics: float
+    # 以下为配置辅助字段，不参与计算
+    currency: str = ""
+    region: str = ""
+    # False 表示该国费率是占位值，需要在店铺后台核对；报表里会明确提示
+    rates_verified: bool = True
+    # 本次实际用的汇率来源说明（由 cli 写入，供报表口径页使用）
+    fx_note: str = ""
 
 
 @dataclass
@@ -56,21 +63,35 @@ class Switches:
     allocation_paid: str = "equal"
 
 
+def _f(c: dict, key: str, default: float = 0.0) -> float:
+    """读一个数值，缺失或非法就当 0。新加的国家可以先只填汇率。"""
+    v = c.get(key, default)
+    if v is None or v == "":
+        return float(default)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def load_rates(path: Path) -> tuple[dict[str, Params], Switches]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     out: dict[str, Params] = {}
     for name, c in data.get("countries", {}).items():
         out[name] = Params(
             country=name,
-            cny_to_local=float(c["cny_to_local"]),
-            usd_to_local=float(c["usd_to_local"]),
-            dispatch_fee_local=float(c["dispatch_fee_local"]),
-            platform_commission=float(c["platform_commission"]),
-            tx_fee=float(c["tx_fee"]),
-            cashback=float(c["cashback"]),
-            super_coupon=float(c["super_coupon"]),
-            growth_fee=float(c["growth_fee"]),
-            logistics=float(c["logistics"]),
+            cny_to_local=_f(c, "cny_to_local"),
+            usd_to_local=_f(c, "usd_to_local"),
+            dispatch_fee_local=_f(c, "dispatch_fee_local"),
+            platform_commission=_f(c, "platform_commission"),
+            tx_fee=_f(c, "tx_fee"),
+            cashback=_f(c, "cashback"),
+            super_coupon=_f(c, "super_coupon"),
+            growth_fee=_f(c, "growth_fee"),
+            logistics=_f(c, "logistics"),
+            currency=str(c.get("currency") or ""),
+            region=str(c.get("region") or ""),
+            rates_verified=bool(c.get("rates_verified", True)),
         )
     sw = data.get("switches", {})
     switches = Switches(

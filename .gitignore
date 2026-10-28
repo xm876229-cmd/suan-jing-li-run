@@ -52,6 +52,9 @@ data/costs/*
 data/mapping/*
 !data/mapping/README.md
 
+# 汇率缓存（联网抓来的实时汇率，随时会过期，不入库）
+data/fx_cache.json
+
 # ===== 打包产物（可随时重建，不入库） =====
 release/
 build/
