@@ -43,7 +43,7 @@ PORT = int(os.environ.get("JINGLI_PORT") or 8765)
 
 TASK_LOG: list[str] = []
 _RUN_LOCK = threading.Lock()
-_PENDING: dict = {}
+_PENDING: list = []          # 待办队列：[{task, range, store, country, at}, ...]
 _PENDING_LOCK = threading.Lock()
 
 
@@ -349,9 +349,10 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/log"):
             _json(self, {"ok": True, "lines": TASK_LOG[-200:]})
         elif self.path.startswith("/pending"):
+            # 取队首一个（不是整队掏空）：自动任务在跑的时候，
+            # 手动点的那个要能在它后面排着，而不是被清掉。
             with _PENDING_LOCK:
-                job = dict(_PENDING) if _PENDING else None
-                _PENDING.clear()
+                job = _PENDING.pop(0) if _PENDING else None
             _json(self, {"ok": True, "job": job})
         elif self.path.startswith("/stores") or self.path.startswith("/api/stores"):
             _json(self, store_list())
@@ -367,6 +368,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/data-files"):
             from bridge import ui
             _json(self, ui.data_files())
+        elif self.path.startswith("/api/snapshots"):
+            from bridge import ui
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            _json(self, ui.snapshots((q.get("store") or [""])[0]))
         elif self.path.startswith("/api/reports"):
             from bridge import ui
             _json(self, ui.reports())
@@ -460,6 +466,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_cost_fields()
         elif self.path.startswith("/api/costs/save"):
             self._post_costs(save=True)
+        elif self.path.startswith("/api/data-import"):
+            self._post_data_import()
         elif self.path.startswith("/api/costs/import"):
             self._post_costs(save=False)
         elif self.path.startswith("/capture"):
@@ -593,6 +601,100 @@ class Handler(BaseHTTPRequestHandler):
         _append_log(f"{who}文件已保存：{path.name}（{len(data)/1024:.0f} KB）")
         _json(self, {"ok": True, "path": str(path), "bytes": len(data),
                      "shop_id": shop_id, "store_dir": str(target_dir)})
+
+    def _post_data_import(self):
+        """手动导入导出文件——自动取数挂了的时候的兜底通路。
+
+        场景：扩展抓不到接口、平台改版、风控参数失效、店铺登录态掉了……
+        这时候你自己进 TikTok 后台把表导出来，在这里上传，
+        落进该店铺的 inbox 目录，之后跟自动取到的数据一模一样地参与核算。
+
+        导入时必须能选**国家/店铺**，因为：
+          · 费率表（佣金、手续费、服务费…）是按国家分开的
+          · 订单表的列名是按国家/语言分开的（马来站导出的表头跟菲律宾不一样）
+        选错国家 → 列认不出来、费率套错，数字会全错还不报错。
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+
+        name = str(payload.get("name") or "").strip()
+        b64 = payload.get("b64") or ""
+        if not name or not b64:
+            _json(self, {"ok": False, "error": "缺少文件名或内容"}, 400)
+            return
+        try:
+            data = base64.b64decode(b64)
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"内容解码失败：{e}"}, 400)
+            return
+
+        suffix = Path(name).suffix.lower()
+        if suffix not in {".xlsx", ".xls", ".csv", ".txt", ".json"}:
+            _json(self, {"ok": False, "error":
+                         f"不支持的文件类型：{suffix or '（没有扩展名）'}"}, 400)
+            return
+        if len(data) > 60 * 1024 * 1024:
+            _json(self, {"ok": False, "error": "文件超过 60 MB"}, 400)
+            return
+
+        shop_id = str(payload.get("shop_id") or "").strip()
+        country = str(payload.get("country") or "").strip()
+
+        # 先落到临时位置，靠表头认出这是张什么表，再决定放进哪个目录：
+        #   商品映射表 → data/mapping/（跟订单、广告分开）
+        #   其余       → data/stores/<店>/inbox/
+        # 映射表混进 inbox 的话，核算扫目录时会把整张表当成交付文件处理一遍。
+        tmp_dir = paths.DATA / "_import_tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp = tmp_dir / f"{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}{suffix}"
+        kind = ""
+        try:
+            tmp.write_bytes(data)
+            try:
+                from src.loader import classify_rows, read_table
+                kind = classify_rows(read_table(tmp)) or ""
+            except Exception:
+                kind = ""
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+        if kind == "mapping" or payload.get("kind") == "mapping":
+            target_dir = MAPPING_DIR
+        elif shop_id:
+            target_dir = paths.store_dir(shop_id)
+        else:
+            target_dir = INBOX_DIR
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        stem = re.sub(r'^手动导入-\d{8}-\d{6}-', "", Path(name).stem)
+        safe = re.sub(r'[\\/:*?"<>|]', "_", stem) or "data"
+        path = target_dir / f"手动导入-{stamp}-{safe}{suffix}"
+        i = 2
+        while path.exists():
+            path = target_dir / f"手动导入-{stamp}-{safe} ({i}){suffix}"
+            i += 1
+        try:
+            path.write_bytes(data)
+        except OSError as e:
+            _json(self, {"ok": False, "error": f"写文件失败：{e}"}, 500)
+            return
+
+        # 回一句「认出来是张什么表」。认不出来就直说，
+        # 不然文件躺在那儿，用户还以为传上去就算用上了。
+        label = {"order": "订单表", "ads": "广告表", "affiliate": "联盟佣金表",
+                 "mapping": "商品映射表（SKU→商品ID）"}.get(kind, "没认出来")
+        who = f"[{shop_id}] " if shop_id else ""
+        _append_log(f"{who}手动导入：{path.name} → {label}")
+        _json(self, {"ok": True, "path": str(path), "name": path.name,
+                     "kind": kind, "label": label, "bytes": len(data)})
 
     def _post_mapping(self):
         from bridge import settings_api
@@ -833,6 +935,31 @@ class Handler(BaseHTTPRequestHandler):
                 # 没识别到店铺（或该店还没抓过数据）就退回公共目录
                 data_dir = INBOX_DIR
 
+            # 快照：没指定就先把当前 inbox 存成一份再算。
+            # inbox 是实时的，下一次取数就把它冲掉了；存一份才能回头重算、
+            # 也才能说清「这份报表到底是哪批数据算出来的」。
+            snap_id = str(payload.get("snapshot") or "").strip()
+            if snap_id:
+                from src import snapshots
+                _sd = snapshots.resolve(shop_id, snap_id)
+                if _sd is None:
+                    _json(self, {"ok": False, "error": f"找不到快照：{snap_id}"})
+                    return
+                data_dir = _sd
+            else:
+                from src import snapshots
+                try:
+                    _snap = snapshots.create(
+                        shop_id, snapshots.pick_files(shop_id),
+                        dfrom or "", dto or "", store_name,
+                        note=str(payload.get("note") or ""))
+                    if _snap.get("ok"):
+                        snap_id = _snap.get("id") or ""
+                except Exception as e:  # noqa: BLE001
+                    # 快照失败不该拖垮核算：退回实时目录照算
+                    _append_log(f"[run] 快照入库失败，改用实时数据：{e}")
+                    snap_id = ""
+
             # 报表放到该店铺自己的子目录，文件名按设置里的模板生成
             cfg_settings.load()
             out_dir = paths.OUTPUT / re.sub(r'[\\/:*?"<>|]', "_", store_name)
@@ -865,6 +992,10 @@ class Handler(BaseHTTPRequestHandler):
                 "--out", str(out),
                 "--json",
             ]
+            if snap_id:
+                cmd += ["--snapshot", snap_id]
+            if payload.get("with_formula"):
+                cmd += ["--with-formula"]
             if dfrom:
                 cmd += ["--from", str(dfrom)]
             if dto:
@@ -974,10 +1105,13 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
         with _PENDING_LOCK:
-            _PENDING.clear()
-            _PENDING.update(payload or {})
-        _append_log(f"[pending] 收到任务：{payload.get('task')} {payload.get('range', {}).get('startDate', '')}")
-        _json(self, {"ok": True})
+            # 追加到队尾，不清空。自动任务排着队的时候你手动点一次，
+            # 两个都该跑，而不是后者把前者顶掉。
+            _PENDING.append(payload or {})
+        _append_log(f"[pending] 入队：{payload.get('task')} "
+                    f"{payload.get('range', {}).get('startDate', '')}"
+                    f"（队列 {len(_PENDING)} 个）")
+        _json(self, {"ok": True, "queued": len(_PENDING)})
 
 
 # ---------------- 热重载 ----------------
@@ -997,6 +1131,15 @@ WATCH_FILES = [
     ROOT / "src" / "report.py",
     ROOT / "src" / "paths.py",
     ROOT / "src" / "fx.py",
+    ROOT / "src" / "formula.py",
+    # 界面文件也必须监听：它是一份内嵌的 HTML/JS 字符串，
+    # 不重启就一直用旧的那份。漏掉这里的表现最坑——
+    # 加了开关、改了文案，刷新页面却什么都没变，
+    # 会让人以为代码没保存或者改错了地方。
+    ROOT / "bridge" / "ui.py",
+    ROOT / "bridge" / "config_page.py",
+    ROOT / "bridge" / "costs_api.py",
+    ROOT / "bridge" / "settings_api.py",
 ]
 
 def _code_stamp() -> tuple:

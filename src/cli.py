@@ -190,6 +190,9 @@ def build_argparser() -> argparse.ArgumentParser:
     src = ap.add_argument_group("数据来源（三选一）")
     src.add_argument("--workbook", type=Path, help="主工作簿路径（旧版，读其中的原始工作表）")
     src.add_argument("--dir", type=Path, help="导出文件目录（含订单/广告/联盟/映射四类文件）")
+    src.add_argument("--snapshot", default="",
+                    help="用哪一份取数快照（目录名，见 data/stores/<店>/snapshots）。"
+                         "不填就用当前 inbox 的实时数据")
     src.add_argument("--orders", type=Path, help="订单导出文件")
     src.add_argument("--ads", type=Path, help="广告花费导出文件")
     src.add_argument("--commissions", type=Path, help="联盟佣金导出文件")
@@ -206,6 +209,9 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--date-field", choices=["created", "paid"], default="created",
                     help="按哪个时间字段筛选区间（默认订单创建时间）")
     ap.add_argument("--out", type=Path, help="输出 Excel 路径；不填则自动命名到 output/")
+    ap.add_argument("--with-formula", action="store_true",
+                    help="导出「带公式」版：明细页多出订单类别/是否样品两组辅助列，"
+                         "汇总页的净利用 SUMIFS 引用明细，改「口径」页的开关即切换口径")
     ap.add_argument("--json", action="store_true", help="只输出一行 JSON 摘要（供本地桥调用）")
     ap.add_argument("--rates", type=Path, default=paths.RATES_FILE)
     ap.add_argument("--stores", type=Path, default=paths.STORES_FILE)
@@ -265,6 +271,20 @@ def main(argv: list[str] | None = None) -> int:
     order_fields = cc.get("order_fields") or {}
     cost_fields = cc.get("cost_fields") or {}
 
+    # 快照：指定后就只用那一批文件算，而不是当前 inbox。
+    # inbox 是「实时」的，扩展每取一次就多一份文件，而核算同类只取最新一份——
+    # 想重算某一批老数据，就必须能锁定那批文件，不然只会对着最新的一直算。
+    snap_note = ""
+    if getattr(args, "snapshot", ""):
+        from src import snapshots
+        _sid = str(args.store or "").strip()
+        _d = snapshots.resolve(_sid, args.snapshot)
+        if _d is None:
+            print(f"找不到快照：{args.snapshot}（店铺 {_sid or '未指定'}）")
+            return 2
+        args.dir = _d
+        snap_note = snapshots.describe(_sid, args.snapshot)
+
     costs_path, costs_note = pick_costs(args.costs)
     if costs_path:
         print(f"成本表：{costs_path.name}（{costs_note}）")
@@ -299,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         data = load_from_dir(args.dir, costs_path, params.usd_to_local, map_path,
                              order_fields=order_fields, cost_fields=cost_fields)
-        source = args.dir.name
+        source = snap_note or args.dir.name
 
     if not data.orders:
         print("没有解析出任何订单行，请检查订单文件的表头（需要 Order ID / Seller SKU / Quantity 等列）")
@@ -329,7 +349,8 @@ def main(argv: list[str] | None = None) -> int:
         "映射表": f"{map_path.name}（{map_note}）" if map_path else "未提供",
         "生成时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-    path = build_report(res, res.lines, out, switches, subtitle, extra)
+    path = build_report(res, res.lines, out, switches, subtitle, extra,
+                        with_formula=bool(getattr(args, "with_formula", False)))
 
     t = res.total
 

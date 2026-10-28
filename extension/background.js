@@ -1967,30 +1967,39 @@ async function executeTask(task, range, log, opts = {}) {
 // 所以点按钮时同时把任务写进 storage，这里定时来领——
 // 只要有一条路通，任务就能跑起来。
 
-const PENDING_KEY = "pendingTask";
+const PENDING_KEY = "pendingQueue";
 
 async function consumePending() {
   // 两条来源：面板写的本地存储，以及面板通过桥中转的任务。
   // 前者依赖扩展自己的 storage，后者依赖普通 HTTP，互为备份。
-  let p = (await skGet({ pendingTask: null })).pendingTask;
+  //
+  // 队列是数组而不是单槽位，因为自动取数和手动取数会同时存在：
+  // 比如自动任务正在跑（要几分钟），你又点了手动取另一个区间。
+  // 单槽位下后一个会把前一个冲掉，表现是「自动任务今天没跑」，
+  // 而且不报错，极难发现。改成 FIFO 后两个都会依次执行。
+  const { running } = await skGet({ running: null });
+  if (running) return null;                 // 正在跑，等它跑完再领下一个
 
-  if (!p || !p.task) {
-    try {
-      const resp = await fetch(`${BRIDGE}/pending`);
-      const j = await resp.json();
-      if (j && j.job && j.job.task) {
-        p = { ...j.job, at: j.job.at || Date.now() };
-        appendTaskLog(`[${p.task}] 从本地桥领取任务`);
-      }
-    } catch (e) { /* 桥没开，忽略 */ }
+  let p = null;
+  try {
+    const resp = await fetch(`${BRIDGE}/pending`);
+    const j = await resp.json();
+    if (j && j.job && j.job.task) {
+      p = { ...j.job, at: j.job.at || Date.now() };
+      appendTaskLog(`[${p.task}] 从本地桥领取任务`);
+    }
+  } catch (e) { /* 桥没开，忽略 */ }
+
+  if (!p) {
+    const { pendingQueue } = await skGet({ pendingQueue: [] });
+    const fresh = (pendingQueue || []).filter(
+      (x) => x && x.task && Date.now() - (x.at || 0) <= 30 * 60 * 1000);
+    p = fresh[0] || null;
+    await skSet({ pendingQueue: fresh.slice(1) });
   }
 
-  if (!p || !p.task || Date.now() - (p.at || 0) > 10 * 60 * 1000) return null;
+  if (!p || !p.task) return null;
 
-  const { running } = await skGet({ running: null });
-  if (running) return null;                 // 已经在跑了，别重复执行
-
-  await skSet({ pendingTask: null });
   const log = (m) => appendTaskLog(`[${p.task}] ${m}`);
   log("从待办队列领取任务");
   return executeTask(p.task, p.range || {}, log, {

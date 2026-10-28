@@ -20,7 +20,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-from .calc import CalcResult, Params, Switches
+from .calc import CalcResult, Params, Switches, ZERO
 from .loader import OrderLine
 
 # ---------- 样式 ----------
@@ -120,11 +120,22 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
     c_net = c_rate + 1                      # 净利(本地)
     c_net_cny = c_net + 1                   # 净利(人民币)
 
+    # 另一套样品口径的净利，跟主口径并排摆。
+    # 有了这两列就不用「切开关 → 重算 → 记数字 → 切回来」来回折腾，
+    # 也不会出现记错行、把两套数混在一起的情况。
+    has_alt = res.compare_total is not None
+    if has_alt:
+        headers += [f"净利（{res.compare_label}）", "样品差额"]
+        c_alt = c_net_cny + 1
+        c_diff = c_alt + 1
+
     _title(ws, "净利润汇总（每条链接一行）", subtitle, span=12)
     _head(ws, headers)
 
     money_cols = [5, 8, 9, 10, 12] + list(range(c_fee0, c_total + 1)) + [c_net, c_net_cny]
     pct_cols = [11, c_rate]
+    if has_alt:
+        money_cols += [c_alt, c_diff]
 
     def fee_vals(p) -> list[float]:
         return [float((p.fees or {}).get(fid, 0.0)) for fid, _ in fees]
@@ -139,6 +150,10 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
             *fv,
             sum(fv), p.net_margin, p.net_local, p.net_cny(res.params.cny_to_local),
         ]
+        if has_alt:
+            alt_p = res.compare.get(p.product_id)
+            alt_v = float(alt_p.net_local) if alt_p is not None else ZERO
+            vals += [alt_v, p.net_local - alt_v]
         for c, v in enumerate(vals, 1):
             cell = ws.cell(row=row, column=c, value=v)
             cell.border = BORDER
@@ -158,6 +173,8 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
         *tfv,
         sum(tfv), t.net_margin, t.net_local, res.net_cny_total,
     ]
+    if has_alt:
+        totals += [res.compare_total, t.net_local - res.compare_total]
     for c, v in enumerate(totals, 1):
         cell = ws.cell(row=row, column=c, value=v)
         cell.fill = TOTAL_FILL
@@ -182,6 +199,61 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
     _widths(ws, {1: 6, 2: 20, 3: 22, 4: 30})
     for c in range(5, len(headers) + 1):
         ws.column_dimensions[get_column_letter(c)].width = 12
+
+
+# ---------------- 样品单对比 ----------------
+
+def _sample_compare(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
+    """两条口径并排：含 0 元样品单 vs 去除后。
+
+    为什么要单独做一页：汇总页已经很宽了，再塞对比列会挤得没法看；
+    而且「这一批样品单到底吃掉多少利润」这个数是单独拿出来看的，
+    不是逐行对比的，放一页更清楚。
+    """
+    _title(ws, "样品单对比（含 0 元样品 vs 去除后）", subtitle, span=9)
+    headers = ["链接（商品ID）", "商品名称",
+               "GMV", "商品成本", "发单费",
+               "净利（含样品）", "净利（去样品）", "样品影响"]
+    _head(ws, headers)
+
+    dropped = bool(res.exclude_zero_amount)
+    rows: list[tuple] = []
+    for p in res.products:
+        alt = res.compare.get(p.product_id)
+        if alt is None:
+            continue
+        # 主口径 / 对比口径 分别是谁，取决于报表当前这一版用的是哪套
+        keep, drop = (alt, p) if dropped else (p, alt)
+        rows.append((p.product_id, p.product_name,
+                     keep.gmv, keep.cost_local, keep.dispatch_fee,
+                     keep.net_local, drop.net_local,
+                     keep.net_local - drop.net_local))
+
+    t = res.total
+    if res.compare_total is not None:
+        keep_total = t.net_local if not dropped else res.compare_total
+        drop_total = res.compare_total if not dropped else t.net_local
+        rows.append(("合计", "", t.gmv, t.cost_local, t.dispatch_fee,
+                     keep_total, drop_total, keep_total - drop_total))
+
+    for r_i, vals in enumerate(rows, 3):
+        is_total = vals[0] == "合计"
+        for c, v in enumerate(vals, 1):
+            cell = ws.cell(row=r_i, column=c, value=v)
+            cell.border = BORDER
+            if is_total:
+                cell.fill = TOTAL_FILL
+                cell.font = Font(bold=True)
+                cell.border = TOP_BORDER
+        _fmt_row(ws, r_i, [3, 4, 5, 6, 7, 8], [], [])
+
+    last = 2 + len(rows)
+    ws.freeze_panes = "C3"
+    if last >= 3:
+        ws.auto_filter.ref = f"A2:{get_column_letter(len(headers))}{last}"
+    _widths(ws, {1: 22, 2: 34})
+    for c in range(3, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(c)].width = 13
 
 
 # ---------------- 费用拆解 ----------------
@@ -363,11 +435,60 @@ DETAIL_HEADERS = [
     "成本单价(CNY)", "成本合计(CNY)", "状态", "取消/退货",
 ]
 
+# 「带公式导出」时追加到明细页末尾的辅助列。
+# 有了这几列，Excel 里就能用 SUMIFS 按「含样品 / 去样品」两套口径重算，
+# 不用回程序再跑一遍。列顺序：类别 / 是否样品 / 净利(含) / 净利(去)
+DETAIL_AUX_HEADERS = ["订单类别", "是否样品", "净利贡献(含样品)", "净利贡献(去样品)"]
 
-def _detail(ws: Worksheet, lines: list[OrderLine], subtitle: str) -> None:
+
+def _kind_of(l: OrderLine, refund_kw: tuple) -> str:
+    """这行订单属于哪一类。明细页和核算用的是同一个判定，不能各写一份。"""
+    from .calc import order_kind
+    return order_kind(l, refund_kw)
+
+
+def _row_net(l: OrderLine, kind: str, params: Params, cfg: list[dict]) -> float:
+    """这一行在某一套口径下贡献的净利（不含广告/达人佣金）。
+
+    广告和达人佣金是「整期直接取数」的，不按订单行分摊，
+    所以在汇总那一层再减，这里只算跟这一行有关的收支。
+    """
+    fx = params.cny_to_local
+    gmv = l.gmv if _in_kinds(cfg, "gmv", kind) else ZERO
+    cost = (l.cost_total_cny or ZERO) * fx if _in_kinds(cfg, "cost", kind) else ZERO
+    paid = l.allocated_paid if _in_kinds(cfg, "buyer_paid", kind) else ZERO
+    orders = l.allocated_orders if _in_kinds(cfg, "order_count", kind) else ZERO
+
+    dispatch = orders * params.dispatch_fee_cny * fx if _in_kinds(cfg, "dispatch", kind) else ZERO
+    commission = gmv * params.platform_commission if _in_kinds(cfg, "platform_commission", kind) else ZERO
+    tx = paid * params.tx_fee if _in_kinds(cfg, "tx_fee", kind) else ZERO
+    cashback = gmv * params.cashback if _in_kinds(cfg, "cashback", kind) else ZERO
+    service = orders * params.order_service if _in_kinds(cfg, "order_service", kind) else ZERO
+
+    return gmv - cost - dispatch - commission - tx - cashback - service
+
+
+def _in_kinds(cfg: list[dict], pid: str, kind: str) -> bool:
+    """某个参数在这一套口径下算不算这一类订单。"""
+    for it in cfg or []:
+        if not isinstance(it, dict):
+            continue
+        if str(it.get("id") or "").strip() != pid:
+            continue
+        ks = it.get("kinds")
+        if not isinstance(ks, list):
+            return True                 # 不写 kinds = 不看订单类别
+        return kind in ks
+    return True
+
+
+def _detail(ws: Worksheet, lines: list[OrderLine], res: CalcResult,
+            subtitle: str, with_formula: bool = False) -> None:
     _title(ws, "订单明细", subtitle, span=8)
-    _head(ws, DETAIL_HEADERS)
+    heads = list(DETAIL_HEADERS) + (list(DETAIL_AUX_HEADERS) if with_formula else [])
+    _head(ws, heads)
     row = 3
+    kw = tuple(res.refund_keywords or ())
     for l in lines:
         vals = [
             l.order_id, l.created, l.product_id or "无ID", l.style_codes,
@@ -375,12 +496,20 @@ def _detail(ws: Worksheet, lines: list[OrderLine], subtitle: str) -> None:
             l.gmv, l.allocated_paid, l.allocated_orders, l.order_line_count,
             l.cost_unit_cny, l.cost_total_cny, l.status, l.cancel,
         ]
+        if with_formula:
+            k = _kind_of(l, kw)
+            is_sample = 1 if k == "zero_amount" else 0
+            vals += [k, is_sample,
+                     _row_net(l, k, res.params, res.params_cfg),
+                     _row_net(l, k, res.params, res.compare_params_cfg)]
         for c, v in enumerate(vals, 1):
             ws.cell(row=row, column=c, value=v).border = BORDER
-        _fmt_row(ws, row, [9, 10, 13, 14], [], [8, 12])
+        _fmt_row(ws, row, [9, 10, 13, 14] + ([19, 20] if with_formula else []),
+                [], [8, 12])
         row += 1
     ws.freeze_panes = "A3"
-    ws.auto_filter.ref = f"A2:P{max(row - 1, 3)}"
+    last_col = "T" if with_formula else "P"
+    ws.auto_filter.ref = f"A2:{last_col}{max(row - 1, 3)}"
     _widths(ws, {1: 22, 2: 20, 3: 22, 4: 18, 5: 22, 6: 22, 7: 30,
                  8: 8, 9: 11, 10: 15, 11: 13, 12: 10, 13: 14, 14: 14, 15: 12, 16: 12})
 
@@ -502,7 +631,9 @@ def _meta(ws: Worksheet, res: CalcResult, params: Params, switches: Switches,
 
 def build_report(res: CalcResult, lines: list[OrderLine], out_path: Path,
                  switches: Switches, subtitle: str = "",
-                 extra: Optional[dict[str, str]] = None) -> Path:
+                 extra: Optional[dict[str, str]] = None,
+                 with_compare: bool = True,
+                 with_formula: bool = False) -> Path:
     wb = Workbook()
     ws = wb.active
     ws.title = "汇总"
@@ -511,7 +642,11 @@ def build_report(res: CalcResult, lines: list[OrderLine], out_path: Path,
     _fee_breakdown(wb.create_sheet("费用拆解"), res, subtitle)
     _daily(wb.create_sheet("日趋势"), lines, res, subtitle)
     _issues(wb.create_sheet("异常"), lines, res, subtitle)
-    _detail(wb.create_sheet("明细"), lines, subtitle)
+    _detail(wb.create_sheet("明细"), lines, res, subtitle,
+           with_formula=with_formula)
+    # 两套样品口径并排一页，想看剔不剔样品的差别直接翻这页
+    if with_compare and res.compare_total is not None:
+        _sample_compare(wb.create_sheet("样品对比"), res, subtitle)
     _meta(wb.create_sheet("口径"), res, res.params, switches, subtitle,
           extra or {"生成时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
 

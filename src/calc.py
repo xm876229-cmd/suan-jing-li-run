@@ -272,6 +272,15 @@ class CalcResult:
     kind_labels: dict = field(default_factory=dict)
     # 总开关：本次是否整张表都不算 0 元样品单（报表口径页要写明）
     exclude_zero_amount: bool = False
+    # 另一套口径的结果，用来在报表里做「含样品 / 去样品」对比。
+    # 键是商品ID，值是那套口径下算出来的整组指标（GMV/成本/发单费/净利…）。
+    # 只有一份口径时（比如没传 fcfg）就是 None，报表上不出现对比列。
+    compare_label: str = ""
+    compare: dict = field(default_factory=dict)
+    compare_total: float | None = None
+    # 对比口径下生效的参数表（样子跟 params_cfg 一样，只是样品单那格相反）。
+    # 「带公式导出」要按它算另一套行级分摊值，所以得留在结果里。
+    compare_params_cfg: list = field(default_factory=list)
 
     @property
     def total(self) -> ProductMetrics:
@@ -418,9 +427,9 @@ def resolve_order_filter(flt: dict | None) -> dict[str, dict[str, bool]]:
     return out
 
 
-def compute(data: RawData, params: Params, switches: Switches,
-            dfrom: Optional[date] = None, dto: Optional[date] = None,
-            date_field: str = "created", fcfg: dict | None = None) -> CalcResult:
+def _compute_once(data: RawData, params: Params, switches: Switches,
+                  dfrom: Optional[date] = None, dto: Optional[date] = None,
+                  date_field: str = "created", fcfg: dict | None = None) -> CalcResult:
     issues = list(data.issues)
     lines = filter_by_date(data.orders, dfrom, dto, date_field)
 
@@ -677,3 +686,36 @@ def compute(data: RawData, params: Params, switches: Switches,
                       params_cfg=[it for it in param_cfg if isinstance(it, dict)],
                       kind_labels=dict(fcfg.get("kinds") or KIND_LABELS),
                       exclude_zero_amount=bool(cc.get("exclude_zero_amount")))
+
+
+def compute(data: RawData, params: Params, switches: Switches,
+            dfrom: Optional[date] = None, dto: Optional[date] = None,
+            date_field: str = "created", fcfg: dict | None = None,
+            with_compare: bool = True) -> CalcResult:
+    """核算一次，并顺带把「另一套样品口径」的净利也算出来。
+
+    为什么要两套一起算：以前想看「剔除样品单之后差多少」，得先切开关、
+    跑一次、记下数字，再切回来跑一次。来回两遍还容易记错。
+    现在一次跑完，报表里「净利(含样品) / 净利(去样品) / 差额」并排列出来，
+    不用来回切，也不会算错。
+
+    两套口径互为补集：主口径按配置里「去除 0 元样品订单」的开关来，
+    对比口径就是它的反面，所以报表上一定能看出剔不剔的差别。
+    """
+    res = _compute_once(data, params, switches, dfrom, dto, date_field, fcfg)
+    if not with_compare:
+        return res
+
+    try:
+        alt_cfg = json.loads(json.dumps(fcfg)) if fcfg else {}
+        alt_cfg["exclude_zero_amount"] = not bool(res.exclude_zero_amount)
+        alt = _compute_once(data, params, switches, dfrom, dto, date_field, alt_cfg)
+    except Exception:  # noqa: BLE001
+        # 对比口径算不出来就算了，主结果照出，不影响正常核算
+        return res
+
+    res.compare_label = "含 0 元样品单" if res.exclude_zero_amount else "去除 0 元样品单"
+    res.compare = {p.product_id: p for p in alt.products}
+    res.compare_total = float(alt.total.net_local)
+    res.compare_params_cfg = [it for it in (alt.params_cfg or []) if isinstance(it, dict)]
+    return res

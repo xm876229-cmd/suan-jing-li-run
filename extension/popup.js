@@ -228,14 +228,21 @@ function runTasks(task, btn) {
     }).catch(() => {});
   } catch (e) { /* 桥没开就算了 */ }
 
+  // 队列入队：追加到队尾，不覆盖已有任务。
+  //
+  // 原来这里是个单槽位（pendingTask 只存一个任务），自动取数和手动取数
+  // 会互相顶掉——你在面板点一次手动取数，正好排队等着的自动任务就没了，
+  // 而且没有任何提示，只会事后发现「今天怎么没自动跑」。
+  // 改成数组后先来先跑，谁也不会挤掉谁；全自动开着也能随时插队手动取数。
   try {
-    chrome.storage.local.set(
-      { pendingTask: { task, range, force, store, country: countryNow, at: Date.now() } },
-      () => {
+    chrome.storage.local.get({ pendingQueue: [] }, (s0) => {
+      const prev = Array.isArray(s0 && s0.pendingQueue) ? s0.pendingQueue : [];
+      const job = { task, range, force, store, country: countryNow, at: Date.now() };
+      chrome.storage.local.set({ pendingQueue: prev.concat([job]) }, () => {
         safeSend({ type: "ping" }, (pr) => {
           if (!pr || !pr.ok) {
             if (btn) btn.disabled = false;
-            log("⚠ 后台没响应消息，但任务已入队，1 分钟内会自动开始");
+            log(`⚠ 后台没响应消息，但任务已入队（第 ${prev.length + 1} 位），1 分钟内会自动开始`);
             return;
           }
           log(`后台在线 v${pr.version}，提交任务…`);
@@ -251,8 +258,8 @@ function runTasks(task, btn) {
             else log("已入队，1 分钟内自动开始");
           });
         });
-      },
-    );
+      });
+    });
   } catch (e) {
     onContextLost();
   }

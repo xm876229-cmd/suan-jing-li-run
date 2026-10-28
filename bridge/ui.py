@@ -150,6 +150,31 @@ def data_files() -> dict:
     }
 
 
+def snapshots(store: str = "") -> dict:
+    """某家店（或公共目录）已有的取数快照，新的在前。
+
+    界面上用它做「用哪次数据」的下拉：默认最新，想回到某一批老数据直接选。
+    """
+    from src import snapshots as snaps
+
+    sid = (store or "").strip()
+    items = []
+    for doc in snaps.list_all(sid):
+        r = doc.get("range") or {}
+        rng = "全量" if not (r.get("from") or r.get("to")) else f"{r.get('from')}~{r.get('to')}"
+        items.append({
+            "id": doc.get("id") or "",
+            "at": doc.get("created_at") or "",
+            "range": rng,
+            "from": r.get("from") or "",
+            "to": r.get("to") or "",
+            "files": [f.get("name") for f in (doc.get("files") or [])],
+            "file_count": len(doc.get("files") or []),
+        })
+    return {"ok": True, "store": sid, "items": items,
+            "root": str(snaps.root(sid))}
+
+
 def trends() -> dict:
     """净利走势：从核算历史里取。"""
     from bridge import settings_api
@@ -459,22 +484,51 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
     <section class="page" id="view-run" hidden>
       <div class="head"><h1>开始核算</h1>
-        <p>用已经下载到本机的帖子数据出报表。选好店铺和日期，点一下就行。</p></div>
+        <p>用已经下载到本机的订单数据出报表。选好店铺和日期，点一下就行。
+           自动取数失败时，可以在下面手动导入自己导出的表。</p></div>
       <div class="card"><h2>核算范围</h2><div class="body">
         <div class="chips" id="chips">
           <button data-k="month">本月</button><button data-k="lastmonth">上月</button>
           <button data-k="d7">最近 7 天</button><button data-k="d30">最近 30 天</button>
           <button data-k="all" class="on">全部数据</button></div>
         <div class="row">
+          <div class="field"><label>用哪次数据</label>
+            <select id="snap" style="min-width:230px"><option value="">最新数据（当前 inbox）</option></select></div>
           <div class="field"><label>店铺</label>
             <select id="store" style="min-width:200px"><option value="">全部店铺（逐个核算）</option></select></div>
           <div class="field"><label>开始日期</label><input type="date" id="dfrom"></div>
           <div class="field"><label>结束日期</label><input type="date" id="dto"></div>
           <button class="primary" id="btn-run">开始核算</button></div>
+        <div style="margin-top:10px">
+          <label class="switch">
+            <input type="checkbox" id="with-formula">
+            <span><b>导出带公式的报表</b>
+              <em>明细页会多出「订单类别 / 是否样品 / 净利贡献(含样品) / 净利贡献(去样品)」四列；
+                汇总页末尾的净利用 SUMIFS 引用明细，改「口径」页第一行的开关（含样品 / 去除样品）
+                就能在 Excel 里直接切换口径，不必回程序重算。</em></span>
+          </label>
+        </div>
         <div class="note" id="run-note"></div>
       </div></div>
       <div class="card"><h2>会用到哪些数据<span class="hint" id="run-files-hint"></span></h2>
-        <div class="body tight" id="run-files"><div class="empty">读取中…</div></div></div>
+        <div class="body tight" id="run-files"><div class="empty">读取中…</div></div>
+        <div class="body" style="border-top:1px solid var(--line-soft);padding-top:12px">
+          <div class="row" style="gap:8px;align-items:flex-end">
+            <div class="field" style="flex:1"><label>存到哪家店</label>
+              <select id="imp-store"><option value="">未识别店铺（公共目录）</option></select></div>
+            <div class="field" style="width:160px"><label>国家（决定费率与列名）</label>
+              <select id="imp-country"><option value="">跟随店铺</option></select></div>
+            <button class="ghost" id="btn-import" style="width:auto;padding:7px 16px;margin:0">手动导入文件</button>
+          </div>
+          <input type="file" id="imp-file" multiple hidden
+                 accept=".csv,.xlsx,.xls,.txt,.json">
+          <p class="muted" style="font-size:12px;margin:8px 0 0">
+            自动取数失败时用它兜底：自己在 TikTok 后台导出订单 / 广告 / 联盟佣金 / 商品表，
+            在这里传上来就行，之后的计算跟自动取到的数据完全一样。
+            传上去后会自动认一下是张什么表，认不出来会告诉你。
+          </p>
+          <div class="note" id="imp-note"></div>
+        </div></div>
     </section>
 
     <section class="page" id="view-reports" hidden>
@@ -728,7 +782,7 @@ function go(view){
   if(view === 'settings') loadSettings();
   if(view === 'debug') loadDebug();
   if(view === 'stores') loadStores();
-  if(view === 'run') loadRunFiles();
+  if(view === 'run'){ loadRunFiles(); loadSnapshots(); loadImportOptions(); }
   if(view === 'overview'){ loadStatus(); loadTrend(); }
   if(location.hash !== '#/' + view) location.hash = '#/' + view;
 }
@@ -846,18 +900,127 @@ async function loadRunFiles(){
   }catch(e){}
 }
 
+/** 换店铺时刷新快照列表与文件清单：快照是按店分开存的，
+ *  A 店的快照在 B 店下拉里不该出现。 */
+if($('#store')) $('#store').onchange = () => { loadSnapshots(); loadRunFiles(); };
+
+/* ---------------- 手动导入 ---------------- */
+/* 自动取数这条路依赖平台接口和风控参数，平台一改版就可能断。
+   断了之后不能让人干等着，所以留一条人工通路：
+   用户自己导出表 → 在这里上传 → 落进该店铺的 inbox → 和自动数据一样算。 */
+
+/** 填充导入区的「店铺」和「国家」下拉。 */
+async function loadImportOptions(){
+  try{
+    const sel = $('#imp-store');
+    if(sel){
+      sel.innerHTML = '<option value="">未识别店铺（公共目录）</option>';
+      storesCache.forEach(s => {
+        const o = document.createElement('option');
+        o.value = s.id;
+        o.textContent = (s.name || s.id) + (s.country ? '（' + s.country + '）' : '');
+        sel.append(o);
+      });
+    }
+    const r = await (await fetch('/api/rates')).json();
+    const cs = $('#imp-country');
+    if(cs){
+      cs.innerHTML = '<option value="">跟随店铺</option>';
+      Object.keys(r.countries || {}).forEach(c => {
+        const o = document.createElement('option');
+        o.value = c; o.textContent = c;
+        cs.append(o);
+      });
+    }
+  }catch(e){}
+}
+
+/** 读取文件为 base64，分块拼避免一次申请超大字符串。 */
+async function fileToB64(f){
+  const buf = new Uint8Array(await f.arrayBuffer());
+  let bin = "";
+  const CH = 0x8000;
+  for(let i = 0; i < buf.length; i += CH){
+    bin += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
+  }
+  return btoa(bin);
+}
+
+async function importFiles(files){
+  const n = $('#imp-note');
+  if(!files || !files.length) return;
+  note(n, '导入中…', 'ok');
+  const lines = [];
+  for(const f of files){
+    try{
+      const b64 = await fileToB64(f);
+      const r = await fetch('/api/data-import', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          name: f.name, b64,
+          shop_id: ($('#imp-store') ? $('#imp-store').value : '') || '',
+          country: ($('#imp-country') ? $('#imp-country').value : '') || '',
+        }),
+      });
+      const j = await r.json();
+      lines.push(j.ok
+        ? `${esc(j.name)} → <b>${esc(j.label)}</b>`
+        : `${esc(f.name)} → <span style="color:#C0392B">失败：${esc(j.error || '')}</span>`);
+    }catch(err){
+      lines.push(`${esc(f.name)} → <span style="color:#C0392B">失败：${esc(err.message || String(err))}</span>`);
+    }
+  }
+  note(n, lines.join('<br>'), 'ok');
+  // 导入完立刻刷新：文件清单、快照列表、总览数字
+  loadRunFiles(); loadSnapshots(); loadStatus();
+}
+
+if($('#btn-import')) $('#btn-import').onclick = () => $('#imp-file').click();
+if($('#imp-file')) $('#imp-file').onchange = (e) => {
+  importFiles(Array.from(e.target.files || []));
+  e.target.value = "";            // 清空，同一个文件才能再选一次
+};
+if($('#imp-store')) $('#imp-store').onchange = () => {
+  // 选了店铺就把国家跟着带出来，省得再选一遍（也能避免选错国费率）
+  const s = storesCache.find(x => x.id === $('#imp-store').value);
+  if(s && s.country) $('#imp-country').value = s.country;
+};
+
+/** 列出这家店已有的取数快照，供「用哪次数据」下拉使用。 */
+async function loadSnapshots(){
+  try{
+    const store = $('#store') ? $('#store').value : '';
+    const j = await (await fetch('/api/snapshots?store=' + encodeURIComponent(store))).json();
+    const sel = $('#snap');
+    if(!sel) return;
+    const keep = sel.value;
+    const items = j.items || [];
+    sel.innerHTML = '<option value="">最新数据（当前 inbox）</option>' + items.map(it =>
+      `<option value="${esc(it.id)}">${esc(it.at)}｜${esc(it.range)}｜${it.file_count} 个文件</option>`
+    ).join('');
+    // 换店铺后原来的选择对不上了，就退回「最新数据」
+    if(keep && items.some(it => it.id === keep)) sel.value = keep;
+    else sel.value = '';
+    const hint = $('#run-files-hint');
+    if(hint && !items.length) hint.textContent = '还没有快照，取一次数就会自动存一份';
+  }catch(e){}
+}
+
 $('#btn-run').onclick = async () => {
   const btn = $('#btn-run'), n = $('#run-note');
   const store = $('#store').value;
+  const snap = $('#snap') ? $('#snap').value : '';
   const ids = store ? [store] : storesCache.map(s => s.id).filter(Boolean);
   if(!ids.length){ note(n, '没有可核算的店铺，先去「店铺」页看看识别到没有', 'err'); return; }
   btn.disabled = true;
   const results = [];
   for(let i = 0; i < ids.length; i++){
-    note(n, '核算中（' + (i+1) + '/' + ids.length + '）…', 'ok');
+    note(n, snap ? '按选定快照核算（' + (i+1) + '/' + ids.length + '）…' : '核算中（' + (i+1) + '/' + ids.length + '）…', 'ok');
     try{
       const r = await fetch('/run', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({store: ids[i], from: $('#dfrom').value || null, to: $('#dto').value || null})});
+        body: JSON.stringify({store: ids[i], from: $('#dfrom').value || null, to: $('#dto').value || null,
+                             snapshot: snap || null,
+                             with_formula: !!( $('#with-formula') && $('#with-formula').checked )})})
       results.push(await r.json());
     }catch(e){ results.push({ok:false, error:e.message, store: ids[i]}); }
   }
