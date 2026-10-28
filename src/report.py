@@ -227,9 +227,27 @@ def _daily(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: str
 
 ISSUE_RULES = [
     ("缺成本", "成本表里查不到该 SKU，且无法推导；成本按 0 计，净利偏高", "补录成本表"),
-    ("未付款", "订单实付为 0，已按口径排除在订单数和成本之外", "确认是否为赠品或异常单"),
-    ("取消退货", "带取消/退货标记，已从 GMV 与成本中排除", "无需处理，仅作提示"),
+    ("未付款", "订单实付为 0，未产生收入与成本", "确认是否为赠品或异常单"),
+    ("已取消", "订单被取消，按当前口径处理（见右列）", "确认口径是否符合预期"),
+    ("退货退款", "已成交后退货/退款，按当前口径处理（见右列）", "确认口径是否符合预期"),
 ]
+
+# 四个口径项的中文名，顺序固定：收入 / 成本 / 发单费 / 平台抽成
+_SCOPE_FLAGS = (("income", "收入"), ("cost", "成本"),
+                ("order_count", "发单费"), ("fee_base", "平台抽成"))
+
+
+def order_scope_desc(spec: dict | None) -> str:
+    """把一组四项开关说成人话。报表多处要用，抽出来避免两处写法不一致。"""
+    if not spec:
+        return "—"
+    on = [n for k, n in _SCOPE_FLAGS if spec.get(k)]
+    off = [n for k, n in _SCOPE_FLAGS if not spec.get(k)]
+    if not off:
+        return "整行计入（收入+成本+发单费+平台抽成）"
+    if not on:
+        return "整行排除"
+    return f"计入：{'/'.join(on)}；不计：{'/'.join(off)}"
 
 
 def _issues(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: str) -> None:
@@ -241,15 +259,26 @@ def _issues(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: st
     # 未付款 / 取消退货：只汇总，不需要处理
     summary: dict[str, int] = {}
 
+    of = res.order_filter or {}
     for l in lines:
         if l.cost_unit_cny is None:
             detail[("缺成本", l.seller_sku)] = detail.get(("缺成本", l.seller_sku), 0) + 1
-        elif l.is_cancelled:
-            summary["取消退货"] = summary.get("取消退货", 0) + 1
+            continue
+        if l.is_cancelled:
+            c = (l.cancel or "").lower()
+            kw = res.refund_keywords or ("return", "refund")
+            cat = "退货退款" if any(k in c for k in kw) else "已取消"
+            summary[cat] = summary.get(cat, 0) + 1
         elif not l.is_paid:
             summary["未付款"] = summary.get("未付款", 0) + 1
 
     desc = {k: (d, a) for k, d, a in ISSUE_RULES}
+    # 取消/退货的说明改成「按当前口径实际怎么算的」，
+    # 不能写死成「已排除」——用户可能已把成本计入了
+    for cat, kind in (("已取消", "cancelled"), ("退货退款", "refunded"), ("未付款", "unpaid")):
+        if cat in desc:
+            d, a = desc[cat]
+            desc[cat] = (f"{d}：{order_scope_desc(of.get(kind))}", a)
     row = 3
 
     for (cat, obj), n in sorted(detail.items(), key=lambda x: (-x[1], x[0])):
@@ -329,8 +358,8 @@ def _meta(ws: Worksheet, res: CalcResult, params: Params, switches: Switches,
         ("汇率：人民币→本地", p.cny_to_local, f"1 人民币 = {p.cny_to_local} 本地货币"),
         ("汇率：美金→本地", p.usd_to_local, f"1 美金 = {p.usd_to_local} 本地货币"),
         ("发单费(本地)", p.dispatch_fee_local, "按订单数计，不按金额"),
-        ("平台佣金率", p.platform_commission, "基数为 GMV"),
-        ("交易手续费率", p.tx_fee, "基数为买家实付"),
+        ("平台佣金率", p.platform_commission, "基数为平台抽成计费基数（含取消/退货，不含 0 元样品单）"),
+        ("交易手续费率", p.tx_fee, "基数为平台抽成计费基数（实付）"),
         ("奖金返现费率", p.cashback, "基数为 GMV"),
         ("超级优惠券费率", p.super_coupon if switches.super_coupon_enabled else 0,
          "开关：" + ("启用" if switches.super_coupon_enabled else "关闭（按 0 计）")),
@@ -338,17 +367,30 @@ def _meta(ws: Worksheet, res: CalcResult, params: Params, switches: Switches,
         ("物流费率", p.logistics, "基数为 GMV（比例法，非实际运费账单）"),
         ("分组维度", "链接（商品ID）", "一条链接一行；同一链接下多个 SKU 合并计算，不同链接不合并"),
         ("SKU 归属", "平台 SKU ID（唯一）", "卖家编码可在多条链接间复用，只在缺 SKU ID 时兜底使用"),
-        ("GMV 口径", "折扣前小计 − 卖家折扣", "不含平台补贴；排除取消/退货行"),
+        ("GMV 口径", "折扣前小计 − 卖家折扣", "不含平台补贴；取消/退货行按下方「订单口径」决定"),
         ("订单数口径", "订单级计数按行数平分", "一个订单的分配数合计为 1"),
         ("买家实付口径", f"{switches.allocation_paid}", "订单实付在订单内各行的分配方式"),
         ("成本口径", "成本表单价 × 数量 × 汇率", "多件装按基座价×件数推导，组合装按组件相加"),
         ("达人佣金口径", "联盟报表预估佣金", "退款部分未额外扣减"),
         ("广告口径", "广告花费(美金) × 美金汇率", "按商品ID汇总"),
-        ("0 元单", "计入成本与发单费",
-         "赠品/换货补发等金额为 0 但已发货的订单，成本真实发生，漏掉会让净利偏高"),
-        ("未付款订单", "排除" if switches.only_paid_orders else "计入",
-         "判断依据是订单状态，不是金额：曾退款/取消/未支付才排除"),
     ]
+
+    # 订单口径：按本次实际生效的配置动态生成。
+    # 写死说明的时代已经过去了——用户改了配置，报表必须跟着变，
+    # 否则事后对账会拿一份「说明和数不符」的表去查，越查越乱。
+    of = res.order_filter or {}
+    stats = res.kind_stats or {}
+    _kind_names = {
+        "cancelled": "已取消", "refunded": "退货退款",
+        "zero_amount": "0 元样品", "unpaid": "未付款", "normal": "正常",
+    }
+    for kind, label in _kind_names.items():
+        spec = of.get(kind) or {}
+        n = stats.get(kind, 0)
+        if not spec and not n:
+            continue
+        rows.append((f"{label}订单（{n} 行）", order_scope_desc(spec),
+                     "四关：收入=GMV/实付，成本=商品成本，发单费=订单数基数，平台抽成=按比例费用的基数"))
     row = 3
     for k, v, note in rows:
         ws.cell(row=row, column=1, value=k).font = Font(bold=True)

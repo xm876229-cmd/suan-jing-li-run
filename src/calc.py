@@ -1,17 +1,24 @@
 """净利核算引擎。
 
-口径完全对齐原工作簿「净利润」表：
-    GMV      = Σ(订单!Q 折扣前小计) − Σ(订单!S 卖家折扣)，排除取消/退货行
-    成本     = Σ(成本单价 × 数量) × 人民币→本地汇率
-    毛利     = (GMV − 成本) / GMV
-    发单费   = 订单数 × 发单费(本地)
-    平台佣金 = GMV × 佣金率
-    交易手续费 = 买家实付(分摊后) × 费率
-    奖金返现 / 超级优惠券 / 商家成长 / 物流 = GMV × 各自费率
-    达人佣金 = 联盟佣金按商品ID汇总
-    广告花费 = 广告花费(美金)按商品ID汇总 × 美金→本地汇率
-    净利率   = 毛利 − 各项费用占 GMV 的比例
-    净利(本地) = GMV × 净利率
+口径由 config/formulas.json 驱动，默认值如下（与原工作簿一致，但已可配）：
+
+    订单口径（四关独立，按订单类别分别控制）
+        收入       GMV = Σ(折扣前小计) − Σ(卖家折扣)
+        成本       Σ(成本单价 × 数量) × 人民币→本地汇率
+        发单费     订单数 × 发单费(本地)
+        平台抽成   按比例的费用（平台佣金/交易手续费）的计费基数
+        为什么拆开：取消单、退货单、0 元样品单的收入是 0，
+        但成本、发单费、平台抽成照样发生。整行排除会让成本被低估、净利虚高。
+
+    各项费用（fees 列表，想加几条加几条）
+        发单费     订单数 × 发单费(本地)
+        平台佣金   平台抽成计费基数 × 佣金率
+        交易手续费 平台抽成计费基数(实付) × 费率
+        返现/券/成长/物流 = GMV × 各自费率
+        达人佣金   联盟佣金按商品ID汇总
+        广告花费   广告花费(美金)按商品ID汇总 × 美金→本地汇率
+
+    净利(本地) = GMV − 成本 − 各项费用合计
     净利(人民币) = 净利(本地) ÷ 人民币→本地汇率
 """
 
@@ -164,6 +171,11 @@ class ProductMetrics:
     items: float = ZERO
     refund: float = ZERO
     cost_local: float = ZERO
+    # 计费基数：算平台抽成等按比例费用的基数，可以与 gmv / buyer_paid 不同。
+    # 为什么需要它：取消单和退货单的收入不算（钱退了），但平台抽成往往照收，
+    # 所以「收入」和「计费基数」必须是两个独立的量，否则一关就全关了。
+    fee_base_gmv: float = ZERO
+    fee_base_paid: float = ZERO
     # 费用明细：费用 id → 金额。id 与 config/formulas.json 的 fees 对应，
     # 所以用户加一项「订单服务费」这里就自动多一个键，不用改代码。
     fees: dict[str, float] = field(default_factory=dict)
@@ -221,6 +233,12 @@ class CalcResult:
     line_count: int = 0
     order_count: int = 0
     lines: list[OrderLine] = field(default_factory=list)
+    # 本次实际生效的口径（报表「口径」页要展示，事后对账靠它）
+    order_filter: dict = field(default_factory=dict)
+    # 各类订单的行数：{类别: 行数}
+    kind_stats: dict = field(default_factory=dict)
+    # 判定「退货」的关键词（配置里可改，报表分类要用同一套，不能各写一份）
+    refund_keywords: tuple = ()
 
     @property
     def total(self) -> ProductMetrics:
@@ -229,6 +247,8 @@ class CalcResult:
         for p in self.products:
             t.gmv += p.gmv
             t.buyer_paid += p.buyer_paid
+            t.fee_base_gmv += p.fee_base_gmv
+            t.fee_base_paid += p.fee_base_paid
             t.orders += p.orders
             t.items += p.items
             t.refund += p.refund
@@ -255,6 +275,99 @@ class CalcResult:
 
 # ---------------- 主计算 ----------------
 
+# ---------------- 订单口径：按「行类别 × 四项」分别控制 ----------------
+#
+# 为什么不能只用一个开关控制整行：
+#   取消单 / 退货单 / 0 元样品单的收入通常是 0（甚至要冲回），
+#   但它们的**成本是真实发生的**——货采购了、发出了，发单费按订单数已经收了，
+#   平台抽成也照收（样品单除外）。如果把它们整行排除，
+#   成本就被低估，净利被高估。所以收入、成本、订单数、计费基数必须分开控。
+#
+# 一行订单可能同时符合多个类别，按这个优先级归一类：
+#   已取消 > 退货退款 > 0元样品 > 未付款 > 正常
+KINDS = ("cancelled", "refunded", "zero_amount", "unpaid", "normal")
+
+KIND_LABELS = {
+    "cancelled": "已取消订单",
+    "refunded": "退货退款订单",
+    "zero_amount": "0 元样品单",
+    "unpaid": "未付款订单",
+    "normal": "正常订单",
+}
+
+# 四个口径项：
+#   income       收入（GMV 与买家实付算不算）
+#   cost         商品成本（含件数）
+#   order_count  订单数（发单费等按单计费的基数）
+#   fee_base     平台抽成的计费基数（按比例的佣金/返现/物流等）
+ALL_ON = {"income": True, "cost": True, "order_count": True, "fee_base": True}
+ALL_OFF = {"income": False, "cost": False, "order_count": False, "fee_base": False}
+
+# 默认口径（按业务实情）：
+#   取消 / 退货：收入不算（钱退了），但成本、发单费、平台抽成照算
+#   0 元样品：收入本来就是 0，成本与发单费照算；平台抽成不算（没有成交额）
+#   未付款：什么都没发生，全不算
+DEFAULT_ORDER_FILTER: dict[str, dict[str, bool]] = {
+    "cancelled": {"income": False, "cost": True, "order_count": True, "fee_base": True},
+    "refunded": {"income": False, "cost": True, "order_count": True, "fee_base": True},
+    "zero_amount": {"income": True, "cost": True, "order_count": True, "fee_base": False},
+    "unpaid": {"income": False, "cost": False, "order_count": False, "fee_base": False},
+    "normal": dict(ALL_ON),
+}
+
+# 旧配置只有 include_xxx 一个总开关，映射成「四项同开/同关」保持兼容
+_LEGACY_KEYS = {
+    "include_cancelled": "cancelled",
+    "include_refunded": "refunded",
+    "include_zero_amount": "zero_amount",
+    "include_unpaid": "unpaid",
+}
+
+
+def order_kind(l: OrderLine, refund_keywords: tuple[str, ...] = ("return", "refund")) -> str:
+    """判断一行订单属于哪一类（决定用哪组口径开关）。"""
+    if l.is_cancelled:
+        c = (l.cancel or "").lower()
+        if any(k in c for k in refund_keywords):
+            return "refunded"
+        return "cancelled"
+    if l.gmv == 0 and l.order_amount == 0:
+        return "zero_amount"
+    if not l.is_paid:
+        return "unpaid"
+    return "normal"
+
+
+def resolve_order_filter(flt: dict | None) -> dict[str, dict[str, bool]]:
+    """把 order_filter 配置解析成 {类别: 四项开关}。
+
+    支持两种写法，可以混用：
+      新写法（推荐）  "cancelled": {"income":false,"cost":true,...}
+      旧写法          "include_cancelled": false   → 四项同开/同关
+    没写的项沿用默认值，所以只写想改的那一项就行。
+    """
+    flt = flt or {}
+    out: dict[str, dict[str, bool]] = {}
+    for kind in KINDS:
+        default = DEFAULT_ORDER_FILTER[kind]
+        spec = flt.get(kind)
+        if isinstance(spec, dict):
+            item = dict(default)
+            for k in ("income", "cost", "order_count", "fee_base"):
+                if k in spec:
+                    item[k] = bool(spec[k])
+            out[kind] = item
+            continue
+        # 没有分类配置 → 看旧的总开关
+        legacy = next((lk for lk, lkind in _LEGACY_KEYS.items()
+                       if lkind == kind and lk in flt), None)
+        if legacy is not None:
+            out[kind] = dict(ALL_ON if flt[legacy] else ALL_OFF)
+        else:
+            out[kind] = dict(default)
+    return out
+
+
 def compute(data: RawData, params: Params, switches: Switches,
             dfrom: Optional[date] = None, dto: Optional[date] = None,
             date_field: str = "created", fcfg: dict | None = None) -> CalcResult:
@@ -266,20 +379,14 @@ def compute(data: RawData, params: Params, switches: Switches,
     if fcfg is None:
         fcfg = formula.load_config(paths.CONFIG / "formulas.json")
     flt = fcfg.get("order_filter") or {}
-    inc_cancelled = bool(flt.get("include_cancelled", False))
-    inc_refunded = bool(flt.get("include_refunded", False))
-    inc_unpaid = bool(flt.get("include_unpaid", False))
-    inc_zero = bool(flt.get("include_zero_amount", True))
-
-    # 0 元样品单：整行是否参与。
-    # 单独一个开关是因为发单费按订单数算，样品单加不加直接影响成本，
-    # 不能只按金额一刀切，得让人自己决定。
-    if not inc_zero:
-        before = len(lines)
-        lines = [l for l in lines if not (l.gmv == 0 and l.order_amount == 0)]
-        dropped = before - len(lines)
-        if dropped:
-            issues.append(f"按设置排除了 {dropped} 行 0 元订单（样品单），如需计入请改 formulas.json 的 include_zero_amount")
+    # 「退货」关键词可配：有些店铺导出里退款类型写 Refund 之外的字样
+    refund_kw = tuple(
+        str(x).strip().lower() for x in (flt.get("refund_keywords") or ["return", "refund"])
+        if str(x).strip()
+    )
+    kfilter = resolve_order_filter(flt)
+    # 四关全关的类别直接整行不要（等价于「这一行完全不参与」）
+    kind_stats: dict[str, int] = {k: 0 for k in KINDS}
 
     # 订单实付分配：按 GMV 占比时，先算出每个订单的 GMV 合计。
     # 用全量订单（不受日期过滤影响），避免跨期的订单被截断后分配比例失真。
@@ -321,31 +428,40 @@ def compute(data: RawData, params: Params, switches: Switches,
             names[pid] = l.product_name
 
         m.lines += 1
-        m.items += l.qty
-        m.refund += l.order_amount if l.is_cancelled else 0.0
 
-        # 取消 / 退货行是否计入，由 formulas.json 的 include_cancelled 决定
-        alive = inc_cancelled or not l.is_cancelled
+        # 这一行属于哪类订单，决定用哪组口径开关
+        kind = order_kind(l, refund_kw)
+        sw_k = kfilter[kind]
+        kind_stats[kind] += 1
 
-        # GMV：默认排除取消/退货
-        if alive:
+        # 取消 / 退货金额：只是统计量（用来在报表上说明「退了多少钱」），
+        # 不受口径开关影响，否则对账时看不出退了多少
+        if kind in ("cancelled", "refunded"):
+            m.refund += l.order_amount
+
+        paid_amt = alloc_paid(l)
+
+        # ① 收入：GMV 与买家实付
+        if sw_k["income"]:
             m.gmv += l.gmv
+            m.buyer_paid += paid_amt
 
-        # 订单数：未取消 + 已付款（include_unpaid 打开就不看付款状态）
-        paid_ok = inc_unpaid or l.is_paid or not switches.only_paid_orders
-        if paid_ok and alive:
-            m.orders += l.allocated_orders
-
-        # 买家实付：只要求已付款（与原表一致，不看取消标记）
-        if paid_ok:
-            m.buyer_paid += alloc_paid(l)
-
-        # 成本：未取消 + 已付款
-        if paid_ok and alive:
+        # ② 成本与件数（货已经采购/发出，钱就是花了）
+        if sw_k["cost"]:
+            m.items += l.qty
             if l.cost_total_cny is None:
                 missing_cost_lines += 1
             else:
                 m.cost_local += l.cost_total_cny * params.cny_to_local
+
+        # ③ 订单数：发单费等按单计费的基数
+        if sw_k["order_count"]:
+            m.orders += l.allocated_orders
+
+        # ④ 计费基数：平台抽成等按比例费用用（可与收入不同）
+        if sw_k["fee_base"]:
+            m.fee_base_gmv += l.gmv
+            m.fee_base_paid += paid_amt
 
     # 有广告花费或达人佣金、但本期没有订单的商品
     # 钱已经花了，不能因为"没出单"就从报表里消失，否则总成本被低估
@@ -371,6 +487,9 @@ def compute(data: RawData, params: Params, switches: Switches,
         ctx = {
             "gmv": m.gmv,
             "buyer_paid": m.buyer_paid,
+            # 计费基数：与收入不同（取消单/退货单收入不算，但平台抽成照收）
+            "fee_base": m.fee_base_gmv,
+            "fee_base_paid": m.fee_base_paid,
             "order_count": m.orders,
             "orders": m.orders,
             "items": m.items,
@@ -415,4 +534,6 @@ def compute(data: RawData, params: Params, switches: Switches,
 
     order_ids = {l.order_id for l in lines if l.order_id}
     return CalcResult(params=params, products=products, issues=issues,
-                      line_count=len(lines), order_count=len(order_ids), lines=lines)
+                      line_count=len(lines), order_count=len(order_ids), lines=lines,
+                      order_filter=kfilter, kind_stats=dict(kind_stats),
+                      refund_keywords=refund_kw)

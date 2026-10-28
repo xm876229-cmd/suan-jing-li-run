@@ -204,17 +204,18 @@ def safe_eval(expr: str, ctx: dict) -> tuple[float, set[str]]:
 
 DEFAULTS: dict = {
     "order_filter": {
-        "include_cancelled": False,
-        "include_refunded": False,
-        "include_unpaid": False,
-        "include_zero_amount": True,
+        "cancelled": {"income": False, "cost": True, "order_count": True, "fee_base": True},
+        "refunded": {"income": False, "cost": True, "order_count": True, "fee_base": True},
+        "zero_amount": {"income": True, "cost": True, "order_count": True, "fee_base": False},
+        "unpaid": {"income": False, "cost": False, "order_count": False, "fee_base": False},
+        "refund_keywords": ["return", "refund"],
     },
     "fees": [
         {"id": "dispatch", "label": "发单费", "base": "order_count",
          "rate": "params.dispatch_fee_local", "enabled": True},
-        {"id": "platform_commission", "label": "平台佣金", "base": "gmv",
+        {"id": "platform_commission", "label": "平台佣金", "base": "fee_base",
          "rate": "params.platform_commission", "enabled": True},
-        {"id": "tx_fee", "label": "交易手续费", "base": "buyer_paid",
+        {"id": "tx_fee", "label": "交易手续费", "base": "fee_base_paid",
          "rate": "params.tx_fee", "enabled": True},
         {"id": "cashback", "label": "奖金返现", "base": "gmv",
          "rate": "params.cashback", "enabled": True},
@@ -247,10 +248,12 @@ def load_config(path: Path) -> dict:
 
     out = json.loads(json.dumps(DEFAULTS))
     if isinstance(doc.get("order_filter"), dict):
-        out["order_filter"].update(
-            {k: bool(v) for k, v in doc["order_filter"].items()
-             if k in DEFAULTS["order_filter"]}
-        )
+        # 这里刻意不做白名单过滤：order_filter 支持「按类别分组」的嵌套结构，
+        # 之前只收 include_xxx 四个键，新结构会被整个丢掉，
+        # 表现是「改配置毫无反应」——这个坑不好查，所以改成整体接受。
+        # 具体的键校验交给 calc.resolve_order_filter()，那边会按默认值补齐。
+        for k, v in doc["order_filter"].items():
+            out["order_filter"][k] = v
     if isinstance(doc.get("fees"), list) and doc["fees"]:
         out["fees"] = doc["fees"]
     if isinstance(doc.get("formulas"), dict) and doc["formulas"]:
@@ -264,6 +267,8 @@ def load_config(path: Path) -> dict:
 FEE_BASES = {
     "gmv": "GMV",
     "buyer_paid": "买家实付",
+    "fee_base": "平台抽成计费基数（GMV，含取消/退货）",
+    "fee_base_paid": "平台抽成计费基数（实付，含取消/退货）",
     "order_count": "订单数",
     "items": "商品件数",
     "cost": "商品成本",
