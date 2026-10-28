@@ -426,7 +426,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.17.4</span></div>
+      <div class="row"><span>版本</span><span>0.18.0</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -502,6 +502,14 @@ _TEMPLATE = r"""<!DOCTYPE html>
             <th class="kcell" style="width:48px">启用</th><th style="width:54px"></th>
           </tr></thead><tbody id="pbody"></tbody></table>
         </div></div>
+        <div class="body" style="padding-top:0">
+          <p class="muted" style="font-size:12.5px;margin:0">
+            <b>订单数</b>、<b>件数</b> 这两行是报表上的显示列，也各自有勾选，单独控制——
+            勾了「0元样品」订单数就含样品单，取消就只算正常 + 退货单。<br>
+            发单费、订单服务费公式里的 <span class="mono">orders</span> 同样按<b>各自那一行</b>的勾选算，
+            所以「订单数列 973 单、服务费按 927 单」这种组合是可以的，互不干扰。
+          </p>
+        </div>
       </div>
 
       <div class="card"><h2>公式里能写什么<span class="hint">点一下就插到刚编辑的公式里</span></h2>
@@ -533,7 +541,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <p class="muted" style="font-size:12.5px;margin:0">
             默认就是把上面每一项减掉：
             <span class="mono">net = gmv - cost - dispatch - platform_commission - tx_fee
-            - ads - affiliate - order_service - other_fee</span>。
+            - cashback - ads - affiliate - order_service</span>。
             你在参数表里新增了一项，记得也把它加进这一行。
           </p>
         </div>
