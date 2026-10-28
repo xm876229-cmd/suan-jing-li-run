@@ -1,4 +1,4 @@
-# 注册定时任务：每天 09:00 自动跑「昨天」的净利，结果落在 output\
+﻿# 注册定时任务：每天 09:00 自动跑「昨天」的净利，结果落在 output\
 # 用法（在项目根目录、普通 PowerShell 窗口执行一次即可）：
 #   powershell -ExecutionPolicy Bypass -File scripts\install_scheduled_task.ps1
 # 卸载：

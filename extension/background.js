@@ -845,6 +845,111 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
 
 // ---------------- 任务：联盟佣金 ----------------
 
+/**
+ * 探测联盟「商品维度」数据接口。
+ *
+ * 背景：导出任务的 list 接口只返回 task_id / file_name / status，**没有下载地址**，
+ * 抓包也找不到任何 download 接口。所以导出这条路走不通时，改取数据接口。
+ * 已知 `/transaction/detail_list/get` 是数据接口，但抓到的请求都是 module_type=103
+ * （达人维度），商品维度（导出用的是 104）的参数键名未知。
+ *
+ * 这里把几种可能的参数形状各试一次，只读、只打日志，不改任何数据。
+ * 目的是拿到「哪种形状能返回商品行」以及「商品行的字段名」，下一轮就能定死映射。
+ */
+async function pageProbeAffiliate(host, s, e, tz, log) {
+  const url = await buildUrl(host, "/api/v1/oec/affiliate/compass/transaction/detail_list/get");
+  const METRICS = [1, 3, 2, 4, 9, 20, 13, 14, 19, 6, 12, 11, 16, 17, 18, 8, 7, 10, 5];
+  const SHAPES = [
+    { name: "m104/type2/product_list_params", module_type: 104, detail_list_type: 2, key: "product_list_params" },
+    { name: "m104/type2/transaction_product_list_params", module_type: 104, detail_list_type: 2, key: "transaction_product_list_params" },
+    { name: "m104/type1/product_list_params", module_type: 104, detail_list_type: 1, key: "product_list_params" },
+    { name: "m103/type2/product_list_params", module_type: 103, detail_list_type: 2, key: "product_list_params" },
+  ];
+
+  const r = await runInPage(host, async (u, startS, endS, tzOffset, metrics, shapes) => {
+    const out = [];
+    const td = () => ({
+      granularity_type: 1, timezone_offset: tzOffset,
+      start_time: startS, end_time: endS, time_option_type: 1,
+    });
+
+    /** 在响应里找第一个含商品ID 的对象，用来确认「这就是商品维度」。 */
+    function findProductRow(node, depth) {
+      if (!node || depth > 6) return null;
+      if (Array.isArray(node)) {
+        for (const it of node) {
+          const hit = findProductRow(it, depth + 1);
+          if (hit) return hit;
+        }
+        return null;
+      }
+      if (typeof node === "object") {
+        const keys = Object.keys(node);
+        const hasPid = keys.some((k) => /^(product_?id|productId)$/i.test(k));
+        if (hasPid) return node;
+        for (const k of keys) {
+          const hit = findProductRow(node[k], depth + 1);
+          if (hit) return hit;
+        }
+      }
+      return null;
+    }
+
+    for (const sh of shapes) {
+      const body = {
+        params: {
+          detail_list_type: sh.detail_list_type,
+          [sh.key]: [{
+            time_descriptor: td(),
+            metric_types: metrics,
+            page_param: { page_no: 1, page_size: 20 },
+            sorter: { sort_type: 2, order_type: 1 },
+            filter: {},
+          }],
+        },
+        module_type: sh.module_type,
+        locale: "zh-CN",
+      };
+      try {
+        const resp = await fetch(u, {
+          method: "POST", credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const j = JSON.parse(await resp.text());
+        const row = (j && j.code === 0) ? findProductRow(j.data, 0) : null;
+        out.push({
+          name: sh.name,
+          code: j && j.code,
+          msg: String((j && j.message) || "").slice(0, 60),
+          dataKeys: j && j.data ? Object.keys(j.data).slice(0, 6) : [],
+          foundProductRow: !!row,
+          rowKeys: row ? Object.keys(row).slice(0, 24) : [],
+          sample: row ? JSON.stringify(row).slice(0, 300) : "",
+        });
+        if (row) return out;              // 找到商品行就停，不再试后面的形状
+      } catch (err) {
+        out.push({ name: sh.name, error: String((err && err.message) || err).slice(0, 80) });
+      }
+    }
+    return out;
+  }, [url, Math.floor(new Date(s + "T00:00:00").getTime() / 1000),
+      Math.floor(new Date(e + "T00:00:00").getTime() / 1000) - 1, tz, METRICS, SHAPES]);
+
+  if (r.missingTab) { log("  探测失败：没有开着的联盟页面"); return null; }
+  if (r.error) { log(`  探测异常：${r.error}`); return null; }
+  const rows = (r.result || []);
+  for (const x of rows) {
+    if (x.error) { log(`  · ${x.name} → 请求异常 ${x.error}`); continue; }
+    log(`  · ${x.name} → code=${x.code} ${x.msg}｜data键=${(x.dataKeys || []).join(",") || "无"}｜含商品行=${x.foundProductRow}`);
+    if (x.foundProductRow) {
+      log(`    商品行字段：${(x.rowKeys || []).join(", ")}`);
+      log(`    样例：${x.sample}`);
+    }
+  }
+  return rows.find((x) => x.foundProductRow) || null;
+}
+
 async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
   const host = await ensureHost("affiliate", log);
 
@@ -877,9 +982,10 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
   log(`任务已创建：${taskId || "(无 task_id)"}`);
 
   // 轮询任务列表，找到可下载的地址。
-  // 原来是 40 次×5 秒=200 秒，实测每次都等满，把整轮拖到四分钟。
-  // 现在 18 次=90 秒封顶；还没好就本轮跳过，不阻塞核算。
-  for (let i = 0; i < 18; i++) {
+  // 实测 list 接口只返回 task_id / file_name / status，**始终没有下载地址**，
+  // 抓包里也找不到任何 download 接口。所以这里只等 30 秒探一下，
+  // 拿不到就转去探测数据接口，不把整轮拖成几分钟。
+  for (let i = 0; i < 6; i++) {
     await sleep(5000);
     const list = await apiPost(
       await buildUrl(host, "/api/v1/oec/affiliate/compass/export_task/list"),
@@ -889,12 +995,22 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
     if (url) {
       return downloadAndUpload(url, `Transaction_Analysis_${startDate}_${endDateExclusive}.xlsx`, log);
     }
-    if (i === 2 || i === 17) {
-      // 打一次响应结构：字段名变了要能看出来，别再靠猜
-      log(`任务列表暂无下载地址（第 ${i + 1} 次），响应片段：${JSON.stringify(list).slice(0, 180)}`);
+    if (i === 0 || i === 5) {
+      const n = (list?.data?.export_tasks || []).length;
+      log(`任务列表 ${n} 条，暂无下载地址（第 ${i + 1} 次）`);
     }
   }
-  throw new Error("联盟佣金 90 秒内没生成下载地址，本轮跳过（改用上一期文件，报表会标注）");
+
+  // 导出拿不到就改取数据接口。先探测哪种参数形状能返回商品行。
+  log("导出接口给不出下载地址，改探测交易明细接口…");
+  const hit = await pageProbeAffiliate(host, startDate, endDateExclusive, tz, log);
+  if (hit) {
+    throw new Error(
+      `联盟数据接口已定位（${hit.name}），但字段映射还没接上，本轮用上一期文件。` +
+      `日志里已打印商品行字段，下一步即可接通`
+    );
+  }
+  throw new Error("联盟佣金本轮未取到（导出无下载地址、数据接口未定位），沿用上一期文件，报表会标注");
 }
 
 // ---------------- 任务：广告（只拉已完成的任务） ----------------
