@@ -312,8 +312,8 @@ def compute(data: RawData, params: Params, switches: Switches,
 
     if no_pid:
         issues.append(
-            f"{no_pid} 行订单无法确定商品归属，已归入「无ID」照常计入合计"
-            f"（卖家编码可在多条链接间复用，只有 SKU ID 唯一）"
+            f"{no_pid} 行订单在所有映射来源里都找不到商品归属，已归入「无ID」照常计入合计。"
+            f"处理办法：更新主工作簿的「链接资料」表（覆盖当前全量），或重跑一次商品SKU取数"
         )
     if missing_cost_lines:
         issues.append(f"{missing_cost_lines} 行订单缺成本，按 0 计，这些行的净利会偏高")
