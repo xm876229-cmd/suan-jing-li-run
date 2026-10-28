@@ -37,9 +37,39 @@ COPY_ITEMS = ["jingli.exe", "_internal", "config", "extension", "docs",
 KEEP_DIRS = ["data", "output"]
 
 
-def install_dir() -> Path:
+def default_install_dir() -> Path:
+    """默认安装位置：当前用户目录下，按用户安装，不需要管理员权限。"""
     base = os.environ.get("LOCALAPPDATA") or str(Path.home())
     return Path(base) / APP_ID
+
+
+def read_registered_dir() -> Path | None:
+    """从卸载信息里读出实际安装位置。
+
+    允许用户装到任意盘（D:\\软件\\净利助手 之类），所以不能假定目录名固定。
+    """
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
+            val, _ = winreg.QueryValueEx(k, "InstallLocation")
+            p = Path(str(val))
+            return p if str(val).strip() else None
+    except OSError:
+        return None
+
+
+def install_dir() -> Path:
+    """当前这台机器上的安装目录。
+
+    优先级：注册表登记 > 程序自己所在目录（打包运行时）> 默认位置。
+    打包后 exe 永远知道自己装在哪，这条兜底保证自启、快捷方式不会指错地方。
+    """
+    reg = read_registered_dir()
+    if reg is not None:
+        return reg
+    from src import paths
+    if paths.is_frozen():
+        return paths.ROOT
+    return default_install_dir()
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -133,14 +163,18 @@ def write_launcher(dest: Path) -> Path:
 
     计划任务直接跑控制台程序会闪黑窗口；VBS 的 Run(cmd, 0, False)
     是窗口样式 0 = 隐藏，这是最稳的做法，且不需要额外组件。
-    内容保持纯 ASCII，避免 wscript 按 ANSI 读取时把中文路径读坏。
+
+    VBS 内容刻意不含任何具体路径：用 WScript.ScriptFullName 反推自己所在目录。
+    这样无论装在 C 盘还是 D 盘、路径有没有中文和空格，都照样能用
+    （之前把路径写死进 VBS，路径一变自启就指向不存在的文件）。
     """
     vbs = dest / VBS_NAME
-    exe = dest / EXE_NAME
     content = (
+        'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
         'Set sh = CreateObject("WScript.Shell")\r\n'
-        f'sh.CurrentDirectory = "{dest}"\r\n'
-        f'sh.Run """{exe}"" serve", 0, False\r\n'
+        "dir = fso.GetParentFolderName(WScript.ScriptFullName)\r\n"
+        "sh.CurrentDirectory = dir\r\n"
+        'sh.Run """" & dir & "\\jingli.exe"" serve", 0, False\r\n'
     )
     vbs.write_text(content, encoding="ascii", errors="replace")
     return vbs
@@ -187,7 +221,7 @@ def write_uninstall_entry(dest: Path) -> None:
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
             winreg.SetValueEx(k, "DisplayName", 0, winreg.REG_SZ, APP_NAME)
-            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.7.0")
+            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.8.0")
             winreg.SetValueEx(k, "Publisher", 0, winreg.REG_SZ, "净利助手")
             winreg.SetValueEx(k, "InstallLocation", 0, winreg.REG_SZ, str(dest))
             winreg.SetValueEx(k, "DisplayIcon", 0, winreg.REG_SZ, str(exe))
@@ -207,10 +241,24 @@ def remove_uninstall_entry() -> None:
 
 # ---------------- 总入口 ----------------
 
+def target_dir() -> Path:
+    """本次要安装/卸载到哪个目录。
+
+    打包运行时就是 exe 自己所在的目录——用户把安装包装到 D 盘某处，
+    运行的就是那份 exe，自启和快捷方式必须以它为准，不能去问注册表
+    （否则「之前装在 A、现在装到 B」会变成给 A 建快捷方式）。
+    源码模式下才退回默认位置。
+    """
+    from src import paths
+    if paths.is_frozen():
+        return paths.ROOT
+    return default_install_dir()
+
+
 def install(dest: Path | None = None, source: Path | None = None,
             autostart: bool = True, log=print) -> tuple[bool, list[str]]:
     """安装或升级。source=None 表示文件已经在 dest 里（安装包解压后直接调）。"""
-    dest = Path(dest or install_dir())
+    dest = Path(dest or target_dir())
     msgs: list[str] = []
 
     def note(s: str) -> None:
@@ -248,7 +296,7 @@ def install(dest: Path | None = None, source: Path | None = None,
 
 
 def uninstall(dest: Path | None = None, log=print, remove_files: bool = True) -> tuple[bool, list[str]]:
-    dest = Path(dest or install_dir())
+    dest = Path(dest or target_dir())
     msgs: list[str] = []
 
     def note(s: str) -> None:

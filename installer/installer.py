@@ -33,8 +33,46 @@ def bundle_dir() -> Path:
 
 
 def install_dir() -> Path:
+    """默认安装位置；已装过就沿用注册表里登记的位置（原地升级）。"""
+    reg = None
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP_ID}",
+        ) as k:
+            val, _ = winreg.QueryValueEx(k, "InstallLocation")
+            if str(val).strip():
+                reg = Path(str(val))
+    except OSError:
+        reg = None
+    if reg is not None:
+        return reg
     base = os.environ.get("LOCALAPPDATA") or str(Path.home())
     return Path(base) / APP_ID
+
+
+def read_arg_dir(argv: list[str]) -> Path | None:
+    """支持 `--dir D:\\某处` 指定安装位置（静默安装时用）。"""
+    for i, a in enumerate(argv):
+        low = a.lower()
+        if low in ("--dir", "/dir", "-d") and i + 1 < len(argv):
+            return Path(argv[i + 1]).expanduser()
+        if low.startswith("--dir="):
+            return Path(a.split("=", 1)[1]).expanduser()
+    return None
+
+
+def check_writable(dest: Path) -> tuple[bool, str]:
+    """确认目标目录能写。装在只读位置（如 Program Files 无权限）要提前说清。"""
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        probe = dest / ".write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True, ""
+    except OSError as e:
+        return False, str(e)
 
 
 def human(n: int) -> str:
@@ -77,14 +115,35 @@ def main() -> int:
         print(f"\n安装包损坏：找不到 app.zip（{zip_path}）")
         return 1
 
-    dest = install_dir()
-    exists = (dest / EXE_NAME).exists()
     silent = any(a.lower() in ("--silent", "/s", "-s") for a in sys.argv[1:])
+    arg_dir = read_arg_dir(sys.argv[1:])
 
-    print(f"\n安装位置：{dest}")
-    if exists:
-        print("检测到已安装，本次为「升级」：程序文件会替换，data 与 output 保持不变。")
-    print("\n安装过程不需要管理员权限，也不会改动系统设置之外的东西。")
+    # 默认位置：已装过就沿用原位置（升级），否则用用户目录
+    dest = arg_dir or install_dir()
+    exists = (dest / EXE_NAME).exists()
+
+    if not silent:
+        print(f"\n默认安装位置：{dest}")
+        if exists:
+            print("该位置已有安装，本次为「升级」：程序文件会替换，data 与 output 保持不变。")
+        print("直接回车用默认位置，也可以输入其他路径（支持把文件夹拖进本窗口）。")
+        try:
+            ans = input("\n安装位置：").strip()
+        except (EOFError, KeyboardInterrupt):
+            return 1
+        if ans:
+            dest = Path(ans.strip().strip('"').strip("'")).expanduser()
+
+    dest = dest.absolute()
+    ok, why = check_writable(dest)
+    if not ok:
+        print(f"\n安装失败：{dest}")
+        print(f"  原因：{why}")
+        print("  换一个位置，例如 D:\\净利助手，或用默认位置。")
+        return 1
+
+    print(f"\n将安装到：{dest}")
+    print("安装过程不需要管理员权限，也不会改动系统设置之外的东西。")
 
     if not silent:
         try:
