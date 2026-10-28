@@ -76,6 +76,17 @@ def _json(handler: BaseHTTPRequestHandler, obj, code: int = 200) -> None:
     handler.wfile.write(body)
 
 
+def _html(handler: BaseHTTPRequestHandler, text: str, code: int = 200) -> None:
+    body = text.encode("utf-8")
+    handler.send_response(code)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    # 配置页要读本机数据，禁掉缓存，免得改完还看到旧的
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 def normalize(url: str) -> str:
     """把 URL 里的查询参数值抹掉，只留路径和参数名，便于把同一接口聚到一起。"""
     try:
@@ -197,11 +208,25 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": True, "job": job})
         elif self.path.startswith("/stores"):
             _json(self, store_list())
+        elif self.path.startswith("/config"):
+            # 参数配置页：在浏览器里勾选每个参数算哪些订单类别
+            try:
+                from bridge import config_page
+                _html(self, config_page.render_html())
+            except Exception as e:  # noqa: BLE001
+                _html(self, f"<h3>配置页加载失败</h3><pre>{e}</pre>", 500)
+        elif self.path.startswith("/api/config"):
+            from bridge import config_page
+            _json(self, config_page.read_config())
         else:
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
     def do_POST(self):
-        if self.path.startswith("/capture"):
+        if self.path.startswith("/api/config/preview"):
+            self._post_config(preview=True)
+        elif self.path.startswith("/api/config/save"):
+            self._post_config(preview=False)
+        elif self.path.startswith("/capture"):
             self._post_capture()
         elif self.path.startswith("/upload"):
             self._post_upload()
@@ -250,6 +275,31 @@ class Handler(BaseHTTPRequestHandler):
                 line = line.encode("utf-8", "replace").decode("utf-8", "replace")
                 fh.write(line + "\n")
         _json(self, {"ok": True, "saved": len(batch), "file": f.name})
+
+    def _post_config(self, preview: bool):
+        """参数表试算 / 保存。"""
+        from bridge import config_page
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"invalid payload: {e}"}, 400)
+            return
+
+        params = payload.get("params")
+        if not isinstance(params, list):
+            _json(self, {"ok": False, "error": "params 必须是列表"}, 400)
+            return
+
+        if preview:
+            _json(self, config_page.preview(params, payload.get("formulas")))
+            return
+
+        try:
+            _json(self, config_page.save_config(params, payload.get("formulas") or {}))
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
 
     def _post_upload(self):
         """扩展把下载到的导出文件回传到这里。

@@ -396,6 +396,38 @@ def _open(p: Path) -> None:
         print(f"打开失败：{e}")
 
 
+def _menu_config() -> None:
+    """打开参数配置页。
+
+    配置页是桥提供的本地网页（http://127.0.0.1:8765/config）。
+    放浏览器里而不是做成独立窗口，是因为配口径时最需要的是
+    「改一个勾选、立刻看到净利差多少」，网页能做到即时试算，
+    而且不用额外装任何东西。
+    """
+    if not bridge_running():
+        print("\n取数桥没在跑，先启动它…")
+        if not start_bridge_hidden():
+            print("启动失败。先用「诊断信息」看看 8765 端口是不是被占了。")
+            return
+        import time
+        for _ in range(20):
+            time.sleep(0.5)
+            if bridge_running():
+                break
+        else:
+            print("桥启动超时，请稍后再试。")
+            return
+
+    url = "http://127.0.0.1:8765/config"
+    print(f"\n在浏览器里打开：{url}")
+    print("  每个参数一行，勾选它算哪些订单类别；")
+    print("  改完点「试算」立刻看到净利变化，满意再点「保存配置」。")
+    try:
+        os.startfile(url)  # noqa: S606
+    except Exception as e:  # noqa: BLE001
+        print(f"自动打开失败（{e}），请手动把上面的地址粘到浏览器里。")
+
+
 def menu() -> int:
     paths.ensure_dirs()
     while True:
@@ -410,13 +442,14 @@ def menu() -> int:
         print("=" * 52)
         print("  1. 启动取数桥（后台运行，不占窗口）")
         print("  2. 立即核算（用已有文件出报表）")
-        print("  3. 导入成本表")
-        print("  4. 导入映射表")
-        print("  5. 打开数据目录")
-        print("  6. 打开报表目录")
-        print("  7. 开 / 关开机自启")
-        print("  8. 加载浏览器扩展说明")
-        print("  9. 诊断信息")
+        print("  3. 参数配置（每项费用算哪些订单，勾选即可）")
+        print("  4. 导入成本表")
+        print("  5. 导入映射表")
+        print("  6. 打开数据目录")
+        print("  7. 打开报表目录")
+        print("  8. 开 / 关开机自启")
+        print("  9. 加载浏览器扩展说明")
+        print(" 10. 诊断信息")
         print("  0. 退出")
         print("-" * 52)
         choice = _ask("请选择", "0")
@@ -432,22 +465,25 @@ def menu() -> int:
                 pass
             _pause()
         elif choice == "3":
+            _menu_config()
+            _pause()
+        elif choice == "4":
             try:
                 _menu_import_costs()
             except Exception as e:
                 print(f"\n导入失败：{e}")
             _pause()
-        elif choice == "4":
+        elif choice == "5":
             try:
                 _menu_import_mapping()
             except Exception as e:
                 print(f"\n导入失败：{e}")
             _pause()
-        elif choice == "5":
-            _open(paths.DATA)
         elif choice == "6":
-            _open(paths.OUTPUT)
+            _open(paths.DATA)
         elif choice == "7":
+            _open(paths.OUTPUT)
+        elif choice == "8":
             if setup_core.task_exists():
                 ok, msg = setup_core.unregister_autostart()
                 print(("已关闭开机自启" if ok else "关闭失败") + (f"：{msg}" if msg else ""))
@@ -455,10 +491,10 @@ def menu() -> int:
                 ok, msg = setup_core.register_autostart(setup_core.target_dir())
                 print(("已开启开机自启" if ok else "开启失败") + f"：{msg}")
             _pause()
-        elif choice == "8":
+        elif choice == "9":
             _menu_extension_help()
             _pause()
-        elif choice == "9":
+        elif choice in ("10", "diagnose"):
             cmd_doctor()
             _pause()
         elif choice == "0":
