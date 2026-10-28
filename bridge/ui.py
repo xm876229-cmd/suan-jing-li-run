@@ -295,7 +295,23 @@ _TEMPLATE = r"""<!DOCTYPE html>
     background:var(--accent-soft);color:var(--accent);margin-left:6px;vertical-align:1px}
   .tag.warn{background:var(--warn-soft);color:var(--warn)}
   .tag.gray{background:var(--line-soft);color:var(--text-3)}
-  .tools{display:flex;gap:8px;flex-wrap:wrap}
+  .tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  /* 计算参数页：可点选的变量表 */
+  .vars{display:flex;flex-wrap:wrap;gap:8px}
+  .vars .v{display:flex;align-items:baseline;gap:7px;padding:7px 12px;border:1px solid var(--line);
+    border-radius:9px;background:#fcfcfa;cursor:pointer;transition:.12s}
+  .vars .v:hover{border-color:var(--accent);background:var(--accent-soft)}
+  .vars .v code{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--accent)}
+  .vars .v span{font-size:11.5px;color:var(--text-3)}
+  .mini-btn{display:inline-block;padding:5px 11px;font-size:12.5px;border-radius:8px;cursor:pointer;
+    border:1px solid var(--line);background:var(--panel);color:var(--text)}
+  .mini-btn:hover{border-color:var(--accent);color:var(--accent)}
+  .stats-line{display:flex;gap:26px;flex-wrap:wrap}
+  .stats-line .it{font-size:13px;color:var(--text-2)}
+  .stats-line .it b{display:block;font-size:20px;font-weight:500;color:var(--text);margin-top:3px}
+  .cost-miss{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+  .cost-miss span{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;padding:3px 8px;
+    border-radius:6px;background:var(--warn-soft);color:var(--warn)}
   .diff{display:none;margin-top:20px;border:1px solid #cfe8de;background:#fbfefc;
     border-radius:12px;overflow:hidden}
   .diff.show{display:block}
@@ -373,17 +389,27 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <path d="M6 14v-3.5h4V14" stroke-linejoin="round"/>
         </svg><span>店铺</span></a>
       <div class="gap"></div>
-      <a href="#/params" data-view="params">
+      <a href="#/costs" data-view="costs">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <path d="M2 4.5h12M2 11.5h12" stroke-linecap="round"/>
-          <circle cx="6" cy="4.5" r="1.8" fill="var(--panel)"/><circle cx="10.5" cy="11.5" r="1.8" fill="var(--panel)"/>
-        </svg><span>参数配置</span></a>
+          <path d="M2.5 4.2L8 2l5.5 2.2v7.6L8 14l-5.5-2.2z" stroke-linejoin="round"/>
+          <path d="M2.5 4.2L8 6.5l5.5-2.3M8 6.5V14" stroke-linejoin="round"/>
+        </svg><span>成本表</span></a>
       <a href="#/rates" data-view="rates">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <circle cx="8" cy="8" r="6"/>
           <path d="M8 4.6v7M9.8 6.2c0-.8-.8-1.2-1.8-1.2s-1.7.5-1.7 1.2c0 1.8 3.5.9 3.5 2.7 0 .8-.8 1.2-1.8 1.2s-1.8-.4-1.8-1.2"
                 stroke-linecap="round"/>
         </svg><span>费率</span></a>
+      <a href="#/params" data-view="params">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M2 4.5h12M2 11.5h12" stroke-linecap="round"/>
+          <circle cx="6" cy="4.5" r="1.8" fill="var(--panel)"/><circle cx="10.5" cy="11.5" r="1.8" fill="var(--panel)"/>
+        </svg><span>计算参数</span></a>
+      <a href="#/mapping" data-view="mapping">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M2 5h5M2 11h5M9 5h5M9 11h5" stroke-linecap="round"/>
+          <path d="M7 5l2 6M9 5L7 11" stroke-linecap="round"/>
+        </svg><span>列映射</span></a>
       <a href="#/settings" data-view="settings">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <circle cx="8" cy="8" r="2.2"/>
@@ -396,7 +422,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.14.0</span></div>
+      <div class="row"><span>版本</span><span>0.15.0</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -457,26 +483,43 @@ _TEMPLATE = r"""<!DOCTYPE html>
     </section>
 
     <section class="page" id="view-params" hidden>
-      <div class="head"><h1>参数配置</h1>
-        <p>每个参数自己选算哪些订单类别。勾上=计入，取消=不计入。改完先试算，满意再保存。</p></div>
-      <div class="tabs" id="ptabs">
-        <button data-tab="basic" class="on">参数表</button>
-        <button data-tab="mapping">列映射</button>
-        <button data-tab="formulas">计算公式</button>
-      </div>
+      <div class="head"><h1>计算参数</h1>
+        <p>所有参与核算的参数都在这里，每一项都能直接写公式。公式里引用的是列映射的字段名，
+          所以平台改表头、换国家，公式都不用重写。</p></div>
 
-      <div id="tab-basic">
       <div class="card"><h2>参数表
-        <select id="pscope" style="font-size:12.5px;padding:4px 9px;min-width:170px;margin-left:6px"></select>
-        <span class="hint" id="pscope-hint">选中哪个国家就编哪套</span></h2>
+        <select id="pscope" style="font-size:12.5px;padding:4px 9px;min-width:180px;margin-left:6px"></select>
+        <span class="hint" id="pscope-hint">每个国家一套，互不影响</span></h2>
         <div class="body tight"><div class="tbl-wrap">
           <table class="cfg-tbl" id="ptbl"><thead><tr>
-            <th style="min-width:140px">参数</th><th style="width:110px">基数</th><th style="width:110px">费率</th>
+            <th style="min-width:150px">参数</th><th style="min-width:280px">计算公式</th>
             <th class="kcell">正常</th><th class="kcell">已取消</th><th class="kcell">退货退款</th>
             <th class="kcell">0元样品</th><th class="kcell">未付款</th>
             <th class="kcell" style="width:48px">启用</th><th style="width:40px"></th>
           </tr></thead><tbody id="pbody"></tbody></table>
-        </div></div></div>
+        </div></div>
+      </div>
+
+      <div class="card"><h2>公式里能写什么<span class="hint">点一下就插到刚编辑的公式里</span></h2>
+        <div class="body">
+          <div class="vars" id="vars"></div>
+        </div></div>
+
+      <div class="card"><h2>净利怎么算<span class="hint">这一条也可以改</span></h2>
+        <div class="body tight"><div class="tbl-wrap">
+          <table class="cfg-tbl" id="ftbl"><thead><tr>
+            <th style="width:170px">结果</th><th>公式</th><th style="width:40px"></th>
+          </tr></thead><tbody id="fbody"></tbody></table>
+        </div></div>
+        <div class="body" style="padding-top:0">
+          <p class="muted" style="font-size:12.5px;margin:0">
+            默认 <span class="mono">net = gmv - cost - sum(fees)</span>，其中
+            <span class="mono">fees</span> 是参数表里所有「没有固定列」的参数之和。
+            想改口径直接改这一行，比如只扣平台抽成和发单费。
+          </p>
+        </div>
+      </div>
+
       <div class="card"><h2>操作<span class="hint">试算不会保存</span></h2><div class="body">
         <div class="tools">
           <button class="primary" id="btn-preview">试算看净利变化</button>
@@ -484,58 +527,69 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <button class="mini" id="btn-all-on">全部类别都勾上</button>
           <button class="mini" id="btn-all-off">全部类别都取消</button>
           <button class="mini" id="btn-add">＋ 新增参数</button></div>
-        <p class="muted" style="font-size:12.5px;margin:14px 0 0">
-          费率可以写数字（如 <b>2</b> 表示每单 2 元），也可以写 <b>params.xxx</b> 引用国家费率；留空表示原样取基数。</p>
         <div class="diff" id="diff"><h3>试算结果</h3><div id="diff-body"></div></div>
       </div></div>
-      </div>
+    </section>
 
-      <div id="tab-mapping" hidden>
-        <div class="card"><h2>列映射<span class="hint" id="map-hint"></span></h2>
-          <div class="body tight"><div class="tbl-wrap">
-            <table class="cfg-tbl" id="mtbl"><thead><tr>
-              <th style="width:150px">逻辑字段</th><th style="width:130px">显示名</th>
-              <th>候选列标题（按顺序取第一个能对上的）</th>
-            </tr></thead><tbody id="mbody"></tbody></table>
-          </div></div>
-        </div>
-        <div class="card"><h2>说明</h2><div class="body">
-          <p class="muted" style="font-size:12.5px;margin:0">
-            平台导出的表头会变（改版、多语言、中英文混用）。这里给每个字段配<b>任意多个</b>候选标题，
-            按顺序取第一个能对上的——第一个找不到就试第二个，直到找到为止。<br>
-            匹配时会忽略空格、下划线、大小写和全角半角，所以
-            <span class="mono">Product ID</span> / <span class="mono">product_id</span> /
-            <span class="mono">商品ID</span> 通常都能对上同一个字段。
-          </p>
-          <div class="tools" style="margin-top:16px">
-            <button class="primary" id="btn-map-save">保存列映射</button>
-          </div>
+    <section class="page" id="view-mapping" hidden>
+      <div class="head"><h1>列映射</h1>
+        <p>把平台导出的列标题对到程序认识的字段名。计算参数里的公式写的就是这些字段名。</p></div>
+      <div class="card"><h2>字段对照<span class="hint" id="map-hint"></span></h2>
+        <div class="body tight"><div class="tbl-wrap">
+          <table class="cfg-tbl" id="mtbl"><thead><tr>
+            <th style="width:150px">逻辑字段</th><th style="width:130px">显示名</th>
+            <th>候选列标题（按顺序取第一个能对上的）</th>
+          </tr></thead><tbody id="mbody"></tbody></table>
         </div></div>
       </div>
-
-      <div id="tab-formulas" hidden>
-        <div class="card"><h2>计算公式<span class="hint">改这里 = 改算法</span></h2>
-          <div class="body tight"><div class="tbl-wrap">
-            <table class="cfg-tbl" id="ftbl"><thead><tr>
-              <th style="width:170px">结果</th><th>公式</th><th style="width:40px"></th>
-            </tr></thead><tbody id="fbody"></tbody></table>
-          </div></div>
+      <div class="card"><h2>说明</h2><div class="body">
+        <p class="muted" style="font-size:12.5px;margin:0">
+          平台导出的表头会变（改版、多语言、中英文混用）。这里给每个字段配<b>任意多个</b>候选标题，
+          按顺序取第一个能对上的——第一个找不到就试第二个，直到找到为止。<br>
+          匹配时会忽略空格、下划线、大小写和全角半角，所以
+          <span class="mono">Product ID</span> / <span class="mono">product_id</span> /
+          <span class="mono">商品ID</span> 通常都能对上同一个字段。<br>
+          改了映射不用改公式：公式里用的是左边这些字段名。
+        </p>
+        <div class="tools" style="margin-top:16px">
+          <button class="primary" id="btn-map-save">保存列映射</button>
         </div>
-        <div class="card"><h2>说明</h2><div class="body">
-          <p class="muted" style="font-size:12.5px;margin:0 0 10px">
-            可用变量：参数表里每一项的 <span class="mono">id</span>（如
-            <span class="mono">gmv cost dispatch platform_commission</span> …）、
-            <span class="mono">params.字段名</span>（国家费率）、
-            以及已经算出来的结果（如 <span class="mono">gross_profit total_fees</span>）。<br>
-            可用函数：<span class="mono">sum() abs() min() max() round()</span>，
-            支持 <span class="mono">+ - * /</span> 和括号。<br>
-            改完点「保存公式」，下次核算就按新算法算。改错了不会崩，报表里会提示哪条公式有问题。
-          </p>
-          <div class="tools">
-            <button class="primary" id="btn-fml-save">保存公式</button>
-            <button class="mini" id="btn-fml-add">＋ 新增公式</button>
+      </div></div>
+    </section>
+
+    <section class="page" id="view-costs" hidden>
+      <div class="head"><h1>成本表</h1>
+        <p>商品成本 = 件数 × 该编码的成本。成本不常变，导一次就行，新增商品时补一条。</p></div>
+
+      <div class="card"><h2>概况<span class="hint" id="cost-hint"></span></h2><div class="body">
+        <div class="stats-line" id="cost-stats"></div>
+        <div class="tools" style="margin-top:14px">
+          <button id="btn-cost-check">拿订单核一遍</button>
+          <label class="mini-btn">导入 Excel / CSV
+            <input type="file" id="cost-file" accept=".xlsx,.xls,.csv" hidden></label>
+          <button class="mini" id="btn-cost-add">＋ 新增编码</button>
+          <button class="primary" id="btn-cost-save">保存成本表</button>
+        </div>
+        <div class="note" id="cost-note"></div>
+        <div id="cost-check"></div>
+      </div></div>
+
+      <div class="card"><h2>所有编码<span class="hint" id="cost-list-hint"></span></h2>
+        <div class="body tight">
+          <div style="padding:0 0 10px"><input type="text" id="cost-search" placeholder="搜编码，也可直接翻页"
+            style="width:280px"></div>
+          <div class="tbl-wrap">
+            <table class="cfg-tbl" id="ctbl"><thead><tr>
+              <th style="width:44%">商品编码</th><th style="width:22%">成本（人民币）</th>
+              <th style="width:26%">最后更新</th><th style="width:8%"></th>
+            </tr></thead><tbody id="cbody"></tbody></table>
           </div>
-        </div></div>
+          <div class="tools" style="padding-top:12px">
+            <button class="mini" id="btn-cost-prev">上一页</button>
+            <span class="muted" id="cost-page" style="font-size:12.5px"></span>
+            <button class="mini" id="btn-cost-next">下一页</button>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -633,6 +687,8 @@ function go(view){
   if(view === 'reports') loadReports();
   if(view === 'params') loadParams();
   if(view === 'rates') loadRates();
+  if(view === 'mapping') loadMapping();
+  if(view === 'costs') loadCosts();
   if(view === 'settings') loadSettings();
   if(view === 'debug') loadDebug();
   if(view === 'stores') loadStores();
@@ -873,17 +929,7 @@ async function renameStore(shopId, btn){
   btn.disabled = false;
 }
 
-/* ---------- 参数页的三个标签 ---------- */
-document.querySelectorAll('#ptabs button').forEach(b => b.onclick = () => {
-  document.querySelectorAll('#ptabs button').forEach(x => x.classList.toggle('on', x === b));
-  ['basic', 'mapping', 'formulas'].forEach(t => {
-    const el = document.getElementById('tab-' + t);
-    if(el) el.hidden = (t !== b.dataset.tab);
-  });
-  if(b.dataset.tab === 'mapping') loadMapping();
-  if(b.dataset.tab === 'formulas') loadFormulas();
-});
-
+/* ---------- 列映射页 ---------- */
 let mapFields = [];
 
 async function loadMapping(){
@@ -937,17 +983,176 @@ $('#btn-map-save').onclick = async () => {
 };
 
 let fmls = {};
+let scope = "";                      // "" = 通用；国家名 = 这个国家单独一套
+let paramsByScope = { "": [] };      // 每个范围一张参数表
+let paramsLoaded = false;
+let lastFormulaInput = null;         // 点变量时插到这个输入框
 
-async function loadFormulas(){
+const FIELD_VARS = [
+  {k: 'subtotal_before', t: '折扣前小计'},
+  {k: 'seller_discount', t: '卖家折扣'},
+  {k: 'order_amount', t: '买家实付'},
+  {k: 'refund_amount', t: '退款金额'},
+  {k: 'qty', t: '件数'},
+  {k: 'gmv', t: 'GMV = 折扣前小计 − 卖家折扣'},
+  {k: 'cost', t: '商品成本 = 件数 × 成本单价'},
+  {k: 'cost_unit', t: '平均成本单价'},
+  {k: 'orders', t: '订单数'},
+  {k: 'commission', t: '达人佣金（整期）'},
+  {k: 'ads', t: '广告花费（整期）'},
+];
+
+const normParams = list => (list || []).map(p => ({
+  ...p,
+  expr: p.expr !== undefined && p.expr !== null ? String(p.expr) : '',
+  kinds: (p.kinds === undefined || p.kinds === null) ? null : [...p.kinds]
+}));
+
+async function loadParams(){
+  if(paramsLoaded){
+    await buildScopeSelect();
+    rows = paramsByScope[scope] || paramsByScope[""] || [];
+    renderParams(); renderFormulas(); renderVars();
+    return;
+  }
   try{
     const j = await (await fetch('/api/config')).json();
     fmls = j.formulas || {};
-    // 参数也要一起拿到，保存公式时要原样带回去，否则会被清空
-    if(!rows.length && (j.params || []).length){
-      rows = j.params.map(p => ({...p, kinds: (p.kinds === undefined || p.kinds === null) ? null : [...p.kinds]}));
+    paramsByScope = { "": normParams(j.params) };
+    Object.entries(j.by_country || {}).forEach(([k, v]) => {
+      paramsByScope[k] = normParams(v.params);
+    });
+    if(!paramsByScope[scope]) scope = "";
+    rows = paramsByScope[scope] || paramsByScope[""] || [];
+    paramsLoaded = true;
+    await buildScopeSelect();
+    renderParams(); renderFormulas(); renderVars(); loadFormulaVars();
+  }catch(e){ toast('读取配置失败'); }
+}
+
+async function buildScopeSelect(){
+  try{
+    const r = await (await fetch('/api/rates')).json();
+    const sel = $('#pscope');
+    sel.innerHTML = '<option value="">通用（没单独设的国家都用这套）</option>';
+    Object.keys(r.countries || {}).forEach(c => {
+      const o = document.createElement('option');
+      o.value = c;
+      // 已经单独设过参数的国家打个标记，一眼能看出哪几个国家跟通用不一样
+      o.textContent = c + (paramsByScope[c] ? ' · 已单独设置' : '');
+      sel.append(o);
+    });
+    sel.value = scope;
+    sel.onchange = () => switchScope(sel.value);
+    $('#pscope-hint').textContent = scope
+      ? ('正在编辑「' + scope + '」专用的参数：这个国家的店铺只按这套算')
+      : '每个国家一套，互不影响';
+  }catch(e){}
+}
+
+function switchScope(next){
+  if(rows.length) paramsByScope[scope] = paramPayload();
+  scope = next || "";
+  if(!paramsByScope[scope]){
+    // 第一次给某个国家单独设：从通用那套复制一份，不用从零加
+    paramsByScope[scope] = JSON.parse(JSON.stringify(paramsByScope[""] || []));
+  }
+  rows = paramsByScope[scope];
+  renderParams(); buildScopeSelect();
+  toast(scope ? ('已切到「' + scope + '」，改完点保存') : '已切回通用参数');
+}
+
+function renderParams(){
+  const body = $('#pbody');
+  body.innerHTML = rows.map((r, i) => {
+    const kinds = r.kinds;
+    const kc = KINDS.map(k => {
+      const on = kinds === null ? true : (kinds || []).includes(k.id);
+      return `<td class="kcell"><input type="checkbox" data-k="${i}:${k.id}" ${on ? 'checked' : ''}></td>`;
+    }).join('');
+    return `<tr class="${r.enabled === false ? 'off' : ''}">
+      <td>
+        <input type="text" data-label="${i}" value="${esc(r.label || r.id)}">
+        <div class="pid">${esc(r.id)}${r.role ? '<span class="tag gray">报表列</span>' : ''}${
+          kinds === null ? '<span class="tag">全部</span>'
+          : (kinds.length === 0 ? '<span class="tag warn">不算</span>' : '')}</div>
+      </td>
+      <td><input type="text" data-expr="${i}" value="${esc(r.expr || '')}"
+            placeholder="如 gmv * params.platform_commission"
+            style="font-family:ui-monospace,Consolas,monospace"></td>
+      ${kc}
+      <td class="kcell"><input type="checkbox" data-on="${i}" ${r.enabled !== false ? 'checked' : ''}
+            style="width:15px;height:15px;accent-color:var(--accent);cursor:pointer"></td>
+      <td class="kcell"><button class="mini" data-del="${i}"
+            style="padding:3px 7px;font-size:12px;color:var(--warn)">删</button></td>
+    </tr>`;
+  }).join('');
+
+  body.querySelectorAll('[data-label]').forEach(inp =>
+    inp.oninput = () => { rows[Number(inp.dataset.label)].label = inp.value; });
+  body.querySelectorAll('[data-expr]').forEach(inp => {
+    inp.oninput = () => { rows[Number(inp.dataset.expr)].expr = inp.value; };
+    inp.onfocus = () => { lastFormulaInput = inp; };
+  });
+  body.querySelectorAll('[data-k]').forEach(cb => cb.onchange = () => {
+    const [i, k] = cb.dataset.k.split(':');
+    const r = rows[Number(i)];
+    if(r.kinds === null) r.kinds = KINDS.map(x => x.id);
+    const st = new Set(r.kinds);
+    cb.checked ? st.add(k) : st.delete(k);
+    r.kinds = KINDS.map(x => x.id).filter(x => st.has(x));
+    renderParams();
+  });
+  body.querySelectorAll('[data-on]').forEach(cb => cb.onchange = () => {
+    rows[Number(cb.dataset.on)].enabled = cb.checked;
+    renderParams();
+  });
+  body.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
+    const r = rows[Number(b.dataset.del)];
+    if(confirm('删掉「' + (r.label || r.id) + '」这一项？净利公式里如果引用了它，会算不出来')){
+      rows.splice(Number(b.dataset.del), 1); renderParams();
     }
-    renderFormulas();
-  }catch(e){ toast('读取公式失败'); }
+  });
+}
+
+/* 可用变量：字段、派生量、国家费率、其它参数，点一下插到公式里 */
+let varExtra = [];
+async function loadFormulaVars(){
+  try{
+    const j = await (await fetch('/api/rates')).json();
+    const set = new Set();
+    Object.values(j.countries || {}).forEach(c => {
+      Object.keys(c).forEach(k => {
+        if(RATE_META.includes(k) || k.startsWith('_')) return;
+        if(c[k] !== null && typeof c[k] === 'object') return;
+        set.add(k);
+      });
+    });
+    varExtra = [...set];
+  }catch(e){ varExtra = []; }
+  renderVars();
+}
+
+function renderVars(){
+  const box = $('#vars');
+  if(!box) return;
+  const chips = FIELD_VARS.map(v =>
+    `<div class="v" data-ins="${esc(v.k)}"><code>${esc(v.k)}</code><span>${esc(v.t)}</span></div>`);
+  const rateChips = varExtra.map(k =>
+    `<div class="v" data-ins="params.${esc(k)}"><code>params.${esc(k)}</code><span>${esc(RATE_LABELS[k] || k)}</span></div>`);
+  const paramChips = (rows || []).filter(r => r.id).map(r =>
+    `<div class="v" data-ins="param.${esc(r.id)}"><code>param.${esc(r.id)}</code><span>${esc(r.label || r.id)} 的结果</span></div>`);
+  box.innerHTML = chips.join('') + rateChips.join('') + paramChips.join('');
+  box.querySelectorAll('[data-ins]').forEach(el => el.onclick = () => {
+    const txt = el.dataset.ins;
+    const inp = lastFormulaInput || document.querySelector('#pbody [data-expr]');
+    if(!inp) return;
+    const s = inp.selectionStart ?? inp.value.length, e = inp.selectionEnd ?? s;
+    inp.value = inp.value.slice(0, s) + txt + inp.value.slice(e);
+    inp.focus();
+    inp.selectionStart = inp.selectionEnd = s + txt.length;
+    inp.oninput && inp.oninput();
+  });
 }
 
 function renderFormulas(){
@@ -971,175 +1176,34 @@ function renderFormulas(){
   });
 }
 
-$('#btn-fml-add').onclick = () => {
-  const k = prompt('公式名（英文小写，如 net_rate2）');
-  if(!k) return;
-  if(fmls[k] !== undefined){ toast('这个名字已经有了'); return; }
-  fmls[k] = 'net / gmv';
-  renderFormulas();
-};
-
-$('#btn-fml-save').onclick = async () => {
-  try{
-    if(!rows.length) await loadParams();
-    const r = await fetch('/api/config/save', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({params: paramsByScope[""] || paramPayload(),
-                            by_country: collectByCountry(), formulas: fmls})});
-    const j = await r.json();
-    toast(j.ok ? '公式已保存，下次核算按新算法算' : ('保存失败：' + j.error));
-  }catch(e){ toast('出错：' + e.message); }
-};
-
-let scope = "";                       // "" = 通用，其他国家 = 该国定制
-let paramsByScope = { "": [] };       // 每个范围一套参数表
-
-const normParams = list => (list || []).map(p => ({
-  ...p, kinds: (p.kinds === undefined || p.kinds === null) ? null : [...p.kinds]
-}));
-
-async function loadParams(){
-  if(rows.length){
-    await buildScopeSelect();
-    return;
-  }
-  try{
-    const j = await (await fetch('/api/config')).json();
-    formulas = j.formulas || {};
-    paramsByScope[""] = normParams(j.params);
-    Object.entries(j.by_country || {}).forEach(([k, v]) => {
-      paramsByScope[k] = normParams(v.params);
-    });
-    await buildScopeSelect();
-    rows = paramsByScope[""] || [];
-    renderParams();
-  }catch(e){ toast('读取配置失败'); }
-}
-
-async function buildScopeSelect(){
-  try{
-    const r = await (await fetch('/api/rates')).json();
-    const sel = $('#pscope');
-    sel.innerHTML = '<option value="">通用（没定制的国家都用这套）</option>';
-    Object.keys(r.countries || {}).forEach(c => {
-      const o = document.createElement('option');
-      o.value = c;
-      o.textContent = c + (paramsByScope[c] ? ' · 已定制' : '');
-      sel.append(o);
-    });
-    sel.value = scope;
-    sel.onchange = () => switchScope(sel.value);
-    $('#pscope-hint').textContent = scope
-      ? ('正在编辑「' + scope + '」专用的参数')
-      : '选中哪个国家就编哪套';
-  }catch(e){}
-}
-
-function switchScope(next){
-  // 先把当前这套存回内存，再换
-  if(rows.length) paramsByScope[scope] = paramPayload();
-  scope = next || "";
-  if(!paramsByScope[scope]){
-    // 第一次给某个国家定制：从通用那套复制一份，不用从零加
-    paramsByScope[scope] = JSON.parse(JSON.stringify(paramsByScope[""] || []));
-  }
-  rows = paramsByScope[scope];
-  renderParams();
-  buildScopeSelect();
-  toast(scope ? ('已切到「' + scope + '」，改完点保存') : '已切回通用参数');
-}
-
-function renderParams(){
-  const body = $('#pbody'); body.innerHTML = '';
-  rows.forEach((r, i) => {
-    const tr = document.createElement('tr');
-    if(r.enabled === false) tr.classList.add('off');
-    const tdName = document.createElement('td');
-    const inp = document.createElement('input'); inp.type = 'text'; inp.value = r.label || r.id || '';
-    inp.oninput = () => { rows[i].label = inp.value; };
-    const sub = document.createElement('div'); sub.className = 'pid';
-    sub.innerHTML = (r.id || '') + (r.kinds === null ? '<span class="tag">全部</span>'
-      : (r.kinds.length === 0 ? '<span class="tag warn">不算</span>' : ''));
-    tdName.append(inp, sub); tr.append(tdName);
-
-    const tdBase = document.createElement('td');
-    const sel = document.createElement('select');
-    BASES.forEach(b => {
-      const o = document.createElement('option'); o.value = b.id; o.textContent = b.label;
-      if(b.id === (r.base || 'gmv')) o.selected = true; sel.append(o);
-    });
-    sel.onchange = () => { rows[i].base = sel.value; renderParams(); };
-    tdBase.append(sel); tr.append(tdBase);
-
-    const tdRate = document.createElement('td');
-    const rt = document.createElement('input'); rt.type = 'text'; rt.placeholder = '1';
-    rt.value = (r.rate === undefined || r.rate === null) ? '' : String(r.rate);
-    rt.oninput = () => {
-      const v = rt.value.trim();
-      if(v === ''){ delete rows[i].rate; return; }
-      const n = Number(v); rows[i].rate = Number.isFinite(n) ? n : v;
-    };
-    tdRate.append(rt); tr.append(tdRate);
-
-    KINDS.forEach(k => {
-      const td = document.createElement('td'); td.className = 'kcell';
-      const lab = document.createElement('label');
-      const cb = document.createElement('input'); cb.type = 'checkbox';
-      cb.checked = r.kinds === null ? true : (r.kinds || []).includes(k.id);
-      cb.onchange = () => {
-        if(rows[i].kinds === null) rows[i].kinds = KINDS.map(x => x.id);
-        const st = new Set(rows[i].kinds);
-        cb.checked ? st.add(k.id) : st.delete(k.id);
-        rows[i].kinds = KINDS.map(x => x.id).filter(x => st.has(x));
-        renderParams();
-      };
-      lab.append(cb); td.append(lab); tr.append(td);
-    });
-
-    const tdOn = document.createElement('td'); tdOn.className = 'kcell';
-    const en = document.createElement('input'); en.type = 'checkbox'; en.checked = r.enabled !== false;
-    en.style.cssText = 'width:15px;height:15px;accent-color:var(--accent);cursor:pointer';
-    en.onchange = () => { rows[i].enabled = en.checked; renderParams(); };
-    tdOn.append(en); tr.append(tdOn);
-
-    const tdDel = document.createElement('td'); tdDel.className = 'kcell';
-    const del = document.createElement('button'); del.className = 'mini'; del.textContent = '删';
-    del.style.cssText = 'padding:3px 7px;font-size:12px;color:var(--warn)';
-    del.onclick = () => { if(confirm('删掉「' + (r.label || r.id) + '」这一项？')){ rows.splice(i,1); renderParams(); } };
-    tdDel.append(del); tr.append(tdDel);
-    body.append(tr);
-  });
-}
-
-function collectByCountry(){
-  // 保存前先把正在编辑的那套存回内存，别丢了刚改的
-  if(rows.length) paramsByScope[scope] = paramPayload();
-  const out = {};
-  Object.entries(paramsByScope).forEach(([k, v]) => {
-    if(k) out[k] = {params: v};
-  });
-  return out;
-}
-
 function paramPayload(){
   return rows.map(r => {
-    const o = {id:r.id, label:r.label, base:r.base || 'gmv'};
-    if(r.rate !== undefined && r.rate !== null && r.rate !== '') o.rate = r.rate;
+    const o = { id: r.id, label: r.label };
+    if(r.role) o.role = r.role;
+    o.expr = String(r.expr || '').trim();
     if(r.kinds !== null) o.kinds = r.kinds;
     if(r.enabled === false) o.enabled = false;
     return o;
   });
 }
 
+function collectByCountry(){
+  if(rows.length) paramsByScope[scope] = paramPayload();
+  const out = {};
+  Object.entries(paramsByScope).forEach(([k, v]) => { if(k) out[k] = {params: v}; });
+  return out;
+}
+
 $('#btn-all-on').onclick = () => { rows.forEach(r => r.kinds = KINDS.map(k => k.id)); renderParams(); };
 $('#btn-all-off').onclick = () => { rows.forEach(r => r.kinds = []); renderParams(); };
 $('#btn-add').onclick = () => {
-  const id = prompt('参数的英文标识（公式里引用它，建议小写英文，如 order_service）');
+  const id = prompt('参数的英文标识（公式里用它引用这个结果，建议小写英文，如 order_service）');
   if(!id) return;
   if(rows.some(r => r.id === id)){ toast('这个标识已经存在'); return; }
   const label = prompt('显示名称', id) || id;
-  rows.push({id, label, base:'order_count', rate:0, kinds:['normal'], enabled:true});
-  renderParams();
+  // 给个能直接用的样子：每单固定金额。用户改成自己的公式就行。
+  rows.push({id, label, expr: 'orders * 2', kinds: ['normal'], enabled: true});
+  renderParams(); renderVars();
 };
 
 $('#btn-preview').onclick = async () => {
@@ -1149,12 +1213,16 @@ $('#btn-preview').onclick = async () => {
     const r = await fetch('/api/config/preview', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({params: paramPayload(), country: scope,
-                            by_country: collectByCountry()})});
+                            by_country: collectByCountry(), formulas: fmls})});
     const j = await r.json();
     if(!j.ok){ body.innerHTML = '<div class="empty">' + esc(j.error || '试算失败') + '</div>'; return; }
     const b = j.before, a = j.after, d = j.delta;
     const cls = v => v > 0 ? 'up' : (v < 0 ? 'down' : 'muted');
     const sg = v => (v > 0 ? '+' : '') + fmt2(v);
+    const lbl = j.fee_labels || {};
+    const fd = Object.keys(a.fee_detail || {}).map(k =>
+      `<tr><td>${esc(lbl[k] || k)}</td><td>${fmt2((b.fee_detail || {})[k] || 0)}</td>
+        <td>${fmt2(a.fee_detail[k])}</td><td></td></tr>`).join('');
     body.innerHTML = `<table>
       <thead><tr><th style="width:34%"></th><th>当前配置</th><th>改后</th><th style="width:22%">变化</th></tr></thead>
       <tbody>
@@ -1164,6 +1232,7 @@ $('#btn-preview').onclick = async () => {
         <tr><td><b>净利</b></td><td><b>${fmt2(b.net)}</b></td><td><b>${fmt2(a.net)}</b></td>
             <td class="${cls(d.net)}"><b>${sg(d.net)}</b></td></tr>
         <tr><td>净利率</td><td>${b.net_rate}%</td><td>${a.net_rate}%</td><td></td></tr>
+        ${fd}
       </tbody></table>
       <div style="padding:12px 18px;font-size:12.5px;color:var(--text-3)">
         按 ${esc(j.country)} 的费率算。试算不会保存，满意再点「保存配置」。</div>`;
@@ -1176,12 +1245,159 @@ $('#btn-save').onclick = async () => {
     const r = await fetch('/api/config/save', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({params: paramsByScope[""] || paramPayload(),
-                            by_country: byCountry, formulas})});
+                            by_country: byCountry, formulas: fmls})});
     const j = await r.json();
     const n = Object.keys(byCountry).length;
-    toast(j.ok ? ('已保存（通用 + ' + n + ' 个国家定制），下次核算立即生效')
+    if(j.ok) paramsLoaded = false;
+    toast(j.ok ? ('已保存（通用 + ' + n + ' 个国家的单独设置），下次核算立即生效')
                : ('保存失败：' + j.error));
   }catch(e){ toast('保存出错：' + e.message); }
+};
+
+/* ---------- 成本表 ---------- */
+let costItems = [], costFiltered = [], costPageNo = 0;
+const COST_PAGE = 100;
+
+async function loadCosts(){
+  try{
+    const j = await (await fetch('/api/costs')).json();
+    costItems = (j.items || []).map(x => ({...x}));
+    $('#cost-hint').textContent = j.count + ' 个编码';
+    $('#cost-stats').innerHTML =
+      `<div class="it">编码总数<b>${j.count}</b></div>
+       <div class="it">存放位置<b class="mono" style="font-size:12px">${esc(j.path || '')}</b></div>`;
+    $('#cost-note').className = 'note';
+    costPageNo = 0;
+    renderCosts();
+  }catch(e){ toast('读取成本表失败'); }
+}
+
+function renderCosts(){
+  const q = ($('#cost-search').value || '').trim().toLowerCase();
+  costFiltered = q ? costItems.filter(x => x.code.toLowerCase().includes(q)) : costItems;
+  const pages = Math.max(1, Math.ceil(costFiltered.length / COST_PAGE));
+  if(costPageNo >= pages) costPageNo = pages - 1;
+  const slice = costFiltered.slice(costPageNo * COST_PAGE, (costPageNo + 1) * COST_PAGE);
+  $('#cbody').innerHTML = slice.length ? slice.map(it => `<tr>
+      <td><span class="mono" style="font-size:12px">${esc(it.code)}</span></td>
+      <td><input type="text" data-cost="${esc(it.code)}" value="${it.cost}"
+            style="width:110px;font-family:ui-monospace,Consolas,monospace;text-align:right"></td>
+      <td class="muted" style="font-size:12px">${esc(it.updated_at || '—')}</td>
+      <td><button class="mini" data-cdel="${esc(it.code)}"
+            style="padding:3px 7px;font-size:12px;color:var(--warn)">删</button></td>
+    </tr>`).join('') : '<tr><td colspan="4"><div class="empty">没有匹配的编码</div></td></tr>';
+
+  $('#cost-list-hint').textContent = costFiltered.length + ' 条'
+    + (q ? '（筛选自 ' + costItems.length + '）' : '');
+  $('#cost-page').textContent = '第 ' + (costPageNo + 1) + ' / ' + pages + ' 页';
+
+  $('#cbody').querySelectorAll('[data-cost]').forEach(inp => inp.onchange = () => {
+    const it = costItems.find(x => x.code === inp.dataset.cost);
+    const v = Number(inp.value);
+    if(!it) return;
+    if(!Number.isFinite(v)){ inp.value = it.cost; toast('成本要填数字'); return; }
+    it.cost = v; it._dirty = true;
+    $('#cost-note').className = 'note show warn';
+    $('#cost-note').textContent = '有改动还没保存，点「保存成本表」才会生效';
+  });
+  $('#cbody').querySelectorAll('[data-cdel]').forEach(b => b.onclick = () => {
+    const code = b.dataset.cdel;
+    if(!confirm('删掉编码「' + code + '」的成本？没成本的编码会计成 0，净利偏高')) return;
+    costItems = costItems.filter(x => x.code !== code);
+    renderCosts();
+    $('#cost-note').className = 'note show warn';
+    $('#cost-note').textContent = '已删除，点「保存成本表」才会生效';
+  });
+}
+
+$('#cost-search').oninput = () => { costPageNo = 0; renderCosts(); };
+$('#btn-cost-prev').onclick = () => { if(costPageNo > 0){ costPageNo--; renderCosts(); } };
+$('#btn-cost-next').onclick = () => {
+  const pages = Math.max(1, Math.ceil(costFiltered.length / COST_PAGE));
+  if(costPageNo < pages - 1){ costPageNo++; renderCosts(); }
+};
+
+$('#btn-cost-add').onclick = () => {
+  const code = (prompt('商品编码（和订单里的「卖家 SKU」一致）') || '').trim();
+  if(!code) return;
+  if(costItems.some(x => x.code === code)){ toast('这个编码已经有了，直接搜出来改'); return; }
+  const v = Number(prompt('成本（人民币，单个）', '0'));
+  if(!Number.isFinite(v)) { toast('成本要填数字'); return; }
+  costItems.push({code, cost: v, updated_at: '待保存', _dirty: true});
+  $('#cost-search').value = code;
+  costPageNo = 0;
+  renderCosts();
+  $('#cost-note').className = 'note show warn';
+  $('#cost-note').textContent = '已新增，点「保存成本表」才会生效';
+};
+
+$('#btn-cost-save').onclick = async () => {
+  const btn = $('#btn-cost-save');
+  btn.disabled = true;
+  try{
+    const r = await fetch('/api/costs/save', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({items: costItems.map(x => ({code: x.code, cost: x.cost}))})});
+    const j = await r.json();
+    toast(j.ok ? ('已保存 ' + j.count + ' 个编码' + (j.removed ? '，删掉 ' + j.removed + ' 个' : ''))
+               : ('保存失败：' + j.error));
+    if(j.ok) loadCosts();
+  }catch(e){ toast('保存出错：' + e.message); }
+  btn.disabled = false;
+};
+
+$('#cost-file').onchange = async ev => {
+  const f = ev.target.files && ev.target.files[0];
+  if(!f) return;
+  const rd = new FileReader();
+  rd.onload = async () => {
+    const b64 = String(rd.result).split(',')[1] || '';
+    $('#cost-note').className = 'note show';
+    $('#cost-note').textContent = '正在导入 ' + f.name + '…';
+    try{
+      const r = await fetch('/api/costs/import', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name: f.name, b64})});
+      const j = await r.json();
+      if(j.ok){
+        $('#cost-note').className = 'note show ok';
+        $('#cost-note').innerHTML = `<b>导入完成</b>新增 ${j.added} 个编码，更新 ${j.updated} 个，`
+          + `没变 ${j.unchanged} 个，现在共 ${j.total} 个。`;
+        loadCosts();
+      }else{
+        $('#cost-note').className = 'note show err';
+        $('#cost-note').textContent = '导入失败：' + j.error;
+      }
+    }catch(e){
+      $('#cost-note').className = 'note show err';
+      $('#cost-note').textContent = '导入出错：' + e.message;
+    }
+  };
+  rd.readAsDataURL(f);
+  ev.target.value = '';
+};
+
+$('#btn-cost-check').onclick = async () => {
+  const box = $('#cost-check');
+  box.innerHTML = '<div class="empty">对一遍订单里的编码…</div>';
+  try{
+    const j = await (await fetch('/api/costs?check=1')).json();
+    if(!j.ok){ box.innerHTML = '<div class="empty">' + esc(j.error || '检查失败') + '</div>'; return; }
+    const miss = j.missing || [], der = j.derived || [];
+    box.innerHTML = `<div class="stats-line" style="margin-top:16px">
+        <div class="it">订单行<b>${j.order_lines}</b></div>
+        <div class="it">涉及编码<b>${j.codes_in_orders}</b></div>
+        <div class="it">缺成本<b style="color:var(--warn)">${j.missing_total}</b></div>
+        <div class="it">推导命中<b>${j.derived_total}</b></div>
+      </div>`
+      + (miss.length ? `<p class="muted" style="font-size:12.5px;margin:12px 0 0">这些编码在订单里有、成本表里没有（缺的行数）：</p>
+          <div class="cost-miss">${miss.map(x => `<span>${esc(x.code)} · ${x.lines} 行</span>`).join('')}</div>` : '')
+      + (der.length ? `<p class="muted" style="font-size:12.5px;margin:12px 0 0">这些是按多件装/组合装规则推出来的，建议补一条准确成本：</p>
+          <div class="cost-miss">${der.map(x => `<span>${esc(x.code)} · ${x.lines} 行</span>`).join('')}</div>` : '')
+      + ((!miss.length && !der.length) ? '<p class="muted" style="margin:12px 0 0">全部编码都有准确成本。</p>' : '');
+    $('#cost-note').className = 'note show';
+    $('#cost-note').textContent = '数据来源：' + (j.source || '');
+  }catch(e){ box.innerHTML = '<div class="empty">检查出错：' + esc(e.message) + '</div>'; }
 };
 
 async function loadRates(){

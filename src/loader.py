@@ -301,6 +301,7 @@ class OrderLine:
     product_id: str = ""
     style_codes: str = ""
     cost_unit_cny: Optional[float] = None
+    refund_amount: float = 0.0
     order_line_count: int = 1
 
     @property
@@ -578,6 +579,7 @@ def parse_orders(rows: list[tuple]) -> list[OrderLine]:
                 subtotal_before=before,
                 seller_discount=to_num(get(r, "seller_discount")),
                 order_amount=amount,
+                refund_amount=to_num(get(r, "refund_amount")),
                 cancel=to_str(get(r, "cancel", "")),
                 status=to_str(get(r, "status", "")),
                 created=to_str(get(r, "created", "")),

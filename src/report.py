@@ -72,106 +72,130 @@ def _fmt_row(ws: Worksheet, row: int, money_cols: list[int], pct_cols: list[int]
 
 # ---------------- 汇总 ----------------
 
-SUMMARY_HEADERS = [
+# 有 role 的参数是报表固定列，其余都算「费用」，一列一项。
+ROLE_KEYS = {"gmv", "cost", "order_count", "items", "buyer_paid"}
+
+BASE_HEADERS = [
     "排名", "款式编码", "链接（商品ID）", "商品名称",
     "GMV", "订单数", "客单价", "买家实付",
     "成本", "毛利", "毛利额",
-    "发单费", "平台佣金", "交易手续费", "奖金返现", "超级优惠券",
-    "商家成长费", "物流费", "达人佣金", "广告费", "费用合计",
-    "净利率", "净利(本地货币)", "净利(人民币)",
 ]
-MONEY_COLS = [5, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24]
-PCT_COLS = [10, 22]
-INT_COLS = [6]
+
+
+def fee_items(res: CalcResult) -> list[tuple[str, str]]:
+    """费用项清单：{id, 中文名}。按参数表顺序，用户加一项就多一列/多一组。"""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for it in res.params_cfg or []:
+        if not isinstance(it, dict):
+            continue
+        fid = str(it.get("id") or "").strip()
+        if not fid or fid in seen:
+            continue
+        role = str(it.get("role") or "").strip()
+        if role in ROLE_KEYS or fid in ROLE_KEYS:
+            continue      # GMV / 成本 / 订单数 / 件数 / 实付 已有固定列
+        seen.add(fid)
+        out.append((fid, str(it.get("label") or fid)))
+    # 兜底：明细里有、参数表里没有的费用项（改过配置的旧数据）也要出来
+    for p in res.products:
+        for fid in (p.fees or {}):
+            if fid not in seen:
+                seen.add(fid)
+                out.append((fid, fid))
+    return out
 
 
 def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
     # 一条链接（商品ID）一行：同一链接下的多个 SKU 合并，
     # 不同链接即使卖家编码相同也绝不合并——卖家编码可在多条链接间复用，
     # 只有商品ID 是链接的唯一标识。
+    fees = fee_items(res)
+    headers = list(BASE_HEADERS) + [name for _, name in fees] + \
+              ["费用合计", "净利率", "净利(本地货币)", "净利(人民币)"]
+    n_fee = len(fees)
+    c_fee0 = len(BASE_HEADERS) + 1          # 第一个费用列
+    c_total = c_fee0 + n_fee                # 费用合计
+    c_rate = c_total + 1                    # 净利率
+    c_net = c_rate + 1                      # 净利(本地)
+    c_net_cny = c_net + 1                   # 净利(人民币)
+
     _title(ws, "净利润汇总（每条链接一行）", subtitle, span=12)
-    _head(ws, SUMMARY_HEADERS)
+    _head(ws, headers)
+
+    money_cols = [5, 7, 8, 9, 11] + list(range(c_fee0, c_total + 1)) + [c_net, c_net_cny]
+    pct_cols = [10, c_rate]
+
+    def fee_vals(p) -> list[float]:
+        return [float((p.fees or {}).get(fid, 0.0)) for fid, _ in fees]
+
     row = 3
     for i, p in enumerate(res.products, 1):
+        fv = fee_vals(p)
         vals = [
             i, p.style_codes, p.product_id, p.product_name,
             p.gmv, p.orders, p.aov, p.buyer_paid,
             p.cost_local, p.gross_profit, p.gmv - p.cost_local,
-            p.dispatch_fee, p.platform_commission, p.tx_fee, p.cashback, p.super_coupon,
-            p.growth_fee, p.logistics, p.creator_commission, p.ad_spend,
-            (p.dispatch_fee + p.platform_commission + p.tx_fee + p.cashback + p.super_coupon
-             + p.growth_fee + p.logistics + p.creator_commission + p.ad_spend),
-            p.net_margin, p.net_local, p.net_cny(res.params.cny_to_local),
+            *fv,
+            sum(fv), p.net_margin, p.net_local, p.net_cny(res.params.cny_to_local),
         ]
         for c, v in enumerate(vals, 1):
             cell = ws.cell(row=row, column=c, value=v)
             cell.border = BORDER
-        _fmt_row(ws, row, MONEY_COLS, PCT_COLS, INT_COLS)
+        _fmt_row(ws, row, money_cols, pct_cols, [6])
         if p.net_local < 0:
-            ws.cell(row=row, column=23).font = NEG_FONT
-            ws.cell(row=row, column=24).font = NEG_FONT
+            ws.cell(row=row, column=c_net).font = NEG_FONT
+            ws.cell(row=row, column=c_net_cny).font = NEG_FONT
         row += 1
 
     t = res.total
+    tfv = fee_vals(t)
     totals = [
         "", "合计", "", f"{res.order_count} 个订单 / {res.line_count} 行",
         t.gmv, t.orders, t.aov if t.orders else 0, t.buyer_paid,
         t.cost_local, t.gross_profit, t.gmv - t.cost_local,
-        t.dispatch_fee, t.platform_commission, t.tx_fee, t.cashback, t.super_coupon,
-        t.growth_fee, t.logistics, t.creator_commission, t.ad_spend,
-        (t.dispatch_fee + t.platform_commission + t.tx_fee + t.cashback + t.super_coupon
-         + t.growth_fee + t.logistics + t.creator_commission + t.ad_spend),
-        t.net_margin, t.net_local, res.net_cny_total,
+        *tfv,
+        sum(tfv), t.net_margin, t.net_local, res.net_cny_total,
     ]
     for c, v in enumerate(totals, 1):
         cell = ws.cell(row=row, column=c, value=v)
         cell.fill = TOTAL_FILL
         cell.font = Font(bold=True)
         cell.border = TOP_BORDER
-    _fmt_row(ws, row, MONEY_COLS, PCT_COLS, INT_COLS)
+    _fmt_row(ws, row, money_cols, pct_cols, [6])
 
     # 净利率色阶：亏损越深越红，盈利越强越绿
     last = row - 1
     if last >= 3:
-        rng = f"V3:V{last}"
         from openpyxl.formatting.rule import ColorScaleRule
+        col = get_column_letter(c_rate)
         ws.conditional_formatting.add(
-            rng,
+            f"{col}3:{col}{last}",
             ColorScaleRule(start_type="num", start_value=-0.2, start_color="F4B6B6",
                            mid_type="num", mid_value=0, mid_color="FFFFFF",
                            end_type="num", end_value=0.25, end_color="A9D7B6"),
         )
 
     ws.freeze_panes = "E3"
-    ws.auto_filter.ref = f"A2:X{last}"
+    ws.auto_filter.ref = f"A2:{get_column_letter(len(headers))}{last}"
     _widths(ws, {1: 6, 2: 20, 3: 22, 4: 30})
-    for c in range(5, 25):
+    for c in range(5, len(headers) + 1):
         ws.column_dimensions[get_column_letter(c)].width = 12
 
 
 # ---------------- 费用拆解 ----------------
 
-FEE_ITEMS = [
-    ("发单费", "dispatch_fee"),
-    ("平台佣金", "platform_commission"),
-    ("交易手续费", "tx_fee"),
-    ("奖金返现", "cashback"),
-    ("超级优惠券", "super_coupon"),
-    ("商家成长费", "growth_fee"),
-    ("物流费", "logistics"),
-    ("达人佣金", "creator_commission"),
-    ("广告费", "ad_spend"),
-]
-
-
 def _fee_breakdown(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
+    # 费用项不写死：参数表里加一项，这里就自动多一组，
+    # 否则用户自己加的「订单服务费」在报表里会凭空消失。
     _title(ws, "费用拆解（长表，可直接透视）", subtitle, span=6)
     _head(ws, ["商品ID", "款式编码", "费用项", "金额", "占GMV", "占费用合计"])
+    fees = fee_items(res)
     row = 3
     for p in res.products:
-        fees = [(n, getattr(p, k)) for n, k in FEE_ITEMS]
-        total_fee = sum(v for _, v in fees) or 0
-        for name, val in fees:
+        vals_map = [(name, float((p.fees or {}).get(fid, 0.0))) for fid, name in fees]
+        total_fee = sum(v for _, v in vals_map) or 0
+        for name, val in vals_map:
             if abs(val) < 1e-9:
                 continue
             vals = [p.product_id, p.style_codes, name, val,
@@ -415,15 +439,19 @@ def _meta(ws: Worksheet, res: CalcResult, params: Params, switches: Switches,
             scope = "不算（关掉了）"
         else:
             scope = "、".join(labels.get(k, k) for k in kinds)
-        base = str(it.get("base") or "gmv")
-        rate = it.get("rate")
-        if rate in (None, 1, 1.0, "1", "1.0"):
-            formula_txt = BASE_LABELS.get(base, base)
+        expr = it.get("expr")
+        if expr is not None and str(expr).strip() != "":
+            formula_txt = str(expr)
         else:
-            rt = str(rate)
-            if rt.startswith("params."):
-                rt = "国家费率 " + rt.split(".", 1)[1]
-            formula_txt = f"{BASE_LABELS.get(base, base)} × {rt}"
+            base = str(it.get("base") or "gmv")
+            rate = it.get("rate")
+            if rate in (None, 1, 1.0, "1", "1.0"):
+                formula_txt = BASE_LABELS.get(base, base)
+            else:
+                rt = str(rate)
+                if rt.startswith("params."):
+                    rt = "国家费率 " + rt.split(".", 1)[1]
+                formula_txt = f"{BASE_LABELS.get(base, base)} × {rt}"
         if not it.get("enabled", True):
             scope = "已停用"
         rows.append((label, scope, formula_txt))

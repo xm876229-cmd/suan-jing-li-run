@@ -180,6 +180,9 @@ def preview(params: list, formulas: dict | None = None,
         "ok": True,
         "country": country,
         "currency": getattr(p, "currency", ""),
+        # 费用 id → 中文名：试算明细要给人看，不能甩一串英文 id
+        "fee_labels": {str(it.get("id")): str(it.get("label") or it.get("id"))
+                       for it in (params or []) if isinstance(it, dict) and it.get("id")},
         "before": before,
         "after": after,
         "delta": {

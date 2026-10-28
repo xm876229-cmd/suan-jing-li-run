@@ -1,45 +1,45 @@
 {
   "_readme": [
-    "════ 这是一张「参数表」，每一行是一个参与计算的参数 ════",
+    "════ 计算参数表：每一行就是一条算式 ════",
     "",
-    "  每一行都有 kinds（适用订单类别）。想改口径就改这个数组，不用改代码。",
-    "  改动即时生效，不用重启程序。",
+    "  每一项都能直接写公式（expr）。公式里能用的变量：",
     "",
-    "  五个订单类别（一行订单只归一类，优先级从上到下）：",
-    "    cancelled    已取消订单     取消类型不含 return/refund",
-    "    refunded     退货退款订单   取消类型含 return / refund",
-    "    zero_amount  0 元样品单     GMV 与实付都是 0",
-    "    unpaid       未付款订单",
-    "    normal       正常订单",
-    "  注意既是取消单又是 0 元的，归 cancelled（优先级在先）。",
+    "  ① 列映射里的字段（config/mapping.json 里的逻辑字段名）",
+    "     subtotal_before   折扣前小计",
+    "     seller_discount   卖家折扣",
+    "     order_amount      买家实付",
+    "     refund_amount     退款金额",
+    "     qty               件数",
     "",
-    "  每一行可以写的字段：",
-    "    id       唯一标识，公式里用它引用金额（别乱改，公式在用）",
+    "  ② 由上面派生的量",
+    "     gmv          = 折扣前小计 − 卖家折扣",
+    "     cost         = 件数 × 成本单价（成本单价来自成本表：商品编码 → 成本）",
+    "     cost_unit    平均成本单价",
+    "     orders       订单数",
+    "     commission   达人佣金（整期直接取数）",
+    "     ads          广告花费（整期直接取数）",
+    "",
+    "  ③ 国家费率：params.字段名（在「费率」页按国家维护）",
+    "  ④ 其它参数算出来的值：写它的 id 就行（如佣金引用 gmv），顺序无所谓",
+    "",
+    "  可用运算符：+ - * / ( )，函数：sum() abs() min() max() round()",
+    "",
+    "  每一项的字段：",
+    "    id       唯一标识（净利公式里引用它；别乱改）",
     "    label    中文名",
-    "    base     基数，取这些类别订单的什么：",
-    "               gmv / buyer_paid / order_count / items / cost / refund",
-    "               commission（达人佣金，直接取数）、ads（广告花费，直接取数）",
-    "    rate     乘数。不写 = 1（原样取数）。可写数字，或 params.xxx 引用国家费率",
-    "    kinds    只在这些订单类别上算。不写 = 全部类别。写 [] = 这一项不算",
-    "    enabled  false = 暂时不算这一项",
+    "    expr     计算公式 ← 核心，改这里就等于改算法",
+    "    kinds    只算哪些订单类别：normal / cancelled / refunded / zero_amount / unpaid",
+    "             不写 = 全部类别；写 [] = 这一项不算",
+    "    enabled  false = 暂时不算",
+    "    role     报表固定列：gmv / cost / order_count / items / buyer_paid",
+    "             有 role 的项不进「费用合计」，其余项都进",
     "",
-    "  举例：",
-    "    发单费只算正常单和退货退款 → \"kinds\": [\"normal\",\"refunded\"]",
-    "    平台佣金只算正常单（取消/退货平台退佣）→ \"kinds\": [\"normal\"]",
-    "    商品成本四类都算（货已采购发出）→ \"kinds\": [\"normal\",\"cancelled\",\"refunded\",\"zero_amount\"]",
+    "  净利公式在下面的 formulas 里，默认：net = gmv − cost − 全部费用",
     "",
-    "  加一项新支出（比如订单服务费每单 2 元，只算正常单）：在 params 里加一条",
-    "    {\"id\":\"order_service\",\"label\":\"订单服务费\",\"base\":\"order_count\",\"rate\":2.0,\"kinds\":[\"normal\"]}",
-    "  它就会自动进 net 的计算，公式不用改（因为 net 用的是 sum(params)）。",
+    "  by_country：某个国家要单独一套参数就写在这里，",
+    "              形如 \"马来西亚\": {\"params\": [ …整张表… ]}；没写的国家用上面这套。",
     "",
-    "  注意：id 为 gmv / cost / order_count / items / buyer_paid 的五项有固定去处，",
-    "  会分别显示在报表的 GMV / 商品成本 / 订单数 / 件数 / 买家实付 列；",
-    "  其余 id 都会进「费用明细」。",
-    "",
-    "════ formulas：净利怎么算 ════",
-    "  可用变量：params 里每一项的 id、params.xxx（国家费率）、",
-    "           gross_profit / total_fees / net 等已定义的结果。",
-    "  可用函数：sum / abs / min / max / round。"
+    "  改错了不会崩：报表会提示哪一条公式有问题，该项按 0 计。"
   ],
   "kinds": {
     "cancelled": "已取消订单",
@@ -52,140 +52,97 @@
     {
       "id": "gmv",
       "label": "GMV（收入）",
-      "base": "gmv",
-      "kinds": [
-        "normal",
-        "zero_amount"
-      ]
-    },
-    {
-      "id": "buyer_paid",
-      "label": "买家实付",
-      "base": "buyer_paid",
-      "kinds": [
-        "normal",
-        "zero_amount"
-      ]
-    },
-    {
-      "id": "order_count",
-      "label": "订单数",
-      "base": "order_count",
-      "kinds": [
-        "normal",
-        "cancelled",
-        "refunded",
-        "zero_amount"
-      ]
-    },
-    {
-      "id": "items",
-      "label": "件数",
-      "base": "items",
-      "kinds": [
-        "normal",
-        "cancelled",
-        "refunded",
-        "zero_amount"
-      ]
+      "role": "gmv",
+      "expr": "subtotal_before - seller_discount",
+      "kinds": ["normal", "zero_amount"]
     },
     {
       "id": "cost",
       "label": "商品成本",
-      "base": "cost",
-      "kinds": [
-        "normal",
-        "cancelled",
-        "refunded",
-        "zero_amount"
-      ]
+      "role": "cost",
+      "expr": "qty * cost_unit",
+      "kinds": ["normal", "cancelled", "refunded", "zero_amount"]
+    },
+    {
+      "id": "order_count",
+      "label": "订单数",
+      "role": "order_count",
+      "expr": "orders",
+      "kinds": ["normal", "cancelled", "refunded", "zero_amount"]
+    },
+    {
+      "id": "items",
+      "label": "件数",
+      "role": "items",
+      "expr": "qty",
+      "kinds": ["normal", "cancelled", "refunded", "zero_amount"]
+    },
+    {
+      "id": "buyer_paid",
+      "label": "买家实付",
+      "role": "buyer_paid",
+      "expr": "order_amount",
+      "kinds": ["normal", "zero_amount"]
     },
     {
       "id": "dispatch",
       "label": "发单费",
-      "base": "order_count",
-      "rate": "params.dispatch_fee_local",
-      "kinds": [
-        "normal",
-        "cancelled",
-        "refunded",
-        "zero_amount"
-      ]
+      "expr": "orders * params.dispatch_fee_local",
+      "kinds": ["normal", "cancelled", "refunded", "zero_amount"]
     },
     {
       "id": "platform_commission",
       "label": "平台佣金",
-      "base": "gmv",
-      "rate": "params.platform_commission",
-      "kinds": [
-        "normal",
-        "cancelled",
-        "refunded"
-      ]
+      "expr": "gmv * params.platform_commission",
+      "kinds": ["normal", "cancelled", "refunded"]
     },
     {
       "id": "tx_fee",
       "label": "交易手续费",
-      "base": "buyer_paid",
-      "rate": "params.tx_fee",
-      "kinds": [
-        "normal",
-        "cancelled",
-        "refunded"
-      ]
+      "expr": "order_amount * params.tx_fee",
+      "kinds": ["normal", "cancelled", "refunded"]
     },
     {
       "id": "cashback",
       "label": "奖金返现",
-      "base": "gmv",
-      "rate": "params.cashback",
-      "kinds": [
-        "normal"
-      ]
+      "expr": "gmv * params.cashback",
+      "kinds": ["normal"]
     },
     {
       "id": "super_coupon",
       "label": "超级优惠券",
-      "base": "gmv",
-      "rate": "params.super_coupon",
-      "kinds": [
-        "normal"
-      ],
+      "expr": "gmv * params.super_coupon",
+      "kinds": ["normal"],
       "enabled": false
     },
     {
       "id": "growth_fee",
       "label": "商家成长",
-      "base": "gmv",
-      "rate": "params.growth_fee",
-      "kinds": [
-        "normal"
-      ]
+      "expr": "gmv * params.growth_fee",
+      "kinds": ["normal"]
     },
     {
       "id": "logistics",
       "label": "物流",
-      "base": "gmv",
-      "rate": "params.logistics",
-      "kinds": [
-        "normal"
-      ]
+      "expr": "gmv * params.logistics",
+      "kinds": ["normal"]
     },
     {
       "id": "affiliate",
       "label": "达人佣金",
-      "base": "commission"
+      "expr": "commission"
     },
     {
       "id": "ads",
       "label": "广告花费",
-      "base": "ads"
+      "expr": "ads"
     }
   ],
   "formulas": {
     "gross_profit": "gmv - cost",
     "total_fees": "sum(fees)",
-    "net": "gross_profit - total_fees",
+    "net": "gmv - cost - sum(fees)",
     "net_rate": "net / gmv"
-  }
+  },
+  "by_country": {}
 }

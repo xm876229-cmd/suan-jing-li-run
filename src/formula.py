@@ -210,42 +210,49 @@ DEFAULTS: dict = {
         "unpaid": "未付款订单",
         "normal": "正常订单",
     },
-    # 参数表：每项自己声明「只算哪些订单类别」。
+    # 计算参数表：每一项就是一条算式，公式里引用映射字段 / 其它参数 / 国家费率。
     # 默认值按业务实情——取消/退货的收入不算，但成本、发单费、平台抽成照算。
     "params": [
-        {"id": "gmv", "label": "GMV（收入）", "base": "gmv",
+        {"id": "gmv", "label": "GMV（收入）", "role": "gmv",
+         "expr": "subtotal_before - seller_discount",
          "kinds": ["normal", "zero_amount"]},
-        {"id": "buyer_paid", "label": "买家实付", "base": "buyer_paid",
+        {"id": "cost", "label": "商品成本", "role": "cost",
+         "expr": "qty * cost_unit",
+         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
+        {"id": "order_count", "label": "订单数", "role": "order_count",
+         "expr": "orders",
+         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
+        {"id": "items", "label": "件数", "role": "items",
+         "expr": "qty",
+         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
+        {"id": "buyer_paid", "label": "买家实付", "role": "buyer_paid",
+         "expr": "order_amount",
          "kinds": ["normal", "zero_amount"]},
-        {"id": "order_count", "label": "订单数", "base": "order_count",
+        {"id": "dispatch", "label": "发单费",
+         "expr": "orders * params.dispatch_fee_local",
          "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
-        {"id": "items", "label": "件数", "base": "items",
-         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
-        {"id": "cost", "label": "商品成本", "base": "cost",
-         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
-        {"id": "dispatch", "label": "发单费", "base": "order_count",
-         "rate": "params.dispatch_fee_local",
-         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
-        {"id": "platform_commission", "label": "平台佣金", "base": "gmv",
-         "rate": "params.platform_commission", "kinds": ["normal", "cancelled", "refunded"]},
-        {"id": "tx_fee", "label": "交易手续费", "base": "buyer_paid",
-         "rate": "params.tx_fee", "kinds": ["normal", "cancelled", "refunded"]},
-        {"id": "cashback", "label": "奖金返现", "base": "gmv",
-         "rate": "params.cashback", "kinds": ["normal"]},
-        {"id": "super_coupon", "label": "超级优惠券", "base": "gmv",
-         "rate": "params.super_coupon", "kinds": ["normal"], "enabled": False},
-        {"id": "growth_fee", "label": "商家成长", "base": "gmv",
-         "rate": "params.growth_fee", "kinds": ["normal"]},
-        {"id": "logistics", "label": "物流", "base": "gmv",
-         "rate": "params.logistics", "kinds": ["normal"]},
-        {"id": "affiliate", "label": "达人佣金", "base": "commission"},
-        {"id": "ads", "label": "广告花费", "base": "ads"},
+        {"id": "platform_commission", "label": "平台佣金",
+         "expr": "gmv * params.platform_commission",
+         "kinds": ["normal", "cancelled", "refunded"]},
+        {"id": "tx_fee", "label": "交易手续费",
+         "expr": "order_amount * params.tx_fee",
+         "kinds": ["normal", "cancelled", "refunded"]},
+        {"id": "cashback", "label": "奖金返现",
+         "expr": "gmv * params.cashback", "kinds": ["normal"]},
+        {"id": "super_coupon", "label": "超级优惠券",
+         "expr": "gmv * params.super_coupon", "kinds": ["normal"], "enabled": False},
+        {"id": "growth_fee", "label": "商家成长",
+         "expr": "gmv * params.growth_fee", "kinds": ["normal"]},
+        {"id": "logistics", "label": "物流",
+         "expr": "gmv * params.logistics", "kinds": ["normal"]},
+        {"id": "affiliate", "label": "达人佣金", "expr": "commission"},
+        {"id": "ads", "label": "广告花费", "expr": "ads"},
     ],
     "by_country": {},
     "formulas": {
         "gross_profit": "gmv - cost",
         "total_fees": "sum(fees)",
-        "net": "gross_profit - total_fees",
+        "net": "gross_profit - sum(fees)",
         "net_rate": "net / gmv",
     },
 }
@@ -292,11 +299,33 @@ FEE_BASES = {
     "fee_base_paid": "平台抽成计费基数（实付，含取消/退货）",
     "order_count": "订单数",
     "items": "商品件数",
+    "qty": "商品件数",
     "cost": "商品成本",
-    "refund": "退款金额",
+    "cost_unit": "成本单价（成本÷件数）",
     "order_amount": "订单金额",
+    "subtotal_before": "折扣前小计",
+    "seller_discount": "卖家折扣",
+    "refund": "退款金额",
+    "refund_amount": "退款金额",
     "commission": "达人佣金（直接取）",
     "ads": "广告花费（直接取）",
+}
+
+# 计算参数里能直接引用的「映射字段」。
+# 这张表决定了用户在公式里能写什么名字——名字就是 config/mapping.json 的逻辑字段名，
+# 换平台、换表头只改映射，公式一个字都不用动。
+FIELD_LABELS = {
+    "subtotal_before": "折扣前小计（行合计）",
+    "seller_discount": "卖家折扣（行合计）",
+    "order_amount": "买家实付（行合计）",
+    "refund_amount": "退款金额（行合计）",
+    "qty": "件数（行合计）",
+    "order_count": "订单数",
+    "cost": "商品成本（件数×成本单价）",
+    "cost_unit": "平均成本单价",
+    "commission": "达人佣金（整期直接取数）",
+    "ads": "广告花费（整期直接取数）",
+    "params": "国家费率（params.字段名）",
 }
 
 
@@ -306,99 +335,203 @@ _BASE_TO_STAT = {
     "orders": "orders",
     "gmv": "gmv",
     "buyer_paid": "buyer_paid",
-    "items": "items",
+    "buyerpaid": "order_amount",
+    "items": "qty",
+    "qty": "qty",
     "cost": "cost",
+    "cost_unit": "cost_unit",
     "refund": "refund",
-    "order_amount": "buyer_paid",
+    "refund_amount": "refund_amount",
+    "order_amount": "order_amount",
+    "subtotal_before": "subtotal_before",
+    "seller_discount": "seller_discount",
+    "fee_base": "gmv",
+    "fee_base_paid": "buyer_paid",
 }
 
 
-def _base_value(base: str, ctx: dict, kinds) -> float:
-    """算一条费用的基数。
+def _pick_kinds(by_kind: dict, kinds) -> dict[str, float]:
+    """把指定订单类别的原始量加总。
 
-    分两种情况：
-      · 没写 kinds  → 直接取汇总值（ctx[base]），这是旧配置的行为
-      · 写了 kinds  → 从「按订单类别分开的明细」里挑出这些类别求和
-
-    为什么要按类别分开：用户要能「发单费只算正常单和退货单，
-    取消单的发单费不算」——汇总值是一坨，挑不出来，
-    所以每一行订单都按类别分别记账，取基数时再按需要合计。
+    kinds=None 表示「全部类别」；[] 表示「一项都不算」（结果全是 0）。
+    逐个类别相加而不是取汇总值，是为了让每一项参数各自挑类别——
+    「发单费只算正常单和退货单」这类口径才能成立。
     """
-    if not kinds:
-        return _to_num(ctx.get(base))
+    if kinds is None:
+        chosen = list(by_kind.keys())
+    else:
+        chosen = list(kinds or [])
+    agg: dict[str, float] = {}
+    for k in chosen:
+        d = by_kind.get(k)
+        if not isinstance(d, dict):
+            continue
+        for kk, vv in d.items():
+            agg[kk] = agg.get(kk, 0.0) + _to_num(vv)
+    return agg
 
+
+# 对外名字：calc 等模块要按类别取原始字段合计
+pick_kinds = _pick_kinds
+
+
+def _local_ctx(by_kind: dict, kinds, ctx: dict) -> dict:
+    """给一条参数的公式准备「可用变量」。
+
+    变量就是列映射里的逻辑字段（subtotal_before / seller_discount / order_amount
+    / refund_amount / qty），再加上几个由它们派生的量（gmv / cost / cost_unit …）。
+    全部按这条参数自己的 kinds 过滤——所以「平台佣金只算正常单」时，
+    公式里的 gmv 也只剩正常单的 GMV。
+    """
+    agg = _pick_kinds(by_kind, kinds)
+    local = dict(agg)
+
+    subtotal = agg.get("subtotal_before", 0.0)
+    discount = agg.get("seller_discount", 0.0)
+    qty = agg.get("qty", agg.get("items", 0.0))
+    cost = agg.get("cost", 0.0)
+
+    local["qty"] = qty
+    local["items"] = qty
+    local["orders"] = agg.get("orders", 0.0)
+    local["order_count"] = local["orders"]
+    local["cost"] = cost
+    local["cost_unit"] = (cost / qty) if qty else _to_num(ctx.get("cost_unit"))
+    local["gmv"] = subtotal - discount
+    local["buyer_paid"] = agg.get("order_amount", 0.0)
+    local["order_amount"] = agg.get("order_amount", 0.0)
+    local["refund"] = agg.get("refund", agg.get("refund_amount", 0.0))
+    # 整期直接取数的两项，与订单类别无关
+    local["commission"] = _to_num(ctx.get("commission"))
+    local["ads"] = _to_num(ctx.get("ads"))
+    local["params"] = ctx.get("params")
+    local["param"] = {}            # 其它参数算出来的值：param.佣金id
+    local["by_kind"] = by_kind
+    return local
+
+
+def _base_value(base: str, ctx: dict, kinds) -> float:
+    """算一条费用的基数（base + rate 这种简写形式用）。
+
+    没写 kinds → 全部类别；写了 kinds → 从「按订单类别分开的明细」里挑出来求和。
+    """
     stat = _BASE_TO_STAT.get(base)
     if stat is None:
-        # 不认识的基数就退回汇总值，宁可按旧行为算，也不要静默变 0
         return _to_num(ctx.get(base))
-
-    agg = ctx.get("by_kind") or {}
-    total = 0.0
-    for k in kinds:
-        total += _to_num((agg.get(k) or {}).get(stat))
-    return total
+    agg = _pick_kinds(ctx.get("by_kind") or {}, kinds)
+    if stat == "cost_unit":
+        qty = agg.get("qty", 0.0)
+        return (agg.get("cost", 0.0) / qty) if qty else 0.0
+    return _to_num(agg.get(stat))
 
 
 def compute_params(params_cfg: list[dict], ctx: dict) -> tuple[dict[str, float], list[str]]:
-    """按「参数表」逐项算出金额。返回 ({参数id: 金额}, [问题说明])。
+    """按「计算参数表」逐项算出金额。返回 ({参数id: 金额}, [问题说明])。
 
-    这张表里什么都能放：GMV、买家实付、订单数、件数、商品成本、各项费用。
-    每一项自己声明「只算哪些订单类别」（kinds），所以口径完全由使用者决定。
+    这张表里什么都能放：GMV、商品成本、订单数、件数、各项费用。
+    每一项有两种写法，随便挑：
 
-    每项字段：
-      id       唯一标识，公式里用它引用金额
+      · 公式写法（推荐，最自由）
+            {"id":"commission","label":"平台佣金","kinds":["normal"],
+             "expr":"gmv * params.platform_commission"}
+      · 简写写法（基数 × 费率）
+            {"id":"dispatch","base":"order_count","rate":"params.dispatch_fee_local",
+             "kinds":["normal"]}
+
+    公式里能用的变量（都按这一项自己的 kinds 过滤后再汇总）：
+        subtotal_before / seller_discount / order_amount / refund_amount / qty
+        gmv（= 折扣前小计 − 卖家折扣）、cost（= 件数 × 成本单价）、cost_unit
+        orders（订单数）、commission / ads（整期直接取数）、params.国家费率
+        param.其它参数id（引用参数表里某一项算出来的值）
+    参数之间可以互相引用，顺序无所谓，会自动排队算。
+
+    每项可写字段：
+      id       唯一标识，净利公式里用它引用金额
       label    中文名
-      base     基数：gmv / buyer_paid / order_count / items / cost / refund
-               / commission / ads（后两个是直接取数，与订单类别无关）
-      rate     乘数。不写 = 1（原样取数）。可以写数字、params.xxx 或表达式
-      kinds    只在这些订单类别上算；不写 = 全部类别
-      enabled  默认 true
+      expr     计算公式；写了就以它为准
+      base     简写用：基数；rate 简写用：乘数（不写 = 1）
+      kinds    只在这些订单类别上算。不写 = 全部类别。写 [] = 这一项不算
+      enabled  false = 暂时不算这一项
+      role     报表固定列（gmv/cost/order_count/items/buyer_paid），其余都进费用
     """
+    by_kind = ctx.get("by_kind") or {}
     out: dict[str, float] = {}
     issues: list[str] = []
+    pending: list[dict] = [it for it in (params_cfg or []) if isinstance(it, dict)
+                           and str(it.get("id") or "").strip()]
+    resolved: dict[str, float] = {}
 
-    for item in params_cfg or []:
-        if not isinstance(item, dict):
-            continue
-        fid = str(item.get("id") or "").strip()
-        if not fid:
-            continue
-        if not item.get("enabled", True):
-            out[fid] = 0.0
-            continue
+    # 参数之间可以互相引用（佣金 = gmv × 费率），所以按轮次解：
+    # 本轮算不出来的（引用还没算的项）留到下一轮，最多 len+2 轮，不会死循环。
+    for _ in range(len(pending) + 2):
+        if not pending:
+            break
+        progressed = False
+        rest: list[dict] = []
+        for item in pending:
+            fid = str(item.get("id")).strip()
+            if not item.get("enabled", True):
+                resolved[fid] = 0.0
+                progressed = True
+                continue
 
-        base = str(item.get("base") or "gmv").strip()
-        label = str(item.get("label") or fid)
+            kinds = item.get("kinds")
+            local = _local_ctx(by_kind, kinds, ctx)
+            # 其它参数算出来的值放在 param.xxx 名下，显式引用才用：
+            #   裸写 gmv   = 按这一项自己的 kinds 现算的 GMV（勾哪个类别就算哪个）
+            #   param.gmv  = 参数表里「GMV」那一项算出来的值
+            # 这样「勾了取消单却没反应」这种糊涂账不会出现。
+            local["param"] = dict(resolved)
+            local.pop(fid, None)      # 不允许自己引用自己
 
-        # 直接取数的两类：联盟佣金、广告花费（已经是金额，不再乘费率）
-        if base in ("commission", "ads"):
-            amt = _to_num(ctx.get(base))
-            out[fid] = amt
-            continue
+            expr = item.get("expr")
+            try:
+                if expr is not None and str(expr).strip() != "":
+                    val, _ = safe_eval(str(expr), local)
+                else:
+                    base = str(item.get("base") or "gmv").strip()
+                    if base in ("commission", "ads"):
+                        resolved[fid] = _to_num(ctx.get(base))
+                        progressed = True
+                        continue
+                    base_val = _base_value(base, ctx, kinds)
+                    rate_raw = item.get("rate")
+                    if rate_raw is None:
+                        # 没写 rate = 1，即「原样取这个基数」（GMV、成本、订单数这类统计量）
+                        rate_raw = 1.0
+                    if isinstance(rate_raw, (int, float)):
+                        rate = float(rate_raw)
+                    else:
+                        rate, _ = safe_eval(str(rate_raw), local)
+                    val = base_val * rate
+            except FormulaError as e:
+                if "未知变量" in str(e) or "不存在" in str(e):
+                    rest.append(item)      # 可能只是依赖还没轮到自己，下一轮再试
+                    continue
+                label = str(item.get("label") or fid)
+                issues.append(f"参数「{label}」的公式写错了：{e}（该项按 0 计）")
+                resolved[fid] = 0.0
+                progressed = True
+                continue
+            resolved[fid] = val
+            progressed = True
 
-        # kinds：这条费用只在列出的订单类别上计算。
-        # 例如发单费只想算「正常 + 退货退款」，就写
-        #   "kinds": ["normal","refunded"]
-        # 不写 = 全部类别都算（旧配置的行为）。
-        kinds = item.get("kinds")
-        base_val = _base_value(base, ctx, kinds)
-        rate_raw = item.get("rate")
-        if rate_raw is None:
-            # 没写 rate = 1，即「原样取这个基数」。
-            # GMV、成本、订单数这类统计量就是这样用的。
-            # （早期版本会去取国家参数里的同名项，结果 GMV 被当成费率算成 0，
-            #   所以这里改掉了——要引用国家费率就显式写 "rate":"params.xxx"）
-            rate_raw = 1.0
-        try:
-            rate, _ = safe_eval(str(rate_raw), ctx) if not isinstance(rate_raw, (int, float)) \
-                else (float(rate_raw), set())
-        except FormulaError as e:
-            issues.append(f"参数「{label}」的费率写错了：{e}（该项按 0 计）")
-            out[fid] = 0.0
-            continue
+        pending = rest
+        if not progressed:
+            for item in pending:
+                fid = str(item.get("id")).strip()
+                label = str(item.get("label") or fid)
+                issues.append(f"参数「{label}」引用了算不出来的变量，该项按 0 计")
+                resolved[fid] = 0.0
+            pending = []
+            break
 
-        out[fid] = base_val * rate
-
+    # 保持参数表里的顺序输出，界面与报表看起来才稳定
+    for item in (params_cfg or []):
+        if isinstance(item, dict):
+            fid = str(item.get("id") or "").strip()
+            if fid:
+                out[fid] = resolved.get(fid, 0.0)
     return out, issues
 
 

@@ -423,6 +423,18 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/config"):
             from bridge import config_page
             _json(self, config_page.read_config())
+        elif self.path.startswith("/api/costs"):
+            from bridge import costs_api
+            from urllib.parse import parse_qs, urlparse as _up
+            q = parse_qs(_up(self.path).query)
+            if q.get("check"):
+                _json(self, costs_api.check_costs())
+            else:
+                try:
+                    limit = int((q.get("limit") or ["0"])[0])
+                except ValueError:
+                    limit = 0
+                _json(self, costs_api.read_costs(limit))
         else:
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
@@ -441,6 +453,10 @@ class Handler(BaseHTTPRequestHandler):
             self._post_config(preview=True)
         elif self.path.startswith("/api/config/save"):
             self._post_config(preview=False)
+        elif self.path.startswith("/api/costs/save"):
+            self._post_costs(save=True)
+        elif self.path.startswith("/api/costs/import"):
+            self._post_costs(save=False)
         elif self.path.startswith("/capture"):
             self._post_capture()
         elif self.path.startswith("/upload"):
@@ -649,6 +665,31 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, settings_api.save_rates(payload))
         except Exception as e:  # noqa: BLE001
             _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
+
+    def _post_costs(self, save: bool):
+        """成本表：整表保存（save=True）或导入 Excel 合并（save=False）。
+
+        成本变动不频繁，所以不做成「每次改一行就落盘」，
+        统一走一次保存：界面里改完点保存，或者丢一份 Excel 进来让它自己合并。
+        """
+        from bridge import costs_api
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+        try:
+            if save:
+                _json(self, costs_api.save_costs(payload.get("items") or []))
+            else:
+                _json(self, costs_api.import_costs(
+                    str(payload.get("name") or ""),
+                    payload.get("b64") or "",
+                    str(payload.get("mode") or "merge"),
+                ))
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"处理失败：{e}"}, 500)
 
     def _post_spec(self):
         """给扩展发取数规格。

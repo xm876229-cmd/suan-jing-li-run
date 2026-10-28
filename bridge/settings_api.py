@@ -142,7 +142,9 @@ def report_view(name: str) -> dict:
         # 费用拆解页：商品ID / 款式编码 / 费用项 / 金额 ...
         if len(row) >= 4:
             fee_sum += _num(row[3])
-    if fee_sum:
+    # 汇总页的合计行已经带「费用合计」时以它为准；
+    # 费用拆解只读了前几十行，拿它覆盖会把总额算小（曾经少算过近 800）。
+    if "费用合计" not in total and fee_sum:
         total["费用合计"] = round(fee_sum, 2)
 
     net_sum = 0.0
@@ -156,7 +158,9 @@ def report_view(name: str) -> dict:
             continue
         if net_col < len(row):
             net_sum += _num(row[net_col])
-    if net_col is not None:
+    if total.get("净利(本地货币)") not in (None, ""):
+        total["净利"] = round(_num(total["净利(本地货币)"]), 2)
+    elif net_col is not None:
         total["净利"] = round(net_sum, 2)
 
     try:

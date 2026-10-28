@@ -484,13 +484,27 @@ def compute(data: RawData, params: Params, switches: Switches,
         paid_amt = alloc_paid(l)
 
         # 不管口径怎么设，都先把这一行的原始量按类别记下来。
-        # 费用项各自的 kinds 就是从这里取数的——
+        # 计算参数各自的 kinds 就是从这里取数的——
         # 这样「发单费只算正常+退货」「平台佣金只算正常」才能各自成立。
+        #
+        # 这里刻意「不」按 order_filter 清零：口径只由每个参数自己的 kinds 决定，
+        # 两套开关叠加会让人算不清（改了参数没反应，或反应了但不知道是谁改的）。
         bk = m.by_kind.get(kind)
         if bk is None:
-            bk = {"gmv": ZERO, "buyer_paid": ZERO, "orders": ZERO,
-                  "items": ZERO, "cost": ZERO, "refund": ZERO}
+            bk = {
+                # 从列映射来的原始字段，公式里可以直接引用
+                "subtotal_before": ZERO, "seller_discount": ZERO,
+                "order_amount": ZERO, "refund_amount": ZERO, "qty": ZERO,
+                # 由它们派生的量
+                "gmv": ZERO, "buyer_paid": ZERO, "orders": ZERO,
+                "items": ZERO, "cost": ZERO, "refund": ZERO,
+            }
             m.by_kind[kind] = bk
+        bk["subtotal_before"] += l.subtotal_before
+        bk["seller_discount"] += l.seller_discount
+        bk["order_amount"] += paid_amt
+        bk["refund_amount"] += l.refund_amount
+        bk["qty"] += l.qty
         bk["gmv"] += l.gmv
         bk["buyer_paid"] += paid_amt
         bk["orders"] += l.allocated_orders
@@ -547,14 +561,27 @@ def compute(data: RawData, params: Params, switches: Switches,
             if isinstance(it, dict) and it.get("id") == "super_coupon":
                 it["enabled"] = True
 
-    # 这些 id 有固定去处（报表要按列展示），其余的都进「费用明细」
-    _RESERVED = {
+    # 参数表里这几项有固定去处（报表要按列展示），其余都进「费用明细」。
+    # 优先认参数上写的 role；没写就按 id 猜（老配置没有 role）。
+    _ROLE_ATTR = {
         "gmv": "gmv",
         "cost": "cost_local",
         "order_count": "orders",
         "items": "items",
         "buyer_paid": "buyer_paid",
     }
+    role_of: dict[str, str] = {}
+    for it in param_cfg:
+        if not isinstance(it, dict):
+            continue
+        fid = str(it.get("id") or "").strip()
+        if not fid:
+            continue
+        role = str(it.get("role") or "").strip()
+        attr = _ROLE_ATTR.get(role) or _ROLE_ATTR.get(fid)
+        if attr:
+            role_of[fid] = attr
+    reserved_ids = set(role_of)
 
     fee_issues: list[str] = []
     for pid, m in buckets.items():
@@ -562,19 +589,21 @@ def compute(data: RawData, params: Params, switches: Switches,
         ctx = {
             "commission": data.commissions.get(pid, ZERO),
             "ads": data.ads.get(pid, ZERO),
-            # 每一行订单按类别记的原始量，参数表的 kinds 就是从这里取数
+            # 每一行订单按类别记的原始量，计算参数的 kinds 就是从这里取数
             "by_kind": m.by_kind,
             "params": params,
+            # 兜底单价：某个参数 kinds 里一件都没有时，公式里的 cost_unit 不至于变 0
+            "cost_unit": (m.cost_local / m.items) if m.items else ZERO,
         }
         vals, one_issues = formula.compute_params(param_cfg, ctx)
         if one_issues:
             fee_issues.extend(one_issues[:1])
 
         # 归位：报表按列展示的那几个量单独放，其余都算「费用」
-        for pid_key, attr in _RESERVED.items():
-            if pid_key in vals:
-                setattr(m, attr, vals[pid_key])
-        m.fees = {k: v for k, v in vals.items() if k not in _RESERVED}
+        for fid, attr in role_of.items():
+            if fid in vals:
+                setattr(m, attr, vals[fid])
+        m.fees = {k: v for k, v in vals.items() if k not in reserved_ids}
 
         # 退款金额只是统计量，永远取原始值（不受 kinds 影响，否则对账看不出退了多少）
         m.refund = sum(d.get("refund", ZERO) for d in m.by_kind.values())
@@ -593,7 +622,11 @@ def compute(data: RawData, params: Params, switches: Switches,
         # 公式：gross_profit / total_fees / net / net_rate 都在这算。
         # 之前这段代码根本没被调用过（formulas 配了却不生效），
         # 净利一直是写死的属性。现在接上，改公式才真的改了算法。
-        fctx = {**m.fees, "gmv": m.gmv, "cost": m.cost_local,
+        # 公式：gross_profit / total_fees / net / net_rate 都在这算。
+        # 除了费用明细，还把每个参数算出的值、以及原始字段合计都放进去，
+        # 所以净利公式想改成 "gmv - cost - platform_commission - dispatch" 也可以。
+        fctx = {**formula.pick_kinds(m.by_kind, None), **vals, **m.fees,
+                "gmv": m.gmv, "cost": m.cost_local,
                 "buyer_paid": m.buyer_paid, "order_count": m.orders,
                 "items": m.items, "refund": m.refund,
                 "fees": m.fees, "params": params}
