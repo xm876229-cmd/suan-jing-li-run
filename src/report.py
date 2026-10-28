@@ -440,8 +440,12 @@ def _meta(ws: Worksheet, res: CalcResult, params: Params, switches: Switches,
         else:
             scope = "、".join(labels.get(k, k) for k in kinds)
         expr = it.get("expr")
-        if expr is not None and str(expr).strip() != "":
-            formula_txt = str(expr)
+        expr_txt = str(expr).strip() if expr is not None else ""
+        if expr_txt in ("ads", "commission"):
+            # 这两项来自广告表/联盟表，按商品ID汇总，跟订单类别无关
+            scope = "来自数据源，不看订单类别"
+        if expr_txt:
+            formula_txt = expr_txt
         else:
             base = str(it.get("base") or "gmv")
             rate = it.get("rate")

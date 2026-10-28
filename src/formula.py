@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -202,6 +203,35 @@ def safe_eval(expr: str, ctx: dict) -> tuple[float, set[str]]:
 
 # ---------------- 配置读取 ----------------
 
+# 订单表里程序需要的几列。默认给中英双语候选，
+# 某国表头特殊就在「计算参数 → 订单表识别」里补一条，不用改代码。
+DEFAULT_ORDER_FIELDS: dict[str, dict] = {
+    "order_id": {"label": "订单号", "titles": ["Order ID", "订单号", "平台订单号"]},
+    "status": {"label": "订单状态", "titles": ["Order Status", "订单状态"]},
+    "cancel": {"label": "取消/退货类型", "titles": [
+        "Cancelation/Return Type", "Cancellation/Return Type", "取消/退货类型", "取消退货类型"]},
+    "sku_id": {"label": "SKU ID", "titles": ["SKU ID"]},
+    "seller_sku": {"label": "卖家编码（成本表按它对）", "titles": [
+        "Seller SKU", "卖家SKU", "商家SKU"]},
+    "product_id": {"label": "商品ID", "titles": ["Product ID", "商品ID"]},
+    "product_name": {"label": "商品名称", "titles": ["Product Name", "商品名称"]},
+    "qty": {"label": "购买数量", "titles": ["Quantity", "数量", "购买数量"]},
+    "subtotal_before": {"label": "折扣前小计", "titles": [
+        "SKU Subtotal Before Discount", "折扣前小计", "SKU折扣前小计"]},
+    "seller_discount": {"label": "卖家折扣", "titles": [
+        "SKU Seller Discount", "卖家折扣", "SKU卖家折扣"]},
+    "order_amount": {"label": "买家实付", "titles": ["Order Amount", "订单金额", "买家实付"]},
+    "refund_amount": {"label": "退款金额", "titles": ["Order Refund Amount", "退款金额"]},
+    "created": {"label": "下单时间", "titles": ["Created Time", "创建时间", "下单时间"]},
+    "paid": {"label": "付款时间", "titles": ["Paid Time", "付款时间", "支付时间"]},
+}
+
+# 成本表：哪一列是商品编码、哪一列是成本
+DEFAULT_COST_FIELDS: dict[str, dict] = {
+    "code": {"label": "商品编码", "titles": ["商品编码", "编码", "Seller SKU", "卖家SKU", "SKU"]},
+    "cost": {"label": "成本（人民币）", "titles": ["成本", "成本价", "采购成本", "Cost"]},
+}
+
 DEFAULTS: dict = {
     "kinds": {
         "cancelled": "已取消订单",
@@ -210,14 +240,16 @@ DEFAULTS: dict = {
         "unpaid": "未付款订单",
         "normal": "正常订单",
     },
-    # 计算参数表：每一项就是一条算式，公式里引用映射字段 / 其它参数 / 国家费率。
-    # 默认值按业务实情——取消/退货的收入不算，但成本、发单费、平台抽成照算。
+    "order_fields": DEFAULT_ORDER_FIELDS,
+    "cost_fields": DEFAULT_COST_FIELDS,
+    # 计算参数表：每一项就是一条算式，公式里直接写订单表的列标题。
     "params": [
         {"id": "gmv", "label": "GMV（收入）", "role": "gmv",
-         "expr": "subtotal_before - seller_discount",
+         "expr": "[折扣前小计|SKU Subtotal Before Discount|SKU折扣前小计]"
+                 " - [卖家折扣|SKU Seller Discount|SKU卖家折扣]",
          "kinds": ["normal", "zero_amount"]},
         {"id": "cost", "label": "商品成本", "role": "cost",
-         "expr": "qty * cost_unit",
+         "expr": "cost_cny * params.cny_to_local",
          "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
         {"id": "order_count", "label": "订单数", "role": "order_count",
          "expr": "orders",
@@ -226,33 +258,33 @@ DEFAULTS: dict = {
          "expr": "qty",
          "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
         {"id": "buyer_paid", "label": "买家实付", "role": "buyer_paid",
-         "expr": "order_amount",
+         "expr": "paid",
          "kinds": ["normal", "zero_amount"]},
         {"id": "dispatch", "label": "发单费",
-         "expr": "orders * params.dispatch_fee_local",
+         "expr": "orders * params.dispatch_fee_cny * params.cny_to_local",
          "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
         {"id": "platform_commission", "label": "平台佣金",
          "expr": "gmv * params.platform_commission",
          "kinds": ["normal", "cancelled", "refunded"]},
         {"id": "tx_fee", "label": "交易手续费",
-         "expr": "order_amount * params.tx_fee",
-         "kinds": ["normal", "cancelled", "refunded"]},
-        {"id": "cashback", "label": "奖金返现",
-         "expr": "gmv * params.cashback", "kinds": ["normal"]},
-        {"id": "super_coupon", "label": "超级优惠券",
-         "expr": "gmv * params.super_coupon", "kinds": ["normal"], "enabled": False},
-        {"id": "growth_fee", "label": "商家成长",
-         "expr": "gmv * params.growth_fee", "kinds": ["normal"]},
-        {"id": "logistics", "label": "物流",
-         "expr": "gmv * params.logistics", "kinds": ["normal"]},
-        {"id": "affiliate", "label": "达人佣金", "expr": "commission"},
+         "expr": "paid * params.tx_fee",
+         "kinds": ["normal"]},
         {"id": "ads", "label": "广告花费", "expr": "ads"},
+        {"id": "affiliate", "label": "达人佣金", "expr": "commission"},
+        {"id": "order_service", "label": "订单服务费",
+         "expr": "orders * params.order_service",
+         "kinds": ["normal", "cancelled", "refunded", "zero_amount"]},
+        {"id": "other_fee", "label": "其他费用",
+         "expr": "gmv * params.other_fee",
+         "kinds": ["normal"]},
     ],
     "by_country": {},
     "formulas": {
         "gross_profit": "gmv - cost",
-        "total_fees": "sum(fees)",
-        "net": "gross_profit - sum(fees)",
+        "total_fees": ("dispatch + platform_commission + tx_fee + ads + affiliate"
+                       " + order_service + other_fee"),
+        "net": ("gmv - cost - dispatch - platform_commission - tx_fee - ads"
+                " - affiliate - order_service - other_fee"),
         "net_rate": "net / gmv",
     },
 }
@@ -270,7 +302,6 @@ def load_config(path: Path) -> dict:
         # 这里刻意不做白名单过滤：order_filter 支持「按类别分组」的嵌套结构，
         # 之前只收 include_xxx 四个键，新结构会被整个丢掉，
         # 表现是「改配置毫无反应」——这个坑不好查，所以改成整体接受。
-        # 具体的键校验交给 calc.resolve_order_filter()，那边会按默认值补齐。
         for k, v in doc["order_filter"].items():
             out["order_filter"][k] = v
     # params = 参数表（GMV / 成本 / 各项费用都在这张表里，每项自己选订单类别）
@@ -281,7 +312,13 @@ def load_config(path: Path) -> dict:
         out["params"] = doc["fees"]
     if isinstance(doc.get("kinds"), dict) and doc["kinds"]:
         out["kinds"] = doc["kinds"]
-    # 每个国家自己的参数表：{国家: {params: [...]}}，有就优先用
+    for key in ("order_fields", "cost_fields"):
+        if isinstance(doc.get(key), dict) and doc[key]:
+            merged = dict(out[key])
+            for k, v in doc[key].items():
+                merged[k] = v          # 单个字段可以只改一条，其余沿用默认
+            out[key] = merged
+    # 每个国家自己的一套：{国家: {params: [...], order_fields: {...}, cost_fields: {...}}}
     if isinstance(doc.get("by_country"), dict) and doc["by_country"]:
         out["by_country"] = doc["by_country"]
     if isinstance(doc.get("formulas"), dict) and doc["formulas"]:
@@ -289,65 +326,88 @@ def load_config(path: Path) -> dict:
     return out
 
 
-# ---------------- 费用计算 ----------------
+def country_config(fcfg: dict, country: str) -> dict:
+    """取某个国家实际生效的配置：该国有单独设置就用它的，没有就退回通用那套。
 
-# base 决定「乘什么」：gmv 按成交额、order_count 按订单数……
-FEE_BASES = {
-    "gmv": "GMV",
-    "buyer_paid": "买家实付",
-    "fee_base": "平台抽成计费基数（GMV，含取消/退货）",
-    "fee_base_paid": "平台抽成计费基数（实付，含取消/退货）",
-    "order_count": "订单数",
-    "items": "商品件数",
-    "qty": "商品件数",
-    "cost": "商品成本",
-    "cost_unit": "成本单价（成本÷件数）",
-    "order_amount": "订单金额",
-    "subtotal_before": "折扣前小计",
-    "seller_discount": "卖家折扣",
-    "refund": "退款金额",
-    "refund_amount": "退款金额",
-    "commission": "达人佣金（直接取）",
-    "ads": "广告花费（直接取）",
-}
-
-# 计算参数里能直接引用的「映射字段」。
-# 这张表决定了用户在公式里能写什么名字——名字就是 config/mapping.json 的逻辑字段名，
-# 换平台、换表头只改映射，公式一个字都不用动。
-FIELD_LABELS = {
-    "subtotal_before": "折扣前小计（行合计）",
-    "seller_discount": "卖家折扣（行合计）",
-    "order_amount": "买家实付（行合计）",
-    "refund_amount": "退款金额（行合计）",
-    "qty": "件数（行合计）",
-    "order_count": "订单数",
-    "cost": "商品成本（件数×成本单价）",
-    "cost_unit": "平均成本单价",
-    "commission": "达人佣金（整期直接取数）",
-    "ads": "广告花费（整期直接取数）",
-    "params": "国家费率（params.字段名）",
-}
+    返回结构的键与 fcfg 一致（params / order_fields / cost_fields / formulas），
+    方便调用方直接当一份配置用。
+    """
+    base = {
+        "params": list(fcfg.get("params") or []),
+        "order_fields": dict(fcfg.get("order_fields") or {}),
+        "cost_fields": dict(fcfg.get("cost_fields") or {}),
+        "formulas": dict(fcfg.get("formulas") or {}),
+    }
+    one = (fcfg.get("by_country") or {}).get(country) or {}
+    if isinstance(one.get("params"), list) and one["params"]:
+        base["params"] = list(one["params"])
+    for key in ("order_fields", "cost_fields"):
+        if isinstance(one.get(key), dict):
+            base[key].update(one[key])
+    if isinstance(one.get("formulas"), dict):
+        base["formulas"].update(one["formulas"])
+    return base
 
 
-# 费用基数在「按类别明细」里的字段名（对不上时要映射一下）
-_BASE_TO_STAT = {
-    "order_count": "orders",
-    "orders": "orders",
-    "gmv": "gmv",
-    "buyer_paid": "buyer_paid",
-    "buyerpaid": "order_amount",
-    "items": "qty",
-    "qty": "qty",
-    "cost": "cost",
-    "cost_unit": "cost_unit",
-    "refund": "refund",
-    "refund_amount": "refund_amount",
-    "order_amount": "order_amount",
-    "subtotal_before": "subtotal_before",
-    "seller_discount": "seller_discount",
-    "fee_base": "gmv",
-    "fee_base_paid": "buyer_paid",
-}
+# ---------------- 公式里的「标题」→ 数值 ----------------
+#
+# 规矩很简单：公式里直接写订单表的列标题，映射就写在公式里。
+#     [折扣前小计|SKU Subtotal Before Discount] - [卖家折扣]
+# 方括号里用 | 分隔多个候选标题：第一个在订单表里找不到，就试第二个，
+# 一直试到找到为止。所以平台改列名时只改公式，不用改代码。
+
+TITLE_RE = re.compile(r"\[([^\[\]]+)\]")
+
+
+def _norm(s) -> str:
+    """和 loader.norm_header 同一套归一规则：去空白/下划线/连字符、全角转半角、小写。"""
+    t = str(s or "").strip()
+    t = t.replace("\u3000", " ").translate(str.maketrans("　（）／", " ()/"))
+    return re.sub(r"[\s_\-]+", "", t).lower()
+
+
+def compile_expr(expr: str, titles: list[str] | None = None) -> tuple[str, dict[str, list[str]]]:
+    """把公式里的标题换成安全的变量名。
+
+    返回 (可求值的表达式, {变量名: [候选标题(归一化)]})。
+    两种写法都认：
+        [折扣前小计|SKU Subtotal]   显式，可写多个候选
+        折扣前小计                   裸写，只要这个标题在订单表里存在
+    """
+    groups: dict[str, list[str]] = {}
+
+    def var_for(cands: list[str]) -> str:
+        var = f"__t{len(groups)}"
+        groups[var] = cands
+        return var
+
+    def repl(m: re.Match) -> str:
+        cands = [_norm(c) for c in m.group(1).split("|") if c.strip()]
+        cands = [c for c in cands if c]
+        return var_for(cands) if cands else "0"
+
+    text = TITLE_RE.sub(repl, str(expr or ""))
+
+    # 裸写标题也认：用户直接写 `折扣前小计 - 卖家折扣` 同样能算。
+    # 按标题长度倒序替换，避免「数量」先命中把「购买数量」拆坏。
+    pairs = sorted({(str(t).strip(), _norm(t)) for t in (titles or []) if str(t).strip()},
+                   key=lambda p: -len(p[0]))
+    if pairs:
+        alt = "|".join(re.escape(raw) for raw, _ in pairs)
+        pat = re.compile(r"(?<![A-Za-z0-9_.])(" + alt + r")(?![A-Za-z0-9_])", re.IGNORECASE)
+        lookup = {raw.lower(): n for raw, n in pairs}
+
+        def sub(m: re.Match) -> str:
+            n = lookup.get(m.group(1).lower())
+            if not n:
+                return m.group(0)
+            for var, cands in groups.items():   # 同一个标题只建一个变量
+                if cands == [n]:
+                    return var
+            return var_for([n])
+
+        text = pat.sub(sub, text)
+    return text, groups
 
 
 def _pick_kinds(by_kind: dict, kinds) -> dict[str, float]:
@@ -375,88 +435,129 @@ def _pick_kinds(by_kind: dict, kinds) -> dict[str, float]:
 pick_kinds = _pick_kinds
 
 
-def _local_ctx(by_kind: dict, kinds, ctx: dict) -> dict:
-    """给一条参数的公式准备「可用变量」。
+def _find_title(agg: dict[str, float], cands: list[str]) -> tuple[float, str | None]:
+    """按候选顺序找列：先精确匹配，再退一步做包含匹配（只接受唯一命中）。"""
+    for c in cands:
+        if c in agg:
+            return _to_num(agg[c]), c
+    for c in cands:
+        hits = [k for k in agg if c and (c in k or k in c)]
+        if len(hits) == 1:
+            return _to_num(agg[hits[0]]), hits[0]
+    return 0.0, None
 
-    变量就是列映射里的逻辑字段（subtotal_before / seller_discount / order_amount
-    / refund_amount / qty），再加上几个由它们派生的量（gmv / cost / cost_unit …）。
-    全部按这条参数自己的 kinds 过滤——所以「平台佣金只算正常单」时，
-    公式里的 gmv 也只剩正常单的 GMV。
+
+def _title_value(agg: dict[str, float], aliases: dict, key: str) -> float:
+    """按「字段 → 标题候选」取一个基础字段的合计（gmv/实付这类派生量要用）。"""
+    cands = [_norm(c) for c in (aliases.get(key) or []) if str(c).strip()]
+    got, hit = _find_title(agg, cands)
+    return got if hit else 0.0
+
+
+def _local_ctx(by_kind: dict, kinds, ctx: dict,
+               groups: dict[str, list[str]]) -> tuple[dict, list[str]]:
+    """准备一条参数公式的可用变量。
+
+    两类变量：
+      · 订单表的列：公式里写 [标题] 就取这一列在选定订单类别上的合计
+      · 派生量：gmv / paid / qty / orders / cost_cny / cost / cost_unit / refund
+                / commission / ads / params / param
     """
     agg = _pick_kinds(by_kind, kinds)
-    local = dict(agg)
+    local: dict[str, float] = {}
+    missing: list[str] = []
 
-    subtotal = agg.get("subtotal_before", 0.0)
-    discount = agg.get("seller_discount", 0.0)
-    qty = agg.get("qty", agg.get("items", 0.0))
-    cost = agg.get("cost", 0.0)
+    for var, cands in groups.items():
+        val, hit = _find_title(agg, cands)
+        local[var] = val
+        if hit is None and cands:
+            missing.append(cands[0])
+
+    aliases = ctx.get("aliases") or {}
+    params = ctx.get("params")
+    cny = float(getattr(params, "cny_to_local", 1.0) or 1.0)
+
+    qty = _to_num(agg.get("__qty"))
+    cost_cny = _to_num(agg.get("__cost_cny"))
 
     local["qty"] = qty
     local["items"] = qty
-    local["orders"] = agg.get("orders", 0.0)
+    local["orders"] = _to_num(agg.get("__orders"))
     local["order_count"] = local["orders"]
-    local["cost"] = cost
-    local["cost_unit"] = (cost / qty) if qty else _to_num(ctx.get("cost_unit"))
-    local["gmv"] = subtotal - discount
-    local["buyer_paid"] = agg.get("order_amount", 0.0)
-    local["order_amount"] = agg.get("order_amount", 0.0)
-    local["refund"] = agg.get("refund", agg.get("refund_amount", 0.0))
-    # 整期直接取数的两项，与订单类别无关
+    local["cost_cny"] = cost_cny
+    local["cost_unit"] = (cost_cny / qty) if qty else _to_num(ctx.get("cost_unit"))
+    local["cost"] = cost_cny * cny
+    local["refund"] = _to_num(agg.get("__refund"))
+    local["gmv"] = (_title_value(agg, aliases, "subtotal_before")
+                    - _title_value(agg, aliases, "seller_discount"))
+    local["paid"] = _title_value(agg, aliases, "order_amount")
+    local["buyer_paid"] = local["paid"]
     local["commission"] = _to_num(ctx.get("commission"))
     local["ads"] = _to_num(ctx.get("ads"))
-    local["params"] = ctx.get("params")
-    local["param"] = {}            # 其它参数算出来的值：param.佣金id
+    local["params"] = params
+    local["param"] = {}
     local["by_kind"] = by_kind
-    return local
+    return local, missing
+
+
+# 费用基数里这些名字走内部量，不走标题
+_BASE_INTERNAL = {
+    "orders": "__orders", "order_count": "__orders",
+    "items": "__qty", "qty": "__qty",
+    "cost_cny": "__cost_cny", "refund": "__refund", "refund_amount": "__refund",
+}
 
 
 def _base_value(base: str, ctx: dict, kinds) -> float:
-    """算一条费用的基数（base + rate 这种简写形式用）。
-
-    没写 kinds → 全部类别；写了 kinds → 从「按订单类别分开的明细」里挑出来求和。
-    """
-    stat = _BASE_TO_STAT.get(base)
-    if stat is None:
-        return _to_num(ctx.get(base))
+    """简写形式（base+rate）的基数。新配置一般用公式，这里保证老配置还能跑。"""
+    b = str(base or "gmv").strip()
     agg = _pick_kinds(ctx.get("by_kind") or {}, kinds)
-    if stat == "cost_unit":
-        qty = agg.get("qty", 0.0)
-        return (agg.get("cost", 0.0) / qty) if qty else 0.0
-    return _to_num(agg.get(stat))
+    aliases = ctx.get("aliases") or {}
+    params = ctx.get("params")
+    cny = float(getattr(params, "cny_to_local", 1.0) or 1.0)
+
+    if b in ("commission", "ads"):
+        return _to_num(ctx.get(b))
+    if b in _BASE_INTERNAL:
+        return _to_num(agg.get(_BASE_INTERNAL[b]))
+    if b == "cost":
+        return _to_num(agg.get("__cost_cny")) * cny
+    if b == "cost_unit":
+        q = _to_num(agg.get("__qty"))
+        return (_to_num(agg.get("__cost_cny")) / q) if q else 0.0
+    if b == "gmv":
+        return (_title_value(agg, aliases, "subtotal_before")
+                - _title_value(agg, aliases, "seller_discount"))
+    if b in ("buyer_paid", "paid", "order_amount"):
+        return _title_value(agg, aliases, "order_amount")
+    if b == "subtotal_before":
+        return _title_value(agg, aliases, "subtotal_before")
+    if b == "seller_discount":
+        return _title_value(agg, aliases, "seller_discount")
+    return _to_num(agg.get(_norm(b)))
 
 
 def compute_params(params_cfg: list[dict], ctx: dict) -> tuple[dict[str, float], list[str]]:
     """按「计算参数表」逐项算出金额。返回 ({参数id: 金额}, [问题说明])。
 
-    这张表里什么都能放：GMV、商品成本、订单数、件数、各项费用。
-    每一项有两种写法，随便挑：
+    每一项有两种写法：
+      · 公式（推荐）  {"id":"dispatch","expr":"orders * params.dispatch_fee_cny * params.cny_to_local"}
+      · 简写          {"id":"dispatch","base":"order_count","rate":"params.xxx"}
 
-      · 公式写法（推荐，最自由）
-            {"id":"commission","label":"平台佣金","kinds":["normal"],
-             "expr":"gmv * params.platform_commission"}
-      · 简写写法（基数 × 费率）
-            {"id":"dispatch","base":"order_count","rate":"params.dispatch_fee_local",
-             "kinds":["normal"]}
-
-    公式里能用的变量（都按这一项自己的 kinds 过滤后再汇总）：
-        subtotal_before / seller_discount / order_amount / refund_amount / qty
-        gmv（= 折扣前小计 − 卖家折扣）、cost（= 件数 × 成本单价）、cost_unit
-        orders（订单数）、commission / ads（整期直接取数）、params.国家费率
-        param.其它参数id（引用参数表里某一项算出来的值）
-    参数之间可以互相引用，顺序无所谓，会自动排队算。
-
-    每项可写字段：
-      id       唯一标识，净利公式里用它引用金额
-      label    中文名
-      expr     计算公式；写了就以它为准
-      base     简写用：基数；rate 简写用：乘数（不写 = 1）
-      kinds    只在这些订单类别上算。不写 = 全部类别。写 [] = 这一项不算
-      enabled  false = 暂时不算这一项
-      role     报表固定列（gmv/cost/order_count/items/buyer_paid），其余都进费用
+    公式里能写：
+      [标题|备选标题]  订单表的列（按这一项自己的 kinds 合计）
+      裸写标题         同上，只要该标题在订单表里存在
+      gmv / paid / qty / orders / cost_cny / cost / cost_unit / refund
+      commission / ads（整期直接取数）
+      params.国家费率
+      param.其它参数id（引用参数表里某一项算出来的值）
     """
     by_kind = ctx.get("by_kind") or {}
+    titles = ctx.get("titles") or []
     out: dict[str, float] = {}
     issues: list[str] = []
+    missing: list[str] = []
+
     pending: list[dict] = [it for it in (params_cfg or []) if isinstance(it, dict)
                            and str(it.get("id") or "").strip()]
     resolved: dict[str, float] = {}
@@ -476,18 +577,19 @@ def compute_params(params_cfg: list[dict], ctx: dict) -> tuple[dict[str, float],
                 continue
 
             kinds = item.get("kinds")
-            local = _local_ctx(by_kind, kinds, ctx)
+            expr = item.get("expr")
+            py_expr, groups = compile_expr(str(expr or ""), titles)
+            local, miss = _local_ctx(by_kind, kinds, ctx, groups)
+            missing.extend(miss)
             # 其它参数算出来的值放在 param.xxx 名下，显式引用才用：
-            #   裸写 gmv   = 按这一项自己的 kinds 现算的 GMV（勾哪个类别就算哪个）
+            #   裸写 gmv   = 按这一项自己的 kinds 现算的 GMV
             #   param.gmv  = 参数表里「GMV」那一项算出来的值
-            # 这样「勾了取消单却没反应」这种糊涂账不会出现。
-            local["param"] = dict(resolved)
+            local["param"] = {k: v for k, v in resolved.items() if k != fid}
             local.pop(fid, None)      # 不允许自己引用自己
 
-            expr = item.get("expr")
             try:
-                if expr is not None and str(expr).strip() != "":
-                    val, _ = safe_eval(str(expr), local)
+                if py_expr.strip():
+                    val, _ = safe_eval(py_expr, local)
                 else:
                     base = str(item.get("base") or "gmv").strip()
                     if base in ("commission", "ads"):
@@ -497,7 +599,6 @@ def compute_params(params_cfg: list[dict], ctx: dict) -> tuple[dict[str, float],
                     base_val = _base_value(base, ctx, kinds)
                     rate_raw = item.get("rate")
                     if rate_raw is None:
-                        # 没写 rate = 1，即「原样取这个基数」（GMV、成本、订单数这类统计量）
                         rate_raw = 1.0
                     if isinstance(rate_raw, (int, float)):
                         rate = float(rate_raw)
@@ -525,6 +626,10 @@ def compute_params(params_cfg: list[dict], ctx: dict) -> tuple[dict[str, float],
                 resolved[fid] = 0.0
             pending = []
             break
+
+    for t in dict.fromkeys(missing):
+        issues.append(f"订单表里找不到标题「{t}」，用到它的参数按 0 计——"
+                      f"在公式里补一个候选标题（用 | 分隔）就行")
 
     # 保持参数表里的顺序输出，界面与报表看起来才稳定
     for item in (params_cfg or []):

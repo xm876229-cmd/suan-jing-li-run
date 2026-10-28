@@ -423,6 +423,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/config"):
             from bridge import config_page
             _json(self, config_page.read_config())
+        elif self.path.startswith("/api/order-headers"):
+            from bridge import config_page
+            _json(self, config_page.order_headers())
         elif self.path.startswith("/api/costs"):
             from bridge import costs_api
             from urllib.parse import parse_qs, urlparse as _up
@@ -453,6 +456,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_config(preview=True)
         elif self.path.startswith("/api/config/save"):
             self._post_config(preview=False)
+        elif self.path.startswith("/api/cost-fields"):
+            self._post_cost_fields()
         elif self.path.startswith("/api/costs/save"):
             self._post_costs(save=True)
         elif self.path.startswith("/api/costs/import"):
@@ -527,13 +532,17 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, config_page.preview(
                 params, payload.get("formulas"),
                 str(payload.get("country") or ""),
-                payload.get("by_country")))
+                payload.get("by_country"),
+                payload.get("order_fields"),
+                payload.get("cost_fields")))
             return
 
         try:
             _json(self, config_page.save_config(
                 params, payload.get("formulas") or {},
-                by_country=payload.get("by_country")))
+                by_country=payload.get("by_country"),
+                order_fields=payload.get("order_fields"),
+                cost_fields=payload.get("cost_fields")))
         except Exception as e:  # noqa: BLE001
             _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
 
@@ -663,6 +672,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             _json(self, settings_api.save_rates(payload))
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
+
+    def _post_cost_fields(self):
+        """成本表「哪一列是编码 / 哪一列是成本」的标题设置。"""
+        from bridge import config_page
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+        try:
+            _json(self, config_page.save_cost_fields(
+                payload.get("code") or [], payload.get("cost") or []))
         except Exception as e:  # noqa: BLE001
             _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
 

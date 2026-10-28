@@ -257,6 +257,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.json:
             print(f"⚠ {params.fx_note}")
 
+    # 这个国家生效的配置：参数表、订单表标题、成本表列标题、净利公式。
+    # 公式里写的是订单表的列标题，所以解析订单之前就得知道这套标题。
+    from src import formula as _formula
+    fcfg = _formula.load_config(paths.CONFIG / "formulas.json")
+    cc = _formula.country_config(fcfg, country)
+    order_fields = cc.get("order_fields") or {}
+    cost_fields = cc.get("cost_fields") or {}
+
     costs_path, costs_note = pick_costs(args.costs)
     if costs_path:
         print(f"成本表：{costs_path.name}（{costs_note}）")
@@ -281,20 +289,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"找不到订单文件：{args.orders}")
             return 2
         data = load_from_files(args.orders, args.ads, args.commissions,
-                               map_path, costs_path, params.usd_to_local)
+                               map_path, costs_path, params.usd_to_local,
+                               order_fields=order_fields, cost_fields=cost_fields)
         source = "、".join(data.sources.values()) or args.orders.name
     else:
         if not args.dir.exists():
             print(f"找不到目录：{args.dir}")
             return 2
-        data = load_from_dir(args.dir, costs_path, params.usd_to_local, map_path)
+        data = load_from_dir(args.dir, costs_path, params.usd_to_local, map_path,
+                             order_fields=order_fields, cost_fields=cost_fields)
         source = args.dir.name
 
     if not data.orders:
         print("没有解析出任何订单行，请检查订单文件的表头（需要 Order ID / Seller SKU / Quantity 等列）")
         return 1
 
-    res = compute(data, params, switches, args.dfrom, args.dto, args.date_field)
+    res = compute(data, params, switches, args.dfrom, args.dto, args.date_field, fcfg=fcfg)
     if not res.products:
         print("区间内没有可核算的订单，请检查日期范围或数据文件")
         return 1

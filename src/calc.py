@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import formula, paths
-from .loader import OrderLine, RawData
+from .loader import OrderLine, RawData, merged_aliases
 
 ZERO = 0.0
 
@@ -53,6 +53,10 @@ class Params:
     super_coupon: float
     growth_fee: float
     logistics: float
+    # 订单服务费：每个国家不一样，本地货币、按单收
+    order_service: float = 0.0
+    # 其他费用：按 GMV 比例收的杂项
+    other_fee: float = 0.0
     # 以下为配置辅助字段，不参与计算
     currency: str = ""
     region: str = ""
@@ -107,6 +111,8 @@ def load_rates(path: Path) -> tuple[dict[str, Params], Switches]:
             super_coupon=_f(c, "super_coupon"),
             growth_fee=_f(c, "growth_fee"),
             logistics=_f(c, "logistics"),
+            order_service=_f(c, "order_service"),
+            other_fee=_f(c, "other_fee"),
             currency=str(c.get("currency") or ""),
             region=str(c.get("region") or ""),
             rates_verified=bool(c.get("rates_verified", True)),
@@ -430,6 +436,10 @@ def compute(data: RawData, params: Params, switches: Switches,
     # 四关全关的类别直接整行不要（等价于「这一行完全不参与」）
     kind_stats: dict[str, int] = {k: 0 for k in KINDS}
 
+    # 这个国家生效的一套：参数表、订单表字段标题、成本表列标题、净利公式。
+    cc = formula.country_config(fcfg, params.country)
+    order_aliases = merged_aliases(cc["order_fields"])
+
     # 订单实付分配：按 GMV 占比时，先算出每个订单的 GMV 合计。
     # 用全量订单（不受日期过滤影响），避免跨期的订单被截断后分配比例失真。
     order_gmv_total: dict[str, float] = defaultdict(float)
@@ -478,8 +488,9 @@ def compute(data: RawData, params: Params, switches: Switches,
 
         # 取消 / 退货金额：只是统计量（用来在报表上说明「退了多少钱」），
         # 不受口径开关影响，否则对账时看不出退了多少
-        if kind in ("cancelled", "refunded"):
-            m.refund += l.order_amount
+        refund_line = l.refund_amount or (l.order_amount if kind in ("cancelled", "refunded") else 0.0)
+        if refund_line:
+            m.refund += refund_line
 
         paid_amt = alloc_paid(l)
 
@@ -491,28 +502,29 @@ def compute(data: RawData, params: Params, switches: Switches,
         # 两套开关叠加会让人算不清（改了参数没反应，或反应了但不知道是谁改的）。
         bk = m.by_kind.get(kind)
         if bk is None:
-            bk = {
-                # 从列映射来的原始字段，公式里可以直接引用
-                "subtotal_before": ZERO, "seller_discount": ZERO,
-                "order_amount": ZERO, "refund_amount": ZERO, "qty": ZERO,
-                # 由它们派生的量
-                "gmv": ZERO, "buyer_paid": ZERO, "orders": ZERO,
-                "items": ZERO, "cost": ZERO, "refund": ZERO,
-            }
+            bk = {}
             m.by_kind[kind] = bk
-        bk["subtotal_before"] += l.subtotal_before
-        bk["seller_discount"] += l.seller_discount
-        bk["order_amount"] += paid_amt
-        bk["refund_amount"] += l.refund_amount
-        bk["qty"] += l.qty
-        bk["gmv"] += l.gmv
-        bk["buyer_paid"] += paid_amt
-        bk["orders"] += l.allocated_orders
-        bk["items"] += l.qty
-        bk["refund"] += l.order_amount if kind in ("cancelled", "refunded") else ZERO
+        # 订单表的每一列都按标题记下来：公式里写 [折扣前小计] 就从这里取。
+        # 这样平台加一列、改列名、换语言，都不用动代码。
+        #
+        # 买家实付是「订单级」的金额，同一订单的每一行都写着整单的数，
+        # 直接按行相加会重复计（三行订单就把实付算成三倍）。
+        # 所以这一列按订单内行数分摊，和订单数的分摊口径一致。
+        paid_titles = {formula._norm(c) for c in (order_aliases.get("order_amount") or [])}
+        for title, val in l.raw_num.items():
+            bk[title] = bk.get(title, ZERO) + (paid_amt if title in paid_titles else val)
+        bk["__orders"] = bk.get("__orders", ZERO) + l.allocated_orders
+        bk["__qty"] = bk.get("__qty", ZERO) + l.qty
         cost_cny = l.cost_total_cny
-        cost_line = (cost_cny * params.cny_to_local) if cost_cny is not None else ZERO
-        bk["cost"] += cost_line
+        bk["__cost_cny"] = bk.get("__cost_cny", ZERO) + (cost_cny if cost_cny is not None else ZERO)
+        bk["__refund"] = bk.get("__refund", ZERO) + refund_line
+        # 老字段留着：报表的毛利/异常页还在用
+        bk["gmv"] = bk.get("gmv", ZERO) + l.gmv
+        bk["buyer_paid"] = bk.get("buyer_paid", ZERO) + paid_amt
+        bk["orders"] = bk.get("orders", ZERO) + l.allocated_orders
+        bk["items"] = bk.get("items", ZERO) + l.qty
+        bk["cost"] = bk.get("cost", ZERO) + (cost_cny or ZERO)
+        bk["refund"] = bk.get("refund", ZERO) + refund_line
 
         # ① 收入：GMV 与买家实付
         if sw_k["income"]:
@@ -549,12 +561,8 @@ def compute(data: RawData, params: Params, switches: Switches,
     # 每一项都自带 kinds（只算哪些订单类别），所以「发单费只算正常单和退货单」
     # 「平台佣金只算正常单」这类口径，都是改配置里的一个数组，不改代码。
     # 加一项新支出也是加一条，自动参与 net 的计算。
-    # 每个国家可以有自己的参数表（不同国家收的费用不一样）。
-    # 有就用该国的，没有就退回全局那套。
-    param_cfg = list(fcfg.get("params") or [])
-    per_country = (fcfg.get("by_country") or {}).get(params.country) or {}
-    if isinstance(per_country.get("params"), list) and per_country["params"]:
-        param_cfg = list(per_country["params"])
+    param_cfg = list(cc["params"])
+    net_formulas = cc["formulas"]
     # 老开关仍然生效：超级优惠券原来由 switches 控制
     if switches.super_coupon_enabled:
         for it in param_cfg:
@@ -592,6 +600,11 @@ def compute(data: RawData, params: Params, switches: Switches,
             # 每一行订单按类别记的原始量，计算参数的 kinds 就是从这里取数
             "by_kind": m.by_kind,
             "params": params,
+            # 公式里写 [标题] 时，靠这两个找列：
+            #   titles  本次订单表的真实表头（裸写标题也能匹配）
+            #   aliases 该国「基础字段 → 标题候选」（gmv/实付这些派生量用）
+            "titles": data.order_titles,
+            "aliases": order_aliases,
             # 兜底单价：某个参数 kinds 里一件都没有时，公式里的 cost_unit 不至于变 0
             "cost_unit": (m.cost_local / m.items) if m.items else ZERO,
         }
@@ -630,7 +643,7 @@ def compute(data: RawData, params: Params, switches: Switches,
                 "buyer_paid": m.buyer_paid, "order_count": m.orders,
                 "items": m.items, "refund": m.refund,
                 "fees": m.fees, "params": params}
-        fvals, f_issues = formula.compute_formulas(fcfg.get("formulas") or {}, fctx)
+        fvals, f_issues = formula.compute_formulas(net_formulas, fctx)
         if f_issues:
             fee_issues.extend(f_issues[:1])
         if "net" in fvals:

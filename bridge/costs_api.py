@@ -116,6 +116,7 @@ def import_costs(name: str, b64: str, mode: str = "merge") -> dict:
     mode=merge（默认）：新编码追加，已有编码价格变了才更新，没出现的编码保留。
     mode=replace：以这份文件为准，文件里没有的编码删掉（谨慎）。
     """
+    from src import formula
     from src.loader import parse_costs, read_table
 
     if not name or not b64:
@@ -131,7 +132,9 @@ def import_costs(name: str, b64: str, mode: str = "merge") -> dict:
     tmp.write_bytes(raw)
     try:
         rows = read_table(tmp, sheet="成本") if suffix in (".xlsx", ".xls") else read_table(tmp)
-        parsed = parse_costs(rows)
+        # 用界面上配的「哪一列是编码 / 哪一列是成本」去认表头
+        cf = (formula.load_config(paths.CONFIG / "formulas.json").get("cost_fields") or {})
+        parsed = parse_costs(rows, cf)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"读不懂这个文件：{e}"}
     finally:

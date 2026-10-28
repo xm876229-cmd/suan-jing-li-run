@@ -161,15 +161,17 @@ def get_aliases() -> dict[str, list[str]]:
     return out
 
 
-def build_colmap(header_row: Iterable) -> dict[str, int]:
+def build_colmap(header_row: Iterable, aliases: dict[str, list[str]] | None = None) -> dict[str, int]:
     """把表头行映射成 {逻辑字段: 列号}。
 
     每个逻辑字段按候选顺序逐个试：第一个找不到就试下一个，
     直到找到为止（所以可以配很多个标题防表格改版）。
+
+    aliases 传了就用它（界面上按国家配的标题），没传就用 config/mapping.json。
     """
     norm = [norm_header(c) for c in header_row]
     colmap: dict[str, int] = {}
-    for key, names in get_aliases().items():
+    for key, names in (aliases or get_aliases()).items():
         for want in names:
             w = norm_header(want)
             hit = next((i for i, h in enumerate(norm) if h == w), None)
@@ -181,14 +183,15 @@ def build_colmap(header_row: Iterable) -> dict[str, int]:
     return colmap
 
 
-def find_header_row(rows: list[tuple], required: tuple[str, ...], max_scan: int = 8) -> tuple[int, dict[str, int]]:
+def find_header_row(rows: list[tuple], required: tuple[str, ...], max_scan: int = 8,
+                    aliases: dict[str, list[str]] | None = None) -> tuple[int, dict[str, int]]:
     """在前若干行里找最像表头的那一行：包含 required 字段最多者。
 
     平台导出常见套路：第 1 行英文表头 + 第 2 行英文说明；或第 1 行标题、第 3 行才是表头。
     """
     best = (-1, -1, {})
     for i, row in enumerate(rows[:max_scan]):
-        cm = build_colmap(row)
+        cm = build_colmap(row, aliases)
         score = sum(1 for k in required if k in cm)
         if score > best[0] or (score == best[0] and len(cm) > len(best[2])):
             best = (score, i, cm)
@@ -197,6 +200,28 @@ def find_header_row(rows: list[tuple], required: tuple[str, ...], max_scan: int 
     if score < min(2, len(required)):
         return -1, {}
     return idx, cm
+
+
+def merged_aliases(order_fields: dict | None) -> dict[str, list[str]]:
+    """把界面上配的「字段 → 标题候选」合并进内置别名。
+
+    order_fields 两种写法都认：
+        {"subtotal_before": ["折扣前小计", "SKU Subtotal"]}
+        {"subtotal_before": {"label": "折扣前小计", "titles": [...]}}
+    配了的字段以配置为准（顺序即优先级），没配的沿用内置默认。
+    """
+    out = dict(get_aliases())
+    for key, v in (order_fields or {}).items():
+        if isinstance(v, dict):
+            titles = v.get("titles") or v.get("candidates") or []
+        elif isinstance(v, list):
+            titles = v
+        else:
+            continue
+        clean = [str(t).strip() for t in titles if str(t).strip()]
+        if clean:
+            out[str(key)] = clean
+    return out
 
 
 # ---------------- 数据结构 ----------------
@@ -303,6 +328,10 @@ class OrderLine:
     cost_unit_cny: Optional[float] = None
     refund_amount: float = 0.0
     order_line_count: int = 1
+    # 这一行订单在原始表里的「列标题 → 数值」。
+    # 公式里写 [折扣前小计] 这种标题时，就从这里取数——
+    # 所以公式不用关心列在第几列，平台改列顺序也不影响。
+    raw_num: dict[str, float] = field(default_factory=dict)
 
     @property
     def is_cancelled(self) -> bool:
@@ -355,6 +384,8 @@ class RawData:
     commissions: dict[str, float]
     issues: list[str] = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)
+    # 订单表的原始表头。计算参数里裸写标题时靠它匹配。
+    order_titles: list[str] = field(default_factory=list)
 
 
 # ---------------- 文件读取 ----------------
@@ -378,20 +409,38 @@ def read_table(path: Path, sheet: Optional[str] = None) -> list[tuple]:
 
 # ---------------- 各类数据解析 ----------------
 
-def parse_costs(rows: list[tuple]) -> dict[str, float]:
-    """成本表：编码 → 成本（人民币）。表头可有可无。"""
+def parse_costs(rows: list[tuple], cost_fields: dict | None = None) -> dict[str, float]:
+    """成本表：编码 → 成本（人民币）。表头可有可无。
+
+    cost_fields 可以指定「编码列」「成本列」的标题候选（界面上可改）：
+        {"code": ["商品编码", "SKU"], "cost": ["成本", "采购成本"]}
+    """
     out: dict[str, float] = {}
     start = 0
+    sku_col, cost_col = 0, 1
+    cf = cost_fields or {}
+    code_titles = [norm_header(x) for x in (cf.get("code") or []) if str(x).strip()]
+    cost_titles = [norm_header(x) for x in (cf.get("cost") or []) if str(x).strip()]
+
     if rows:
-        cm = build_colmap(rows[0])
-        if "seller_sku" in cm or "product_id" in cm:
+        norm = [norm_header(c) for c in rows[0]]
+        hit_code = next((norm.index(t) for t in code_titles if t in norm), None)
+        hit_cost = next((norm.index(t) for t in cost_titles if t in norm), None)
+        if hit_code is None or hit_cost is None:
+            cm = build_colmap(rows[0])
+            if "seller_sku" in cm or "product_id" in cm:
+                start = 1
+                if hit_code is None:
+                    hit_code = cm.get("seller_sku", cm.get("product_id"))
+                if hit_cost is None:
+                    hit_cost = next((c for c in range(len(rows[0])) if c != hit_code), 1)
+        if hit_code is not None and hit_cost is not None:
+            sku_col, cost_col = hit_code, hit_cost
             start = 1
-            sku_col = cm.get("seller_sku", 0)
+        elif hit_code is not None:
+            sku_col = hit_code
             cost_col = next((c for c in range(len(rows[0])) if c != sku_col), 1)
-        else:
-            sku_col, cost_col = 0, 1
-    else:
-        sku_col, cost_col = 0, 1
+            start = 1
 
     for r in rows[start:]:
         if len(r) <= max(sku_col, cost_col):
@@ -522,13 +571,40 @@ def parse_mapping_json(path: Path) -> SkuIndex:
     return idx
 
 
-def parse_orders(rows: list[tuple]) -> list[OrderLine]:
-    hidx, cm = find_header_row(rows, ("order_id", "sku_id", "seller_sku", "qty"))
+def _is_number(v) -> bool:
+    """这个单元格像不像数字（决定要不要进「标题 → 数值」表）。
+
+    订单号、SKU ID 这类长数字串会顶到公式里，所以超过 12 位的一律当标识符，
+    不算金额也不进聚合表。
+    """
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float)):
+        return abs(float(v)) < 1e12
+    s = to_str(v).replace(",", "")
+    if not s or not re.fullmatch(r"-?\d+(\.\d+)?", s):
+        return False
+    return len(s.replace("-", "").split(".")[0]) <= 12
+
+
+def parse_orders(rows: list[tuple], order_fields: dict | None = None,
+                 titles_out: list[str] | None = None) -> list[OrderLine]:
+    """解析订单表。
+
+    order_fields 是界面上按国家配的「字段 → 标题候选」，配了就优先用。
+    """
+    aliases = merged_aliases(order_fields)
+    hidx, cm = find_header_row(rows, ("order_id", "sku_id", "seller_sku", "qty"),
+                               aliases=aliases)
     if hidx < 0:
         return []
     need = ("order_id", "sku_id", "seller_sku", "qty", "subtotal_before")
     if sum(1 for k in need if k in cm) < 3:
         return []
+    # 原始表头（归一化）：公式里写标题时靠它匹配
+    raw_titles = [norm_header(c) for c in rows[hidx]]
+    if titles_out is not None:
+        titles_out.extend(str(c).strip() for c in rows[hidx] if str(c).strip())
 
     def get(r, key, default=None):
         i = cm.get(key)
@@ -569,24 +645,30 @@ def parse_orders(rows: list[tuple]) -> list[OrderLine]:
         if not re.search(r"\d{6,}", oid) and qty <= 1 and before == 0 and amount == 0:
             continue
 
-        lines.append(
-            OrderLine(
-                order_id=oid,
-                seller_sku=sku,
-                sku_id=sku_id,
-                product_name=to_str(get(r, "product_name", "")),
-                qty=qty,
-                subtotal_before=before,
-                seller_discount=to_num(get(r, "seller_discount")),
-                order_amount=amount,
-                refund_amount=to_num(get(r, "refund_amount")),
-                cancel=to_str(get(r, "cancel", "")),
-                status=to_str(get(r, "status", "")),
-                created=to_str(get(r, "created", "")),
-                paid=to_str(get(r, "paid", "")),
-                product_id=to_str(get(r, "product_id", "")) or legacy_pid(r),
-            )
+        line = OrderLine(
+            order_id=oid,
+            seller_sku=sku,
+            sku_id=sku_id,
+            product_name=to_str(get(r, "product_name", "")),
+            qty=qty,
+            subtotal_before=before,
+            seller_discount=to_num(get(r, "seller_discount")),
+            order_amount=amount,
+            refund_amount=to_num(get(r, "refund_amount")),
+            cancel=to_str(get(r, "cancel", "")),
+            status=to_str(get(r, "status", "")),
+            created=to_str(get(r, "created", "")),
+            paid=to_str(get(r, "paid", "")),
+            product_id=to_str(get(r, "product_id", "")) or legacy_pid(r),
         )
+        # 公式里写 [折扣前小计] 这种标题时，就从这里取数。
+        # 只收「像数字」的列：订单号、SKU、时间这些不进，省内存也不会被误当金额。
+        raw: dict[str, float] = {}
+        for t, v in zip(raw_titles, r):
+            if t and _is_number(v):
+                raw[t] = raw.get(t, 0.0) + to_num(v)
+        line.raw_num = raw
+        lines.append(line)
 
     per_order = Counter(l.order_id for l in lines)
     for l in lines:
@@ -732,14 +814,17 @@ def load_from_files(order_file: Path, ads_file: Optional[Path] = None,
                     commission_file: Optional[Path] = None,
                     mapping_file: Optional[Path] = None,
                     costs_file: Optional[Path] = None,
-                    usd_to_local: float = 1.0) -> RawData:
+                    usd_to_local: float = 1.0,
+                    order_fields: dict | None = None,
+                    cost_fields: dict | None = None) -> RawData:
     """从四个独立导出文件装配数据。"""
     issues: list[str] = []
     sources: dict[str, str] = {}
 
     order_rows = read_table(order_file)
     sources["订单"] = Path(order_file).name
-    orders = parse_orders(order_rows)
+    titles: list[str] = []
+    orders = parse_orders(order_rows, order_fields, titles)
     if not orders:
         issues.append(f"订单文件解析不出数据行：{Path(order_file).name}")
 
@@ -756,7 +841,7 @@ def load_from_files(order_file: Path, ads_file: Optional[Path] = None,
     costs: dict[str, float] = {}
     if costs_file and Path(costs_file).exists():
         rows = read_table(costs_file, sheet="成本") if costs_file.suffix.lower() in (".xlsx", ".xls") else read_table(costs_file)
-        costs = parse_costs(rows)
+        costs = parse_costs(rows, cost_fields)
         sources["成本"] = Path(costs_file).name
         if not costs:
             issues.append(f"成本文件里没读到编码与成本：{Path(costs_file).name}")
@@ -779,7 +864,8 @@ def load_from_files(order_file: Path, ads_file: Optional[Path] = None,
     attach_costs(orders, costs, issues)
 
     return RawData(orders=orders, costs=costs, sku_index=sku_index, ads=ads,
-                   commissions=commissions, issues=issues, sources=sources)
+                   commissions=commissions, issues=issues, sources=sources,
+                   order_titles=titles)
 
 
 # 每类表的特征字段：只要这几个字段同时出现在同一行，就能确定类型
@@ -807,7 +893,9 @@ def classify_rows(rows: list[tuple]) -> Optional[str]:
 
 def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
                   usd_to_local: float = 1.0,
-                  mapping_file: Optional[Path] = None) -> RawData:
+                  mapping_file: Optional[Path] = None,
+                  order_fields: dict | None = None,
+                  cost_fields: dict | None = None) -> RawData:
     """从目录自动识别四类文件：逐张读表头判断类型，同名类型取最新的一张。"""
     folder = Path(folder)
     buckets: dict[str, list[tuple[Path, list[tuple]]]] = {
@@ -854,7 +942,8 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
     order_f, order_rows = newest("order")
     issues: list[str] = []
     sources: dict[str, str] = {"订单": order_f.name}
-    orders = parse_orders(order_rows)
+    titles: list[str] = []
+    orders = parse_orders(order_rows, order_fields, titles)
 
     sku_index = SkuIndex()
     m = newest("mapping")
@@ -894,14 +983,15 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
         if cpath.is_dir():
             for cf in cpath.iterdir():
                 if cf.suffix.lower() in (".xlsx", ".xls", ".csv") and not cf.name.startswith("~$"):
-                    c = parse_costs(read_table(cf, sheet="成本") if cf.suffix.lower().startswith(".xls") else read_table(cf))
+                    c = parse_costs(read_table(cf, sheet="成本") if cf.suffix.lower().startswith(".xls") else read_table(cf),
+                                    cost_fields)
                     if c:
                         costs.update(c)
                         sources["成本"] = cf.name
                         break
         else:
             rows = read_table(cpath, sheet="成本") if cpath.suffix.lower().startswith(".xls") else read_table(cpath)
-            costs = parse_costs(rows)
+            costs = parse_costs(rows, cost_fields)
             sources["成本"] = cpath.name
         if not costs:
             issues.append(f"成本文件里没读到编码与成本：{costs_file}")
@@ -930,7 +1020,8 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
     attach_costs(orders, costs, issues)
 
     return RawData(orders=orders, costs=costs, sku_index=sku_index, ads=ads,
-                   commissions=commissions, issues=issues, sources=sources)
+                   commissions=commissions, issues=issues, sources=sources,
+                   order_titles=titles)
 
 
 def load_from_workbook(path: Path, usd_to_local: float = 1.0,
