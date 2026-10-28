@@ -25,6 +25,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
+from . import formula, paths
 from .loader import OrderLine, RawData
 
 ZERO = 0.0
@@ -160,7 +161,13 @@ class ProductMetrics:
     gmv: float = ZERO
     buyer_paid: float = ZERO
     orders: float = ZERO
+    items: float = ZERO
+    refund: float = ZERO
     cost_local: float = ZERO
+    # 费用明细：费用 id → 金额。id 与 config/formulas.json 的 fees 对应，
+    # 所以用户加一项「订单服务费」这里就自动多一个键，不用改代码。
+    fees: dict[str, float] = field(default_factory=dict)
+    # 以下老字段保留：报表模板与历史代码在用，算完费用后从 fees 同步过来
     dispatch_fee: float = ZERO
     platform_commission: float = ZERO
     tx_fee: float = ZERO
@@ -182,6 +189,9 @@ class ProductMetrics:
 
     @property
     def fee_total(self) -> float:
+        # 有明细就用明细（支持用户自定义费用），没有就退回老字段之和
+        if self.fees:
+            return sum(self.fees.values())
         return (self.dispatch_fee + self.platform_commission + self.tx_fee + self.cashback
                 + self.super_coupon + self.growth_fee + self.logistics
                 + self.creator_commission + self.ad_spend)
@@ -215,10 +225,13 @@ class CalcResult:
     @property
     def total(self) -> ProductMetrics:
         t = ProductMetrics(product_id="合计", style_codes="")
+        agg: dict[str, float] = {}
         for p in self.products:
             t.gmv += p.gmv
             t.buyer_paid += p.buyer_paid
             t.orders += p.orders
+            t.items += p.items
+            t.refund += p.refund
             t.cost_local += p.cost_local
             t.dispatch_fee += p.dispatch_fee
             t.platform_commission += p.platform_commission
@@ -230,6 +243,9 @@ class CalcResult:
             t.creator_commission += p.creator_commission
             t.ad_spend += p.ad_spend
             t.lines += p.lines
+            for k, v in (p.fees or {}).items():
+                agg[k] = agg.get(k, 0.0) + v
+        t.fees = agg
         return t
 
     @property
@@ -241,9 +257,29 @@ class CalcResult:
 
 def compute(data: RawData, params: Params, switches: Switches,
             dfrom: Optional[date] = None, dto: Optional[date] = None,
-            date_field: str = "created") -> CalcResult:
+            date_field: str = "created", fcfg: dict | None = None) -> CalcResult:
     issues = list(data.issues)
     lines = filter_by_date(data.orders, dfrom, dto, date_field)
+
+    # 口径配置（config/formulas.json）：订单怎么筛、费用有哪些、净利怎么算。
+    # 默认值与之前的写死逻辑完全一致，所以不配这个文件时结果不变。
+    if fcfg is None:
+        fcfg = formula.load_config(paths.CONFIG / "formulas.json")
+    flt = fcfg.get("order_filter") or {}
+    inc_cancelled = bool(flt.get("include_cancelled", False))
+    inc_refunded = bool(flt.get("include_refunded", False))
+    inc_unpaid = bool(flt.get("include_unpaid", False))
+    inc_zero = bool(flt.get("include_zero_amount", True))
+
+    # 0 元样品单：整行是否参与。
+    # 单独一个开关是因为发单费按订单数算，样品单加不加直接影响成本，
+    # 不能只按金额一刀切，得让人自己决定。
+    if not inc_zero:
+        before = len(lines)
+        lines = [l for l in lines if not (l.gmv == 0 and l.order_amount == 0)]
+        dropped = before - len(lines)
+        if dropped:
+            issues.append(f"按设置排除了 {dropped} 行 0 元订单（样品单），如需计入请改 formulas.json 的 include_zero_amount")
 
     # 订单实付分配：按 GMV 占比时，先算出每个订单的 GMV 合计。
     # 用全量订单（不受日期过滤影响），避免跨期的订单被截断后分配比例失真。
@@ -285,14 +321,19 @@ def compute(data: RawData, params: Params, switches: Switches,
             names[pid] = l.product_name
 
         m.lines += 1
+        m.items += l.qty
+        m.refund += l.order_amount if l.is_cancelled else 0.0
 
-        # GMV：排除取消/退货
-        if not l.is_cancelled:
+        # 取消 / 退货行是否计入，由 formulas.json 的 include_cancelled 决定
+        alive = inc_cancelled or not l.is_cancelled
+
+        # GMV：默认排除取消/退货
+        if alive:
             m.gmv += l.gmv
 
-        # 订单数：未取消 + 已付款
-        paid_ok = l.is_paid or not switches.only_paid_orders
-        if paid_ok and not l.is_cancelled:
+        # 订单数：未取消 + 已付款（include_unpaid 打开就不看付款状态）
+        paid_ok = inc_unpaid or l.is_paid or not switches.only_paid_orders
+        if paid_ok and alive:
             m.orders += l.allocated_orders
 
         # 买家实付：只要求已付款（与原表一致，不看取消标记）
@@ -300,7 +341,7 @@ def compute(data: RawData, params: Params, switches: Switches,
             m.buyer_paid += alloc_paid(l)
 
         # 成本：未取消 + 已付款
-        if paid_ok and not l.is_cancelled:
+        if paid_ok and alive:
             if l.cost_total_cny is None:
                 missing_cost_lines += 1
             else:
@@ -314,20 +355,48 @@ def compute(data: RawData, params: Params, switches: Switches,
             buckets[pid] = ProductMetrics(product_id=pid)
             orphans.append(pid)
 
-    # 费用项
+    # 费用项：按 formulas.json 的 fees 列表逐项算。
+    # 用户想加一项「订单服务费」，在那个列表里加一条就会自动参与净利计算，
+    # 不用改这里的代码。
+    fee_cfg = list(fcfg.get("fees") or [])
+    # 老开关仍然生效：超级优惠券原来由 switches 控制，这里映射到费用项的 enabled
+    if switches.super_coupon_enabled:
+        for it in fee_cfg:
+            if isinstance(it, dict) and it.get("id") == "super_coupon":
+                it["enabled"] = True
+
+    fee_issues: list[str] = []
     for pid, m in buckets.items():
         m.product_name = names.get(pid, "")
-        m.cost_local = m.cost_local  # 已是本地货币
-        m.dispatch_fee = m.orders * params.dispatch_fee_local
-        m.platform_commission = m.gmv * params.platform_commission
-        m.tx_fee = m.buyer_paid * params.tx_fee
-        m.cashback = m.gmv * params.cashback
-        m.super_coupon = m.gmv * params.super_coupon if switches.super_coupon_enabled else ZERO
-        m.growth_fee = m.gmv * params.growth_fee
-        m.logistics = m.gmv * params.logistics
-        m.creator_commission = data.commissions.get(pid, ZERO)
-        # data.ads 在解析层已按「货币」列换算成本地货币，这里直接用，不能再乘汇率
-        m.ad_spend = data.ads.get(pid, ZERO)
+        ctx = {
+            "gmv": m.gmv,
+            "buyer_paid": m.buyer_paid,
+            "order_count": m.orders,
+            "orders": m.orders,
+            "items": m.items,
+            "cost": m.cost_local,
+            "refund": m.refund,
+            "commission": data.commissions.get(pid, ZERO),
+            "ads": data.ads.get(pid, ZERO),
+            "params": params,
+        }
+        fees, one_issues = formula.compute_fees(fee_cfg, ctx)
+        m.fees = fees
+        if one_issues:
+            fee_issues.extend(one_issues[:1])
+        # 同步到老字段：报表模板与历史代码还在读这些名字
+        m.dispatch_fee = fees.get("dispatch", ZERO)
+        m.platform_commission = fees.get("platform_commission", ZERO)
+        m.tx_fee = fees.get("tx_fee", ZERO)
+        m.cashback = fees.get("cashback", ZERO)
+        m.super_coupon = fees.get("super_coupon", ZERO)
+        m.growth_fee = fees.get("growth_fee", ZERO)
+        m.logistics = fees.get("logistics", ZERO)
+        m.creator_commission = fees.get("affiliate", ZERO)
+        m.ad_spend = fees.get("ads", ZERO)
+
+    for msg in dict.fromkeys(fee_issues):
+        issues.append(msg)
 
     products = sorted(buckets.values(), key=lambda x: x.gmv, reverse=True)
 

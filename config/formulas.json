@@ -1,0 +1,62 @@
+{
+  "_readme": [
+    "口径配置：订单怎么筛、费用有哪些、净利怎么算。",
+    "改这个文件就能改口径，不用改代码。改动即时生效（按文件修改时间判断）。",
+    "",
+    "──── 一、order_filter：订单行筛选 ────",
+    "  每一项独立开关，true = 计入，false = 排除：",
+    "    include_cancelled    已取消的订单",
+    "    include_refunded     退货 / 退款的订单",
+    "    include_unpaid       未付款的订单",
+    "    include_zero_amount  0 元订单（样品单）",
+    "  为什么 0 元单要单独一个开关：发单费按订单数算，",
+    "  样品单加不加直接影响成本，所以不能只按金额一刀切。",
+    "",
+    "──── 二、fees：费用项（想加几条加几条）────",
+    "  每一项：",
+    "    id      唯一标识，公式里用这个名字引用",
+    "    label   中文名（界面显示用）",
+    "    base    乘什么：gmv / buyer_paid / order_count / items / cost / refund",
+    "            或者 commission（达人佣金）/ ads（广告花费）——这两类是直接取数，不再乘费率",
+    "    rate    费率。可以写数字（0.02），也可以写 params.xxx 引用国家参数",
+    "    enabled 不写默认 true；设成 false 就暂时不算这一项",
+    "",
+    "  要加一项新费用，照着写一条就行，例如「订单服务费」每单 2 元：",
+    "    {\"id\":\"order_service\",\"label\":\"订单服务费\",\"base\":\"order_count\",\"rate\":2.0}",
+    "",
+    "──── 三、formulas：公式 ────",
+    "  可用变量：gmv / cost / buyer_paid / order_count / items / refund 等统计量，",
+    "           以及 fees 里每一项的 id（就是那一项的金额），",
+    "           还有 params.xxx（国家参数，如 params.dispatch_fee_local）。",
+    "  可用函数：sum / abs / min / max / round。",
+    "  引用的是「逻辑字段名」，不是列位置——列变了只需改 mapping.json，公式不用动。"
+  ],
+
+  "order_filter": {
+    "include_cancelled": false,
+    "include_refunded": false,
+    "include_unpaid": false,
+    "include_zero_amount": true
+  },
+
+  "fees": [
+    { "id": "dispatch", "label": "发单费", "base": "order_count", "rate": "params.dispatch_fee_local", "enabled": true },
+    { "id": "platform_commission", "label": "平台佣金", "base": "gmv", "rate": "params.platform_commission", "enabled": true },
+    { "id": "tx_fee", "label": "交易手续费", "base": "buyer_paid", "rate": "params.tx_fee", "enabled": true },
+    { "id": "cashback", "label": "奖金返现", "base": "gmv", "rate": "params.cashback", "enabled": true },
+    { "id": "super_coupon", "label": "超级优惠券", "base": "gmv", "rate": "params.super_coupon", "enabled": false },
+    { "id": "growth_fee", "label": "商家成长", "base": "gmv", "rate": "params.growth_fee", "enabled": true },
+    { "id": "logistics", "label": "物流", "base": "gmv", "rate": "params.logistics", "enabled": true },
+    { "id": "affiliate", "label": "达人佣金", "base": "commission", "enabled": true },
+    { "id": "ads", "label": "广告花费", "base": "ads", "enabled": true }
+  ],
+
+  "formulas": {
+    "gmv": "gmv",
+    "cost": "cost",
+    "gross_profit": "gmv - cost",
+    "total_fees": "sum(fees)",
+    "net": "gross_profit - total_fees",
+    "net_rate": "net / gmv"
+  }
+}
