@@ -287,6 +287,17 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .cfg-tbl td{padding:8px 12px}
   .cfg-tbl input[type=text],.cfg-tbl input[type=number]{min-width:0;width:100%;padding:6px 8px;font-size:12.5px}
   .cfg-tbl tr.off td{opacity:.42}
+  /* 总开关：去除 0 元样品订单 */
+  .switch{display:flex;gap:10px;align-items:flex-start;padding:13px 15px;
+    border:1px solid var(--line);border-radius:10px;background:var(--line-soft);cursor:pointer}
+  .switch input{width:16px;height:16px;margin-top:1px;flex:0 0 16px;
+    accent-color:var(--accent);cursor:pointer}
+  .switch b{font-size:13px;font-weight:600}
+  .switch em{display:block;font-style:normal;font-size:12px;color:var(--text-2);
+    margin-top:3px;line-height:1.55}
+  .switch.on{border-color:#f0c9c0;background:#fdf3f0}
+  .cfg-tbl td.koff{opacity:.3}
+  .cfg-tbl td.koff input{cursor:not-allowed}
   /* 表格比卡片宽时横向滚动，别把列挤窄（汇率 3560 这种四位数字会被截掉） */
   #ptbl{min-width:1010px}
   #ptbl td:nth-child(2) input{min-width:300px}
@@ -426,7 +437,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.18.0</span></div>
+      <div class="row"><span>版本</span><span>0.19.0</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -502,7 +513,15 @@ _TEMPLATE = r"""<!DOCTYPE html>
             <th class="kcell" style="width:48px">启用</th><th style="width:54px"></th>
           </tr></thead><tbody id="pbody"></tbody></table>
         </div></div>
-        <div class="body" style="padding-top:0">
+        <div class="body" style="padding-top:0;padding-bottom:0">
+          <label class="switch">
+            <input type="checkbox" id="drop-zero">
+            <span><b>去除 0 元样品订单</b>
+              <em>打开后发单费、商品成本、订单数、件数都不算样品单，算出来的就是纯正常订单（含退货退款）的净利。
+                  下面「0元样品」那一列会变灰、不生效，关掉开关各自勾选原样恢复。</em></span>
+          </label>
+        </div>
+        <div class="body" style="padding-top:14px">
           <p class="muted" style="font-size:12.5px;margin:0">
             <b>订单数</b>、<b>件数</b> 这两行是报表上的显示列，也各自有勾选，单独控制——
             勾了「0元样品」订单数就含样品单，取消就只算正常 + 退货单。<br>
@@ -998,7 +1017,8 @@ async function loadParams(){
     scopeData = { "": {
       params: normParams(j.params),
       order_fields: clone(j.order_fields || {}),
-      cost_fields: clone(j.cost_fields || {})
+      cost_fields: clone(j.cost_fields || {}),
+      exclude_zero_amount: !!j.exclude_zero_amount
     }};
     countrySet = new Set(Object.keys(j.by_country || {}));
     // 每个国家：通用那套 + 它自己的覆盖
@@ -1006,7 +1026,9 @@ async function loadParams(){
       const d = {
         params: (v.params && v.params.length) ? normParams(v.params) : clone(scopeData[""].params),
         order_fields: Object.assign(clone(scopeData[""].order_fields), v.order_fields || {}),
-        cost_fields: Object.assign(clone(scopeData[""].cost_fields), v.cost_fields || {})
+        cost_fields: Object.assign(clone(scopeData[""].cost_fields), v.cost_fields || {}),
+        exclude_zero_amount: ('exclude_zero_amount' in v)
+          ? !!v.exclude_zero_amount : !!scopeData[""].exclude_zero_amount
       };
       scopeData[k] = d;
     });
@@ -1050,17 +1072,41 @@ function switchScope(next){
 }
 
 function renderAll(){
+  renderDropZero();
   renderParams(); renderOrderFields(); renderFormulas(); renderVars();
 }
+
+/* 总开关：去除 0 元样品订单 */
+function renderDropZero(){
+  const box = $('#drop-zero');
+  if(!box) return;
+  const on = !!cur().exclude_zero_amount;
+  box.checked = on;
+  box.closest('.switch').classList.toggle('on', on);
+  box.onchange = () => {
+    cur().exclude_zero_amount = box.checked;
+    renderDropZero();
+    renderParams();
+    toast(box.checked
+      ? '已打开：样品单不再计入发单费、商品成本、订单数。记得点「保存配置」'
+      : '已关闭：各参数按自己的勾选算。记得点「保存配置」');
+  };
+}
+
+/* 新国家：从通用那套复制，开关也跟着复制 */
+
 
 function renderParams(){
   const rows = rowsOf();
   const body = $('#pbody');
+  const dropZero = !!cur().exclude_zero_amount;
   body.innerHTML = rows.map((r, i) => {
     const kinds = r.kinds;
     const kc = KINDS.map(k => {
-      const on = kinds === null ? true : (kinds || []).includes(k.id);
-      return `<td class="kcell"><input type="checkbox" data-k="${i}:${k.id}" ${on ? 'checked' : ''}></td>`;
+      const off = dropZero && k.id === 'zero_amount';
+      const on = !off && (kinds === null ? true : (kinds || []).includes(k.id));
+      return `<td class="kcell${off ? ' koff' : ''}"${off ? ' title="已打开「去除 0 元样品订单」，这一格暂时不生效"' : ''}>` +
+             `<input type="checkbox" data-k="${i}:${k.id}" ${on ? 'checked' : ''} ${off ? 'disabled' : ''}></td>`;
     }).join('');
     return `<tr class="${r.enabled === false ? 'off' : ''}">
       <td>
@@ -1207,9 +1253,13 @@ function paramPayload(){
 
 function collectByCountry(){
   const out = {};
+  const rootFlag = !!(scopeData[""] && scopeData[""].exclude_zero_amount);
   scopeData && Object.entries(scopeData).forEach(([k, v]) => {
     if(!k) return;
-    out[k] = { params: v.params, order_fields: v.order_fields, cost_fields: v.cost_fields };
+    const one = { params: v.params, order_fields: v.order_fields, cost_fields: v.cost_fields };
+    // 开关跟通用一样就不写，省得每个国家都留一条冗余
+    if(!!v.exclude_zero_amount !== rootFlag) one.exclude_zero_amount = !!v.exclude_zero_amount;
+    out[k] = one;
   });
   return out;
 }
@@ -1234,7 +1284,8 @@ $('#btn-preview').onclick = async () => {
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({params: paramPayload(), country: scope,
                             by_country: collectByCountry(), formulas: fmls,
-                            order_fields: cur1.order_fields, cost_fields: cur1.cost_fields})});
+                            order_fields: cur1.order_fields, cost_fields: cur1.cost_fields,
+                            exclude_zero_amount: !!cur1.exclude_zero_amount})});
     const j = await r.json();
     if(!j.ok){ body.innerHTML = '<div class="empty">' + esc(j.error || '试算失败') + '</div>'; return; }
     const b = j.before, a = j.after, d = j.delta;
@@ -1267,7 +1318,8 @@ $('#btn-save').onclick = async () => {
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({params: g.params, by_country: collectByCountry(),
                             formulas: fmls, order_fields: g.order_fields,
-                            cost_fields: g.cost_fields})});
+                            cost_fields: g.cost_fields,
+                            exclude_zero_amount: !!g.exclude_zero_amount})});
     const j = await r.json();
     const n = Object.keys(collectByCountry()).length;
     if(j.ok) paramsLoaded = false;

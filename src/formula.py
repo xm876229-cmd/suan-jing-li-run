@@ -277,6 +277,8 @@ DEFAULTS: dict = {
          "expr": "orders * params.order_service",
          "kinds": ["normal", "refunded"]},
     ],
+    # 总开关：true = 整张参数表都不算 0 元样品单（算出来是纯正常订单的净利）
+    "exclude_zero_amount": False,
     "by_country": {},
     "formulas": {
         "gross_profit": "gmv - cost",
@@ -318,6 +320,8 @@ def load_config(path: Path) -> dict:
                 merged[k] = v          # 单个字段可以只改一条，其余沿用默认
             out[key] = merged
     # 每个国家自己的一套：{国家: {params: [...], order_fields: {...}, cost_fields: {...}}}
+    if isinstance(doc.get("exclude_zero_amount"), bool):
+        out["exclude_zero_amount"] = doc["exclude_zero_amount"]
     if isinstance(doc.get("by_country"), dict) and doc["by_country"]:
         out["by_country"] = doc["by_country"]
     if isinstance(doc.get("formulas"), dict) and doc["formulas"]:
@@ -328,14 +332,15 @@ def load_config(path: Path) -> dict:
 def country_config(fcfg: dict, country: str) -> dict:
     """取某个国家实际生效的配置：该国有单独设置就用它的，没有就退回通用那套。
 
-    返回结构的键与 fcfg 一致（params / order_fields / cost_fields / formulas），
-    方便调用方直接当一份配置用。
+    返回结构的键与 fcfg 一致（params / order_fields / cost_fields / formulas /
+    exclude_zero_amount），方便调用方直接当一份配置用。
     """
     base = {
         "params": list(fcfg.get("params") or []),
         "order_fields": dict(fcfg.get("order_fields") or {}),
         "cost_fields": dict(fcfg.get("cost_fields") or {}),
         "formulas": dict(fcfg.get("formulas") or {}),
+        "exclude_zero_amount": bool(fcfg.get("exclude_zero_amount")),
     }
     one = (fcfg.get("by_country") or {}).get(country) or {}
     if isinstance(one.get("params"), list) and one["params"]:
@@ -345,7 +350,33 @@ def country_config(fcfg: dict, country: str) -> dict:
             base[key].update(one[key])
     if isinstance(one.get("formulas"), dict):
         base["formulas"].update(one["formulas"])
+    if "exclude_zero_amount" in one:
+        base["exclude_zero_amount"] = bool(one["exclude_zero_amount"])
+    if base["exclude_zero_amount"]:
+        base["params"] = drop_kind(base["params"], "zero_amount")
     return base
+
+
+def drop_kind(params_cfg: list, kind: str = "zero_amount") -> list:
+    """把某个订单类别从这张参数表里整体剔掉（复制一份，不改原配置）。
+
+    用来实现「去除 0 元样品订单」这个总开关：打开后发单费、商品成本、订单数
+    这些原本勾了样品的项都不再算样品单，算出来的就是纯正常订单（含退货）的净利。
+    统计口径留在这里统一处理，比在每个公式里手改一遍可靠。
+    """
+    out: list = []
+    for it in params_cfg or []:
+        if not isinstance(it, dict):
+            out.append(it)
+            continue
+        kinds = it.get("kinds")
+        if isinstance(kinds, list):
+            one = dict(it)
+            one["kinds"] = [k for k in kinds if k != kind]
+            out.append(one)
+        else:
+            out.append(it)      # kinds 不写 = 不看订单类别（广告/达人佣金），不动
+    return out
 
 
 # ---------------- 公式里的「标题」→ 数值 ----------------

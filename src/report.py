@@ -77,7 +77,7 @@ ROLE_KEYS = {"gmv", "cost", "order_count", "items", "buyer_paid"}
 
 BASE_HEADERS = [
     "排名", "款式编码", "链接（商品ID）", "商品名称",
-    "GMV", "订单数", "客单价", "买家实付",
+    "GMV", "订单数", "件数", "客单价", "买家实付",
     "成本", "毛利", "毛利额",
 ]
 
@@ -123,8 +123,8 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
     _title(ws, "净利润汇总（每条链接一行）", subtitle, span=12)
     _head(ws, headers)
 
-    money_cols = [5, 7, 8, 9, 11] + list(range(c_fee0, c_total + 1)) + [c_net, c_net_cny]
-    pct_cols = [10, c_rate]
+    money_cols = [5, 8, 9, 10, 12] + list(range(c_fee0, c_total + 1)) + [c_net, c_net_cny]
+    pct_cols = [11, c_rate]
 
     def fee_vals(p) -> list[float]:
         return [float((p.fees or {}).get(fid, 0.0)) for fid, _ in fees]
@@ -134,7 +134,7 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
         fv = fee_vals(p)
         vals = [
             i, p.style_codes, p.product_id, p.product_name,
-            p.gmv, p.orders, p.aov, p.buyer_paid,
+            p.gmv, p.orders, p.items, p.aov, p.buyer_paid,
             p.cost_local, p.gross_profit, p.gmv - p.cost_local,
             *fv,
             sum(fv), p.net_margin, p.net_local, p.net_cny(res.params.cny_to_local),
@@ -142,7 +142,7 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
         for c, v in enumerate(vals, 1):
             cell = ws.cell(row=row, column=c, value=v)
             cell.border = BORDER
-        _fmt_row(ws, row, money_cols, pct_cols, [6])
+        _fmt_row(ws, row, money_cols, pct_cols, [6, 7])
         if p.net_local < 0:
             ws.cell(row=row, column=c_net).font = NEG_FONT
             ws.cell(row=row, column=c_net_cny).font = NEG_FONT
@@ -153,7 +153,7 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
     totals = [
         "", "合计", "",
         f"{res.line_count} 行 · 全部 {res.order_count} 单 · 计入 {t.orders:.1f} 单",
-        t.gmv, t.orders, t.aov if t.orders else 0, t.buyer_paid,
+        t.gmv, t.orders, t.items, t.aov if t.orders else 0, t.buyer_paid,
         t.cost_local, t.gross_profit, t.gmv - t.cost_local,
         *tfv,
         sum(tfv), t.net_margin, t.net_local, res.net_cny_total,
@@ -163,7 +163,7 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
         cell.fill = TOTAL_FILL
         cell.font = Font(bold=True)
         cell.border = TOP_BORDER
-    _fmt_row(ws, row, money_cols, pct_cols, [6])
+    _fmt_row(ws, row, money_cols, pct_cols, [6, 7])
 
     # 净利率色阶：亏损越深越红，盈利越强越绿
     last = row - 1
@@ -214,15 +214,20 @@ def _fee_breakdown(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
 # ---------------- 日趋势 ----------------
 
 def _daily(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: str) -> None:
-    from .calc import parse_dt
+    from .calc import order_kind, parse_dt
     _title(ws, "日趋势", subtitle, span=6)
     _head(ws, ["日期", "GMV", "订单数", "买家实付", "净利(本地)", "净利率"])
 
     day_gmv: dict[str, float] = {}
     day_paid: dict[str, float] = {}
     day_orders: dict[str, float] = {}
+    # 「去除 0 元样品订单」打开时，日趋势也要跟着去掉，不然和汇总页对不上
+    drop_zero = bool(getattr(res, "exclude_zero_amount", False))
+    refund_kw = tuple(getattr(res, "refund_keywords", None) or ())
     for l in lines:
         if l.is_cancelled:
+            continue
+        if drop_zero and order_kind(l, refund_kw) == "zero_amount":
             continue
         dt = parse_dt(l.created)
         key = dt.date().isoformat() if dt else "无日期"
@@ -411,6 +416,15 @@ def _meta(ws: Worksheet, res: CalcResult, params: Params, switches: Switches,
         ("达人佣金口径", "联盟报表预估佣金", "退款部分未额外扣减"),
         ("广告口径", "广告花费(美金) × 美金汇率", "按商品ID汇总"),
     ]
+
+    # 总开关：报表上必须写明，否则事后看数会以为样品单被漏掉了
+    rows.append((
+        "0 元样品单",
+        "整表剔除（已打开「去除 0 元样品订单」）" if res.exclude_zero_amount else "按各参数自己的勾选",
+        ("发单费、商品成本、订单数、件数都不含样品单，算出来的是纯正常订单（含退货退款）的净利"
+         if res.exclude_zero_amount else
+         "在「计算参数」页可一键打开「去除 0 元样品订单」"),
+    ))
 
     # ── 参数表：这次每个参数算的是哪些订单类别 ──
     # 必须按实际生效的配置生成。写死说明会让报表「说明和数不符」，

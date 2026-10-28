@@ -534,7 +534,8 @@ class Handler(BaseHTTPRequestHandler):
                 str(payload.get("country") or ""),
                 payload.get("by_country"),
                 payload.get("order_fields"),
-                payload.get("cost_fields")))
+                payload.get("cost_fields"),
+                payload.get("exclude_zero_amount")))
             return
 
         try:
@@ -542,7 +543,8 @@ class Handler(BaseHTTPRequestHandler):
                 params, payload.get("formulas") or {},
                 by_country=payload.get("by_country"),
                 order_fields=payload.get("order_fields"),
-                cost_fields=payload.get("cost_fields")))
+                cost_fields=payload.get("cost_fields"),
+                exclude_zero_amount=payload.get("exclude_zero_amount")))
         except Exception as e:  # noqa: BLE001
             _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
 

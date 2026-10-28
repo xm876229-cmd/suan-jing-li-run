@@ -270,6 +270,8 @@ class CalcResult:
     params_cfg: list = field(default_factory=list)
     # 类别中文名（配置里可改）
     kind_labels: dict = field(default_factory=dict)
+    # 总开关：本次是否整张表都不算 0 元样品单（报表口径页要写明）
+    exclude_zero_amount: bool = False
 
     @property
     def total(self) -> ProductMetrics:
@@ -673,4 +675,5 @@ def compute(data: RawData, params: Params, switches: Switches,
                       order_filter=kfilter, kind_stats=dict(kind_stats),
                       refund_keywords=refund_kw,
                       params_cfg=[it for it in param_cfg if isinstance(it, dict)],
-                      kind_labels=dict(fcfg.get("kinds") or KIND_LABELS))
+                      kind_labels=dict(fcfg.get("kinds") or KIND_LABELS),
+                      exclude_zero_amount=bool(cc.get("exclude_zero_amount")))

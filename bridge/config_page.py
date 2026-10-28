@@ -43,6 +43,8 @@ def read_config() -> dict:
         "formulas": cfg.get("formulas") or {},
         "order_fields": cfg.get("order_fields") or {},
         "cost_fields": cfg.get("cost_fields") or {},
+        # 总开关：true = 整张参数表都不算 0 元样品单
+        "exclude_zero_amount": bool(cfg.get("exclude_zero_amount")),
         "kinds": cfg.get("kinds") or dict(KINDS),
         "raw_note": doc.get("_readme") or [],
         # 最近一次订单表的真实表头：界面上写标题时可以直接点选
@@ -53,7 +55,8 @@ def read_config() -> dict:
 def save_config(params: list, formulas: dict, keep_readme: bool = True,
                 by_country: dict | None = None,
                 order_fields: dict | None = None,
-                cost_fields: dict | None = None) -> dict:
+                cost_fields: dict | None = None,
+                exclude_zero_amount: bool | None = None) -> dict:
     """保存参数表。保留原来的 _readme 说明文字，别把它冲掉。"""
     old: dict = {}
     try:
@@ -68,13 +71,17 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
     out["order_fields"] = order_fields if order_fields is not None else (old.get("order_fields") or {})
     out["cost_fields"] = cost_fields if cost_fields is not None else (old.get("cost_fields") or {})
     out["params"] = params
+    flag = old.get("exclude_zero_amount") if exclude_zero_amount is None else bool(exclude_zero_amount)
+    if flag:
+        out["exclude_zero_amount"] = True     # 只有开的时候才写，配置干净
     if by_country is not None:
         # 只留真有内容的：空 = 这个国家没单独设，删掉让通用那套生效
         clean = {}
         for k, v in (by_country or {}).items():
             if not isinstance(v, dict):
                 continue
-            if v.get("params") or v.get("order_fields") or v.get("cost_fields"):
+            if (v.get("params") or v.get("order_fields") or v.get("cost_fields")
+                    or "exclude_zero_amount" in v):
                 clean[k] = v
         if clean:
             out["by_country"] = clean
@@ -189,7 +196,8 @@ def _load_data(order_fields: dict | None = None, cost_fields: dict | None = None
 def preview(params: list, formulas: dict | None = None,
             country: str = "", by_country: dict | None = None,
             order_fields: dict | None = None,
-            cost_fields: dict | None = None) -> dict:
+            cost_fields: dict | None = None,
+            exclude_zero_amount: bool | None = None) -> dict:
     """用给定的参数表试算，并与当前配置对比。
 
     这是配口径时最重要的功能：改一个公式或勾选，立刻看到净利差多少。
@@ -236,6 +244,8 @@ def preview(params: list, formulas: dict | None = None,
         if asked_country and country in bc:
             bc[country] = {**bc[country], "params": params}
         trial_cfg["by_country"] = bc if asked_country else {}
+    if exclude_zero_amount is not None:
+        trial_cfg["exclude_zero_amount"] = bool(exclude_zero_amount)
     if order_fields:
         trial_cfg["order_fields"] = order_fields
     if cost_fields:
