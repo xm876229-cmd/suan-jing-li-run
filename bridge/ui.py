@@ -217,7 +217,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .side .foot{margin-top:auto;padding:8px 18px 0;font-size:11.5px;color:var(--text-3);line-height:1.9}
   .side .foot .row{display:flex;justify-content:space-between}
   .main{flex:1;overflow-y:auto;padding:34px 42px 64px}
-  .page{max-width:900px;margin:0 auto}
+  .page{max-width:1120px;margin:0 auto}
   .page[hidden]{display:none}
   .head{margin-bottom:26px}
   .head h1{font-size:21px;font-weight:500;margin:0 0 6px;letter-spacing:-.2px}
@@ -287,6 +287,14 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .cfg-tbl td{padding:8px 12px}
   .cfg-tbl input[type=text],.cfg-tbl input[type=number]{min-width:0;width:100%;padding:6px 8px;font-size:12.5px}
   .cfg-tbl tr.off td{opacity:.42}
+  /* 表格比卡片宽时横向滚动，别把列挤窄（汇率 3560 这种四位数字会被截掉） */
+  #ptbl{min-width:1010px}
+  #ptbl td:nth-child(2) input{min-width:300px}
+  #rtbl{min-width:1120px}
+  #rtbl td:first-child input{min-width:86px}
+  #rtbl td input{min-width:64px}
+  /* 最后一列是「删」，别贴着卡片边缘 */
+  .cfg-tbl td:last-child,.cfg-tbl th:last-child{padding-left:6px;padding-right:14px}
   .kcell{text-align:center}
   .kcell label{display:inline-flex;padding:3px;cursor:pointer}
   .kcell input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;display:block}
@@ -333,7 +341,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .modal .box header .x{margin-left:auto}
   .modal .box .content{overflow-y:auto;padding-bottom:10px}
   .bars{display:flex;align-items:flex-end;gap:4px;height:110px;padding:0 6px}
-  .bars .b{flex:1;background:#9fd3c1;border-radius:3px 3px 0 0;min-height:2px;transition:background .12s}
+  .bars .b{flex:1 1 0;max-width:56px;background:#9fd3c1;border-radius:3px 3px 0 0;min-height:2px;transition:background .12s}
   .bars .b:hover{background:var(--accent)}
   .bars .b.neg{background:#f0c4b4}
   .legend{font-size:11.5px;color:var(--text-3);padding:8px 6px 0;display:flex;gap:14px}
@@ -495,7 +503,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
             <th style="min-width:150px">参数</th><th style="min-width:280px">计算公式</th>
             <th class="kcell">正常</th><th class="kcell">已取消</th><th class="kcell">退货退款</th>
             <th class="kcell">0元样品</th><th class="kcell">未付款</th>
-            <th class="kcell" style="width:48px">启用</th><th style="width:40px"></th>
+            <th class="kcell" style="width:48px">启用</th><th style="width:54px"></th>
           </tr></thead><tbody id="pbody"></tbody></table>
         </div></div>
       </div>
@@ -610,7 +618,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
             所以改汇率，发单费会自动跟着变。「发单费(本地)」那列是算出来的，不用填</div>
           <div>其余费率</div><div>写小数，比如 <b>0.081</b> 表示 8.1%，都是按成交额比例收的</div>
           <div>增删费率项</div><div>「＋ 新增费率项」给所有国家加一列；列标题右上角的 × 删掉整列。
-            新增的项可以在「参数配置」里用 <span class="mono">params.字段名</span> 引用</div>
+            新增的项在「计算参数」里用 <span class="mono">params.字段名</span> 引用</div>
         </div>
       </div></div>
     </section>
@@ -1267,6 +1275,8 @@ async function loadCosts(){
       `<div class="it">编码总数<b>${j.count}</b></div>
        <div class="it">存放位置<b class="mono" style="font-size:12px">${esc(j.path || '')}</b></div>`;
     $('#cost-note').className = 'note';
+    $('#cost-note').textContent = '';
+    $('#cost-check').innerHTML = '';
     costPageNo = 0;
     renderCosts();
   }catch(e){ toast('读取成本表失败'); }
@@ -1505,7 +1515,7 @@ $('#btn-rate-add').onclick = () => {
 };
 
 $('#btn-fee-add').onclick = () => {
-  const field = prompt('费率项字段名（英文小写，参数配置里用 params.字段名 引用）\n例如 order_service');
+  const field = prompt('费率项字段名（英文小写，计算参数里用 params.字段名 引用）\n例如 order_service');
   if(!field) return;
   const f = field.trim().replace(/\s+/g, '_');
   if(feeFields.includes(f) || RATE_META.includes(f)){ toast('已经有这一项了'); return; }
