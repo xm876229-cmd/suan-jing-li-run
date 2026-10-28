@@ -112,8 +112,91 @@ def start_bridge_hidden() -> bool:
 # ---------------- 子命令 ----------------
 
 def cmd_serve() -> int:
-    from bridge.server import main as bridge_main
-    return bridge_main()
+    """启动本地桥。
+
+    两种角色：
+      · 子进程（JINGLI_BRIDGE_CHILD=1）：真正干活的桥
+      · 守护者（默认）：拉起子进程，并在它崩了/源码变了时重新拉起
+
+    为什么要有守护者：桥是整套自动化的地基——扩展把抓到的数据交给它、
+    它负责落盘并触发核算。桥一死，取数就静默停摆，用户只会看到「点了没反应」。
+    之前试过在桥进程内部用 os.execv 自重启，三种方式都出事：
+      · execv 后新进程起不来（端口/句柄竞争），桥直接没了
+      · 连续改几次文件会连锁重启，最后把桥重启到死
+      · 桥是后台常驻进程，重启后不再挂在任何任务管理器下，日志也跟着丢
+    换成「守护者 + 子进程」后，重启由父进程做：父进程不碰端口，
+    子进程死了父进程重新拉一个，端口随旧进程一起释放，最稳。
+    """
+    if os.environ.get("JINGLI_BRIDGE_CHILD") == "1":
+        from bridge.server import main as bridge_main
+        return bridge_main()
+    return _serve_daemon()
+
+
+def _serve_daemon() -> int:
+    """守护者：拉起桥，桥退出就重拉。"""
+    import subprocess
+    import time
+
+    env = dict(os.environ)
+    env["JINGLI_BRIDGE_CHILD"] = "1"
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, "serve"]
+    else:
+        cmd = [sys.executable, "-m", "src.app", "serve"]
+
+    print("取数桥守护已启动（桥意外退出会自动拉起，Ctrl+C 退出守护者）")
+
+    def _stamp() -> tuple:
+        out = []
+        for f in (paths.ROOT / "bridge" / "server.py",
+                  paths.ROOT / "src" / "cli.py",
+                  paths.ROOT / "src" / "loader.py",
+                  paths.ROOT / "src" / "calc.py"):
+            try:
+                st = f.stat()
+                out.append((f.name, st.st_mtime_ns))
+            except OSError:
+                out.append((f.name, 0))
+        return tuple(out)
+
+    last = _stamp()
+    while True:
+        try:
+            proc = subprocess.Popen(cmd, env=env, cwd=str(paths.ROOT))
+        except OSError as e:
+            print(f"桥启动失败：{e}（5 秒后重试）")
+            time.sleep(5)
+            continue
+
+        try:
+            while proc.poll() is None:
+                time.sleep(2.0)
+                now = _stamp()
+                if now != last:
+                    changed = [a[0] for a, b in zip(now, last) if a[1] != b[1]]
+                    print(f"源码有变化（{changed}），重启桥")
+                    last = now
+                    proc.terminate()
+                    break
+        except KeyboardInterrupt:
+            print("\n停止桥…")
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            return 0
+
+        rc = proc.poll()
+        if rc == 0:
+            print("桥正常退出，守护者随之退出")
+            return 0
+        print(f"桥意外退出（码 {rc}），2 秒后重新拉起")
+        time.sleep(2)
 
 
 def cmd_run(argv: list[str]) -> int:
