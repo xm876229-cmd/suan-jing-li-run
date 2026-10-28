@@ -402,7 +402,10 @@ $("toggle").addEventListener("click", () => {
 });
 
 $("runAll").addEventListener("click", (e) => runTasks("all", e.target));
-document.querySelectorAll(".grid button").forEach((b) => {
+// 注意：这里必须限定 [data-task]。grid 里还有「抓广告导出接口」这种
+// 走自己一套逻辑的按钮，用通配选择器会让它们的 dataset.task 是 undefined，
+// 于是后台报「不支持的取数任务：undefined」。
+document.querySelectorAll(".grid button[data-task]").forEach((b) => {
   b.addEventListener("click", () => runTasks(b.dataset.task, b));
 });
 document.querySelectorAll(".presets button").forEach((b) => {
@@ -524,20 +527,20 @@ function renderCal() {
 
 const capAdsBtn = $("capAds");
 if (capAdsBtn) {
-  capAdsBtn.addEventListener("click", () => {
-    capAdsBtn.disabled = true;
-    log("正在找广告页面…（请先切到店铺的「广告」页面）");
-    safeSend({ type: "captureAds", seconds: 240 }, (r) => {
-      capAdsBtn.disabled = false;
-      if (!r) { log("没有响应"); return; }
-      if (r.ok) {
-        const n = r.result?.requests ?? 0;
-        log(n ? `抓到 ${n} 条广告请求，已存到 data/capture/ads_export.jsonl` : "这轮没抓到广告请求，请确认在广告页面点的导出");
-      } else {
-        log(`失败：${r.error}`);
-      }
+    capAdsBtn.addEventListener("click", () => {
+      capAdsBtn.disabled = true;
+      log("开始监听广告请求…（现在去店铺的「广告」页面点一次「导出」，监听是全局的，切页不影响）");
+      safeSend({ type: "captureAds", seconds: 240 }, (r) => {
+        capAdsBtn.disabled = false;
+        if (!r) { log("没有响应"); return; }
+        if (r.ok) {
+          const n = r.result?.requests ?? 0;
+          log(n ? `抓到 ${n} 条广告请求，已存到 data/capture/ads_export.jsonl` : "这轮没抓到广告请求，请确认在广告页面点的导出");
+        } else {
+          log(`失败：${r.error}`);
+        }
+      });
     });
-  });
 }
 
 // ---------------- 深度抓包 ----------------

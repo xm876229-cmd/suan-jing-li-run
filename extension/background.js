@@ -175,9 +175,10 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
       };
       recordCapture(rec);
 
-      // 抓广告导出任务时，命中 ads 域的写请求就单独回传一份，
-      // 免得事后在几十万条日常流量里翻
-      if (adsWatch && details.method !== "GET" && isAdsUrl(u)) {
+      // 抓广告导出任务时，命中广告相关的请求就单独回传一份，
+      // 免得事后在几十万条日常流量里翻。
+      // GET 也要记：有些导出接口是用 GET 带参数触发的。
+      if (adsWatch && isAdsUrl(u) && /export|download|task|stat|generate|create/i.test(u)) {
         rec.kind = "ads-export";
         adsWatch.recs.push(rec);
         adsWatch.log(`★ 捕获广告请求：${details.method} ${u.split("?")[0]}`);
@@ -189,9 +190,14 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
   );
 }
 
-/** 广告相关的域名/路径判定。 */
+/** 广告相关的域名/路径判定。
+ *
+ *  注意 `oec_ads` 这一项——抓包实测广告接口挂在**店铺主域**下
+ *  （seller-my.tiktok.com/oec_ads/shopping/v1/oec/stat/…），
+ *  并不是在 ads.tiktok.com 域。漏了它就等于整个广告域都识别不出来。
+ */
 function isAdsUrl(u) {
-  return /ads\.tiktok\.com|\/ads\/|advertis|ad_?center|\/stat\//i.test(u || "");
+  return /oec_ads|ads\.tiktok\.com|\/ads\/|advertis|ad_?center|\/stat\//i.test(u || "");
 }
 
 /** 把一条广告请求实时推给本地桥，落到单独的 ads_export.jsonl。 */
@@ -1138,16 +1144,21 @@ try {
 async function captureAds(seconds, log) {
   const secs = Math.max(30, Math.min(600, seconds || 180));
 
-  // 找已打开的广告页面。找不到就直接说清楚，别让人干等。
+  // 列出候选标签页只是为了给人指路，**不强制要求广告页已经打开**：
+  // webRequest 是全局监听的，用户什么时候切到广告页点导出，都能抓到。
+  // 之前这里因为「找不到广告页」直接抛错，把整件事卡死了。
   const tabs = await chrome.tabs.query({});
-  const adsTabs = tabs.filter((t) => isAdsUrl(t.url || ""));
-  if (!adsTabs.length) {
-    throw new Error(
-      "没有打开广告页面。请先在战斧里切到店铺的「广告」页面（能看到广告数据列表那一页），" +
-      "再点这个按钮",
-    );
+  const tiktokTabs = tabs.filter((t) => /tiktok\.com|tiktokglobalshop\.com/i.test(t.url || ""));
+  const adsTabs = tiktokTabs.filter(
+    (t) => isAdsUrl(t.url || "") || /广告|advertis|\bad\b/i.test(t.title || ""),
+  );
+  log(`当前开着 ${tiktokTabs.length} 个店铺标签页，其中 ${adsTabs.length} 个像广告页`);
+  for (const t of adsTabs.slice(0, 5)) {
+    log(`  · ${(t.title || "").slice(0, 30)}　${(t.url || "").slice(0, 90)}`);
   }
-  log(`已就位，监听着 ${adsTabs.length} 个广告标签页`);
+  if (!adsTabs.length) {
+    log("没认出广告页也没关系：监听是全局的。你现在切到店铺的「广告」页面，点一次「导出」照样能抓到。");
+  }
 
   const recs = [];
   adsWatch = {
@@ -1164,8 +1175,10 @@ async function captureAds(seconds, log) {
     while (Date.now() < deadline) {
       await sleep(1000);
       // 抓到「创建导出任务」的请求就收工，不用让人干等满时间
-      const created = recs.find((x) =>
-        /export|create/i.test(x.url || "") && !/query|list/i.test(x.url || ""));
+      const created = recs.find((x) => {
+        const u = x.url || "";
+        return !/query|list|\/get\b|health|ping/i.test(u) && /export|create|download|task|generate/i.test(u);
+      });
       if (created) {
         log("已抓到创建类请求，可以收工");
         break;
