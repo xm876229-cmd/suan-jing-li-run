@@ -437,7 +437,7 @@ def parse_mapping_json(path: Path) -> SkuIndex:
         item = {
             "product_id": pid,
             "style_code": flat.get("stylecode", "") or flat.get("sellerstylecode", ""),
-            "product_name": flat.get("productname", ""),
+            "product_name": flat.get("productname", "") or flat.get("producttitle", ""),
         }
         sid = flat.get("skuid", "")
         if sid:

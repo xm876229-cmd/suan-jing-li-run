@@ -624,6 +624,56 @@ function splitDateRange(startStr, endExclusive, chunkDays) {
  * 之前这条路走不通是因为下载环节跨源；现在整段都在页面上下文里执行，
  * 创建、轮询、下载用的都是页面的登录态与同源身份。
  */
+/**
+ * 从「商品管理」的 SKU 列表接口取全量映射。
+ *
+ * 这是商品管理页自己调用的接口（`/api/v1/product/stock/sku/list`），返回的每个 SKU
+ * 直接带 sku_id / product_id / seller_sku / product_title，而且**不按时间区间过滤**，
+ * 覆盖全部商品——包括当期没销量、没被分析接口收录的那些。
+ *
+ * 为什么它比「导出链接资料表」更好：
+ *   · 不用生成文件、不用下载、不用解析 xlsx
+ *   · 分页可控，拿到的就是结构化 JSON
+ *   · 还额外带 status 与库存，能区分在售/下架
+ */
+async function pagePullSkuFromProductList(host, log) {
+  const url = await buildUrl(host, "/api/v1/product/stock/sku/list");
+
+  const r = await runInPage(host, async (u) => {
+    const all = [];
+    for (let page = 1; page <= 80; page++) {
+      let j;
+      try {
+        const resp = await fetch(u, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ page, size: 200, is_need_toggle_status: true }),
+        });
+        j = JSON.parse(await resp.text());
+      } catch (err) {
+        return { error: `第 ${page} 页请求失败：${(err && err.message) || err}` };
+      }
+      if (!j || j.code !== 0) {
+        return { error: `第 ${page} 页 code=${j && j.code} ${(j && j.message) || ""}`.trim() };
+      }
+      const skus = j.skus || [];
+      all.push(...skus);
+      if (skus.length < 200) return { skus: all, pages: page };
+    }
+    return { skus: all, pages: 80, truncated: true };
+  }, [url]);
+
+  if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
+  if (r.error) throw new Error(r.error);
+  const out = r.result || {};
+  if (out.error) throw new Error(out.error);
+  if (!out.skus || !out.skus.length) throw new Error("商品管理接口返回 0 个 SKU");
+
+  log(`商品管理接口：${out.pages} 页，${out.skus.length} 个 SKU`);
+  return out.skus;
+}
+
 async function pagePullSkuByExport(host, start, endExclusive) {
   const exportUrl = await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list/export");
 
@@ -744,48 +794,53 @@ async function pagePullSkuRanged(host, start, endExclusive, log) {
 }
 
 async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
-  const { skuCache: prev } = await skGet({ skuCache: null });
   const host = await ensureHost("seller", log);
+  const today = shiftDate(new Date().toISOString().slice(0, 10), 0);
+  const done = [];
 
-  log(`取商品SKU映射（区间 ${startDate} ~ ${endDateExclusive}）…`);
-
-  // 先用导出任务：抓包里页面自己就是这么取的，16 天区间 + 一次导全，status 200。
-  // list 接口对长区间会超时，只在导出失败时兜底。
+  // ① 商品管理全量：覆盖所有链接，包括当期没有销量的。
+  //    这一份是「当前归属」，先把底铺全。
   try {
-    log("走导出任务（支持长区间，一次导全）…");
+    log("① 取商品管理全量 SKU（含当期无销量的链接）…");
+    const skus = await pagePullSkuFromProductList(host, log);
+    const bytes = new TextEncoder().encode(JSON.stringify({ items: skus }));
+    const saved = await uploadToBridge(`sku_list_商品管理_${today}.json`, bytes.buffer);
+    log(`   已保存：${saved.path}（${skus.length} 个 SKU）`);
+    done.push(`商品管理 ${skus.length} 条`);
+  } catch (e) {
+    log(`   商品管理接口失败：${(e && e.message) || e}`);
+  }
+
+  // ② 区间内 SKU：归属按所选区间，更准确。
+  //    后上传，合并时会覆盖①里的「当前归属」——所以区间内改绑过的 SKU 会按区间归属。
+  try {
+    log("② 取区间内 SKU（归属按所选区间）…");
     const saved = await pagePullSkuByExport(host, startDate, endDateExclusive);
-    log(`导出文件已保存：${saved.path}（${Math.round((saved.bytes || 0) / 1024)} KB）`);
-    await skSet({ skuCache: { at: Date.now(), file: saved.path, items: null } });
-    return { saved: saved.path, via: "export" };
+    log(`   已保存：${saved.path}（${Math.round((saved.bytes || 0) / 1024)} KB）`);
+    done.push("区间导出");
   } catch (e) {
-    log(`导出任务失败：${(e && e.message) || e}，改用 list 接口…`);
+    log(`   区间导出失败：${(e && e.message) || e}（沿用①的全量归属）`);
   }
 
-  let all = [];
-  try {
-    all = await pagePullSkuRanged(host, startDate, endDateExclusive, log);
-  } catch (e) {
-    log(`list 接口取数异常：${(e && e.message) || e}`);
+  // ③ 兜底：list 接口分段
+  if (!done.length) {
+    const all = await pagePullSkuRanged(host, startDate, endDateExclusive, log);
+    if (all.length) {
+      const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
+      const saved = await uploadToBridge(`sku_list_${startDate}_${shiftDate(endDateExclusive, -1)}.json`, bytes.buffer);
+      log(`③ 已保存：${saved.path}（${all.length} 条）`);
+      done.push(`list 分段 ${all.length} 条`);
+    }
   }
 
-  if (!all.length) {
+  if (!done.length) {
     throw new Error(
-      "商品SKU两条路都没取到，本轮沿用现有主表，不影响净利计算" +
-      "（主工作簿的「链接资料」表已自动作为映射来源）",
+      "商品SKU三条路都没取到，本轮沿用现有主表（主工作簿「链接资料」表已自动作为来源）",
     );
   }
-
-  const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
-  const name = `sku_list_${startDate}_${shiftDate(endDateExclusive, -1)}.json`;
-  const saved = await uploadToBridge(name, bytes.buffer);
-  await skSet({ skuCache: { at: Date.now(), file: saved.path, items: all.length } });
-
-  if (prev && prev.items != null && prev.items !== all.length) {
-    const delta = all.length - prev.items;
-    log(`映射有变化：${prev.items} → ${all.length} 条（${delta > 0 ? "+" : ""}${delta}）`);
-  }
-  log(`已保存：${saved.path}（${all.length} 条，区间 ${startDate} ~ ${endDateExclusive}）`);
-  return { saved: saved.path, items: all.length };
+  await skSet({ skuCache: { at: Date.now(), items: null } });
+  log(`映射取数完成：${done.join(" + ")}`);
+  return { via: done.join(" + ") };
 }
 
 // ---------------- 任务：联盟佣金 ----------------
