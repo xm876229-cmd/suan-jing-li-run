@@ -144,29 +144,65 @@ function summarizeRequestBody(rb) {
   return null;
 }
 
+// 抓广告导出任务时打开的观察窗口（null = 不观察）
+let adsWatch = null;
+
 // 页面里的 fetch/XHR 抓不到的东西都在这一层：表单提交、iframe、Service Worker 发的请求。
 // 广告导出很可能就是这类，所以必须补上。
+//
+// 关键：extraInfoSpec 必须带 "requestBody"，否则 details.requestBody 是 undefined，
+// 记下来的只有 URL 没有请求体——而我们需要的恰恰是请求体（导出接口传了什么参数）。
+// 之前广告「创建导出任务」接口抓不到，多半就是卡在这儿。
 if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
   chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
       if (!enabled) return;
       const u = details.url || "";
       if (!/export|download|task|insight|stat\//i.test(u)) return;
-      recordCapture({
+
+      const reqBody = summarizeRequestBody(details.requestBody);
+      const rec = {
         kind: "webrequest",
         url: u,
         method: details.method,
         status: null,
-        contentType: "",
+        contentType: details.type || "",
         ms: 0,
-        reqBody: null,
+        reqBody,
         respSample: null,
         page: details.initiator || "",
         at: new Date().toISOString(),
-      });
+      };
+      recordCapture(rec);
+
+      // 抓广告导出任务时，命中 ads 域的写请求就单独回传一份，
+      // 免得事后在几十万条日常流量里翻
+      if (adsWatch && details.method !== "GET" && isAdsUrl(u)) {
+        rec.kind = "ads-export";
+        adsWatch.recs.push(rec);
+        adsWatch.log(`★ 捕获广告请求：${details.method} ${u.split("?")[0]}`);
+        pushAdsCapture(rec);
+      }
     },
-    { urls: ["*://*.tiktok.com/*", "*://*.tiktokglobalshop.com/*"] }
+    { urls: ["*://*.tiktok.com/*", "*://*.tiktokglobalshop.com/*"] },
+    ["requestBody"]
   );
+}
+
+/** 广告相关的域名/路径判定。 */
+function isAdsUrl(u) {
+  return /ads\.tiktok\.com|\/ads\/|advertis|ad_?center|\/stat\//i.test(u || "");
+}
+
+/** 把一条广告请求实时推给本地桥，落到单独的 ads_export.jsonl。 */
+function pushAdsCapture(rec) {
+  try {
+    fetch(`${BRIDGE}/capture`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ batch: [rec], file: "ads_export.jsonl" }),
+    }).catch(() => {});
+  } catch (e) { /* 忽略 */ }
 }
 
 // ---------------- 抓包转发结束 ----------------
@@ -354,7 +390,7 @@ function skSet(obj) {
   });
 }
 
-async function uploadToBridge(name, arrayBuffer) {
+async function uploadToBridge(name, arrayBuffer, dir) {
   // 分块 base64，避免一次拼串把内存打爆
   const bytes = new Uint8Array(arrayBuffer);
   let bin = "";
@@ -366,7 +402,7 @@ async function uploadToBridge(name, arrayBuffer) {
   const resp = await fetch(`${BRIDGE}/upload`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, b64 }),
+    body: JSON.stringify({ name, b64, dir: dir || "" }),
   });
   const j = await resp.json();
   if (!j.ok) throw new Error(j.error || "上传失败");
@@ -803,8 +839,8 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   try {
     log("① 取商品管理全量 SKU（含当期无销量的链接）…");
     const skus = await pagePullSkuFromProductList(host, log);
-    const bytes = new TextEncoder().encode(JSON.stringify({ items: skus }));
-    const saved = await uploadToBridge(`sku_list_商品管理_${today}.json`, bytes.buffer);
+    const bytes = new TextEncoder().encode(JSON.stringify({ skus }));
+    const saved = await uploadToBridge(`sku_list_商品管理_${today}.json`, bytes.buffer, "mapping");
     log(`   已保存：${saved.path}（${skus.length} 个 SKU）`);
     done.push(`商品管理 ${skus.length} 条`);
   } catch (e) {
@@ -827,7 +863,7 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     const all = await pagePullSkuRanged(host, startDate, endDateExclusive, log);
     if (all.length) {
       const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
-      const saved = await uploadToBridge(`sku_list_${startDate}_${shiftDate(endDateExclusive, -1)}.json`, bytes.buffer);
+      const saved = await uploadToBridge(`sku_list_${startDate}_${shiftDate(endDateExclusive, -1)}.json`, bytes.buffer, "mapping");
       log(`③ 已保存：${saved.path}（${all.length} 条）`);
       done.push(`list 分段 ${all.length} 条`);
     }
@@ -846,108 +882,118 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
 // ---------------- 任务：联盟佣金 ----------------
 
 /**
- * 探测联盟「商品维度」数据接口。
+ * 联盟佣金：直接取「商品维度」的交易明细。
  *
- * 背景：导出任务的 list 接口只返回 task_id / file_name / status，**没有下载地址**，
- * 抓包也找不到任何 download 接口。所以导出这条路走不通时，改取数据接口。
- * 已知 `/transaction/detail_list/get` 是数据接口，但抓到的请求都是 module_type=103
- * （达人维度），商品维度（导出用的是 104）的参数键名未知。
+ * 为什么不用导出：
+ *   导出任务的 list 接口只返回 task_id / file_name / status，**没有下载地址**，
+ *   抓包里也找不到任何 download 接口——这条路是死的，之前一直在等它，纯属白等。
  *
- * 这里把几种可能的参数形状各试一次，只读、只打日志，不改任何数据。
- * 目的是拿到「哪种形状能返回商品行」以及「商品行的字段名」，下一轮就能定死映射。
+ * 为什么用 detail_list/get：
+ *   联盟后台的「商品分析」页面自己就在调这个接口，请求体与响应结构都已在抓包里确认：
+ *     请求 params.product_list_params[0].time_descriptor.time_context = "101"   ← 之前缺这个所以没命中
+ *     响应 data.product_list_segments[].product_performances[]
+ *       .product_base.id                                → 商品ID
+ *       .product_metrics.product_estimated_commission  → 预估佣金（本地货币，如 RM225.95）
+ *       .product_metrics.product_gmv                    → 商品 GMV
+ *       .product_metrics.product_orders_cnt             → 订单数
+ *   旧工作簿的「达人佣金」口径就是「联盟报表预估佣金，按商品ID汇总」，与这里一致。
  */
-async function pageProbeAffiliate(host, s, e, tz, log) {
+const AFFILIATE_METRICS = [1, 3, 2, 4, 9, 20, 13, 14, 19, 6, 24, 22, 16, 17, 18, 25, 26, 23, 5];
+
+async function pagePullAffiliateProducts(host, startSec, endSec, tz, log) {
   const url = await buildUrl(host, "/api/v1/oec/affiliate/compass/transaction/detail_list/get");
-  const METRICS = [1, 3, 2, 4, 9, 20, 13, 14, 19, 6, 12, 11, 16, 17, 18, 8, 7, 10, 5];
-  const SHAPES = [
-    { name: "m104/type2/product_list_params", module_type: 104, detail_list_type: 2, key: "product_list_params" },
-    { name: "m104/type2/transaction_product_list_params", module_type: 104, detail_list_type: 2, key: "transaction_product_list_params" },
-    { name: "m104/type1/product_list_params", module_type: 104, detail_list_type: 1, key: "product_list_params" },
-    { name: "m103/type2/product_list_params", module_type: 103, detail_list_type: 2, key: "product_list_params" },
-  ];
+  const PAGE_SIZE = 100;
+  const MAX_PAGES = 100;
 
-  const r = await runInPage(host, async (u, startS, endS, tzOffset, metrics, shapes) => {
-    const out = [];
-    const td = () => ({
-      granularity_type: 1, timezone_offset: tzOffset,
-      start_time: startS, end_time: endS, time_option_type: 1,
-    });
-
-    /** 在响应里找第一个含商品ID 的对象，用来确认「这就是商品维度」。 */
-    function findProductRow(node, depth) {
-      if (!node || depth > 6) return null;
-      if (Array.isArray(node)) {
-        for (const it of node) {
-          const hit = findProductRow(it, depth + 1);
-          if (hit) return hit;
-        }
-        return null;
-      }
-      if (typeof node === "object") {
-        const keys = Object.keys(node);
-        const hasPid = keys.some((k) => /^(product_?id|productId)$/i.test(k));
-        if (hasPid) return node;
-        for (const k of keys) {
-          const hit = findProductRow(node[k], depth + 1);
-          if (hit) return hit;
-        }
-      }
-      return null;
-    }
-
-    for (const sh of shapes) {
+  const r = await runInPage(host, async (u, s, e, tzOffset, metrics, pageSize, maxPages) => {
+    const rows = [];
+    for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
       const body = {
         params: {
-          detail_list_type: sh.detail_list_type,
-          [sh.key]: [{
-            time_descriptor: td(),
+          detail_list_type: 2,
+          product_list_params: [{
+            time_descriptor: {
+              granularity_type: 1,
+              timezone_offset: tzOffset,
+              start_time: s,
+              end_time: e,
+              time_option_type: 1,
+              time_context: "101",
+            },
             metric_types: metrics,
-            page_param: { page_no: 1, page_size: 20 },
-            sorter: { sort_type: 2, order_type: 1 },
+            page_param: { page_no: pageNo, page_size: pageSize },
+            sorter: { sort_type: 1, order_type: 1 },
             filter: {},
           }],
         },
-        module_type: sh.module_type,
+        module_type: 104,
         locale: "zh-CN",
       };
+
+      let j;
       try {
         const resp = await fetch(u, {
-          method: "POST", credentials: "include",
+          method: "POST",
+          credentials: "include",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
-        const j = JSON.parse(await resp.text());
-        const row = (j && j.code === 0) ? findProductRow(j.data, 0) : null;
-        out.push({
-          name: sh.name,
-          code: j && j.code,
-          msg: String((j && j.message) || "").slice(0, 60),
-          dataKeys: j && j.data ? Object.keys(j.data).slice(0, 6) : [],
-          foundProductRow: !!row,
-          rowKeys: row ? Object.keys(row).slice(0, 24) : [],
-          sample: row ? JSON.stringify(row).slice(0, 300) : "",
-        });
-        if (row) return out;              // 找到商品行就停，不再试后面的形状
+        j = JSON.parse(await resp.text());
       } catch (err) {
-        out.push({ name: sh.name, error: String((err && err.message) || err).slice(0, 80) });
+        return { error: `第 ${pageNo} 页请求失败：${(err && err.message) || err}`, got: rows.length };
       }
+      if (!j || j.code !== 0) {
+        return {
+          error: `第 ${pageNo} 页 code=${j && j.code} ${(j && j.message) || ""}`.trim(),
+          got: rows.length,
+        };
+      }
+      const segs = (j.data && j.data.product_list_segments) || [];
+      const perfs = [];
+      for (const seg of segs) for (const p of (seg.product_performances || [])) perfs.push(p);
+      rows.push(...perfs);
+      if (perfs.length < pageSize) return { rows, pages: pageNo, done: true };
     }
-    return out;
-  }, [url, Math.floor(new Date(s + "T00:00:00").getTime() / 1000),
-      Math.floor(new Date(e + "T00:00:00").getTime() / 1000) - 1, tz, METRICS, SHAPES]);
+    return { rows, pages: maxPages, done: false, truncated: true };
+  }, [url, startSec, endSec, tz, AFFILIATE_METRICS, PAGE_SIZE, MAX_PAGES]);
 
-  if (r.missingTab) { log("  探测失败：没有开着的联盟页面"); return null; }
-  if (r.error) { log(`  探测异常：${r.error}`); return null; }
-  const rows = (r.result || []);
-  for (const x of rows) {
-    if (x.error) { log(`  · ${x.name} → 请求异常 ${x.error}`); continue; }
-    log(`  · ${x.name} → code=${x.code} ${x.msg}｜data键=${(x.dataKeys || []).join(",") || "无"}｜含商品行=${x.foundProductRow}`);
-    if (x.foundProductRow) {
-      log(`    商品行字段：${(x.rowKeys || []).join(", ")}`);
-      log(`    样例：${x.sample}`);
-    }
+  if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
+  if (r.error) throw new Error(r.error);
+  const out = r.result || {};
+  if (out.error) throw new Error(out.error);
+  if (!out.rows || !out.rows.length) throw new Error("联盟接口返回 0 条商品数据");
+  log(`联盟接口：${out.pages} 页，${out.rows.length} 个商品${out.truncated ? "（已达上限，可能没取完）" : ""}`);
+  return out.rows;
+}
+
+/** 把商品维度明细转成核算引擎能直接吃的 CSV。 */
+function affiliateRowsToCsv(rows) {
+  const esc = (v) => {
+    const s = String(v == null ? "" : v);
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const amt = (o) => (o && o.amount != null ? o.amount : "");
+  const num = (o) => (o && o.value != null ? o.value : "");
+
+  // 表头用英文：核算引擎按归一化列名匹配（productid / estcommission），
+  // 带 BOM 让 Excel 打开不乱码
+  const lines = ["\uFEFFProduct ID,Est. commission,Product name,Product GMV,Orders,Items sold,Refunded GMV"];
+  for (const p of rows) {
+    const base = p.product_base || {};
+    const m = p.product_metrics || {};
+    const pid = base.id || "";
+    if (!pid) continue;
+    lines.push([
+      pid,
+      amt(m.product_estimated_commission),
+      base.title || "",
+      amt(m.product_gmv),
+      num(m.product_orders_cnt),
+      num(m.product_items_sold_cnt),
+      amt(m.product_refunded_gmv),
+    ].map(esc).join(","));
   }
-  return rows.find((x) => x.foundProductRow) || null;
+  return lines.join("\r\n");
 }
 
 async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
@@ -957,60 +1003,15 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
   const endSec = Math.floor(new Date(endDateExclusive + "T00:00:00").getTime() / 1000) - 1;
   const tz = tzOffset ?? -new Date().getTimezoneOffset() * 60;
 
-  log("提交联盟佣金导出…");
-  const body = {
-    module_type: 104,
-    transaction_product_list_param: {
-      time_descriptor: {
-        granularity_type: 1,
-        timezone_offset: tz,
-        start_time: startSec,
-        end_time: endSec,
-        time_option_type: 1,
-      },
-      metric_types: [1, 3, 2, 4, 9, 20, 13, 14, 19, 6, 12, 11, 16, 17, 18, 8, 7, 10, 5],
-      sorter: { sort_type: 1, order_type: 1 },
-      filter: {},
-    },
-    locale: "zh-CN",
-  };
-  const created = await apiPost(
-    await buildUrl(host, "/api/v1/oec/affiliate/compass/export_task/create"),
-    body
-  );
-  const taskId = created?.data?.task_id || "";
-  log(`任务已创建：${taskId || "(无 task_id)"}`);
+  log("取联盟商品维度明细…");
+  const rows = await pagePullAffiliateProducts(host, startSec, endSec, tz, log);
 
-  // 轮询任务列表，找到可下载的地址。
-  // 实测 list 接口只返回 task_id / file_name / status，**始终没有下载地址**，
-  // 抓包里也找不到任何 download 接口。所以这里只等 30 秒探一下，
-  // 拿不到就转去探测数据接口，不把整轮拖成几分钟。
-  for (let i = 0; i < 6; i++) {
-    await sleep(5000);
-    const list = await apiPost(
-      await buildUrl(host, "/api/v1/oec/affiliate/compass/export_task/list"),
-      { module_type: 104, locale: "zh-CN" }
-    );
-    const url = findUrl(list);
-    if (url) {
-      return downloadAndUpload(url, `Transaction_Analysis_${startDate}_${endDateExclusive}.xlsx`, log);
-    }
-    if (i === 0 || i === 5) {
-      const n = (list?.data?.export_tasks || []).length;
-      log(`任务列表 ${n} 条，暂无下载地址（第 ${i + 1} 次）`);
-    }
-  }
-
-  // 导出拿不到就改取数据接口。先探测哪种参数形状能返回商品行。
-  log("导出接口给不出下载地址，改探测交易明细接口…");
-  const hit = await pageProbeAffiliate(host, startDate, endDateExclusive, tz, log);
-  if (hit) {
-    throw new Error(
-      `联盟数据接口已定位（${hit.name}），但字段映射还没接上，本轮用上一期文件。` +
-      `日志里已打印商品行字段，下一步即可接通`
-    );
-  }
-  throw new Error("联盟佣金本轮未取到（导出无下载地址、数据接口未定位），沿用上一期文件，报表会标注");
+  const csv = affiliateRowsToCsv(rows);
+  const bytes = new TextEncoder().encode(csv);
+  const name = `Transaction_Analysis_Product_List_${startDate}_${endDateExclusive}.csv`;
+  const saved = await uploadToBridge(name, bytes.buffer);
+  log(`已保存：${saved.path}（${rows.length} 个商品）`);
+  return { saved: saved.path, products: rows.length };
 }
 
 // ---------------- 任务：广告（只拉已完成的任务） ----------------
@@ -1119,6 +1120,68 @@ try {
   }
 } catch (e) {
   console.warn("广告守望注册失败：", e);
+}
+
+// ---------------- 任务：抓广告导出接口 ----------------
+
+/**
+ * 专门抓广告页面的「导出」请求。
+ *
+ * 背景：广告导出的**创建**接口在 ads 域。
+ * 之前的抓包记录里 ads 域只有 download_task/query（查询），
+ * 没有创建——因为抓包时人不在广告页面上，ads 域的写请求根本没发生过。
+ * 这不是程序的问题，是抓不到就没数据。
+ *
+ * 这一步要人配合一次：在广告页面点一次「导出」。
+ * 抓到请求体之后就能照着复现，之后就不用再点了。
+ */
+async function captureAds(seconds, log) {
+  const secs = Math.max(30, Math.min(600, seconds || 180));
+
+  // 找已打开的广告页面。找不到就直接说清楚，别让人干等。
+  const tabs = await chrome.tabs.query({});
+  const adsTabs = tabs.filter((t) => isAdsUrl(t.url || ""));
+  if (!adsTabs.length) {
+    throw new Error(
+      "没有打开广告页面。请先在战斧里切到店铺的「广告」页面（能看到广告数据列表那一页），" +
+      "再点这个按钮",
+    );
+  }
+  log(`已就位，监听着 ${adsTabs.length} 个广告标签页`);
+
+  const recs = [];
+  adsWatch = {
+    recs,
+    log: (m) => log(m),
+    startedAt: Date.now(),
+  };
+
+  // 到点自动收工，顺带把观察窗口关掉
+  const timer = setTimeout(() => { adsWatch = null; }, (secs + 10) * 1000);
+
+  try {
+    const deadline = Date.now() + secs * 1000;
+    while (Date.now() < deadline) {
+      await sleep(1000);
+      // 抓到「创建导出任务」的请求就收工，不用让人干等满时间
+      const created = recs.find((x) =>
+        /export|create/i.test(x.url || "") && !/query|list/i.test(x.url || ""));
+      if (created) {
+        log("已抓到创建类请求，可以收工");
+        break;
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    adsWatch = null;
+  }
+
+  log(`共捕获 ${recs.length} 条广告请求`);
+  return {
+    seconds: secs,
+    requests: recs.length,
+    urls: recs.map((x) => `${x.method} ${(x.url || "").split("?")[0]}`),
+  };
 }
 
 // ---------------- 定时自动取数 ----------------
@@ -1544,6 +1607,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     deepCapture(msg.seconds || 120, log)
       .then((r) => sendResponse({ ok: true, result: r }))
       .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
+    return true;
+  }
+
+  if (msg.type === "captureAds") {
+    const log = (m) => appendTaskLog(`[ads-cap] ${m}`);
+    startKeepAlive();
+    captureAds(msg.seconds || 180, log)
+      .then((r) => {
+        stopKeepAlive();
+        sendResponse({ ok: true, result: r });
+      })
+      .catch((e) => {
+        stopKeepAlive();
+        appendTaskLog(`[ads-cap] 失败：${e.message}`);
+        sendResponse({ ok: false, error: String(e.message || e) });
+      });
     return true;
   }
 

@@ -413,6 +413,11 @@ def parse_mapping_json(path: Path) -> SkuIndex:
 
     items = (raw.get("data") or {}).get("items") or raw.get("items") or []
 
+    # 商品管理接口 /api/v1/product/stock/sku/list 返回的是 {"skus":[...]}，
+    # 字段名是 sku_id / product_id / seller_sku / product_title，一样要收。
+    if not items:
+        items = raw.get("skus") or (raw.get("data") or {}).get("skus") or []
+
     for it in items:
         if not isinstance(it, dict):
             continue

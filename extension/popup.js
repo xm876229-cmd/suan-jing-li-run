@@ -517,6 +517,29 @@ function renderCal() {
   el.addEventListener("blur", saveRange);
 });
 
+// ---------------- 抓广告导出接口 ----------------
+// 广告导出的「创建」接口在 ads 域，之前抓不到是因为抓包时人不在广告页面上。
+// 这一步需要人配合：在广告页面点一次「导出」，抓到的请求体会单独落到
+// data/capture/ads_export.jsonl，之后就能照着复现，不再需要人点。
+
+const capAdsBtn = $("capAds");
+if (capAdsBtn) {
+  capAdsBtn.addEventListener("click", () => {
+    capAdsBtn.disabled = true;
+    log("正在找广告页面…（请先切到店铺的「广告」页面）");
+    safeSend({ type: "captureAds", seconds: 240 }, (r) => {
+      capAdsBtn.disabled = false;
+      if (!r) { log("没有响应"); return; }
+      if (r.ok) {
+        const n = r.result?.requests ?? 0;
+        log(n ? `抓到 ${n} 条广告请求，已存到 data/capture/ads_export.jsonl` : "这轮没抓到广告请求，请确认在广告页面点的导出");
+      } else {
+        log(`失败：${r.error}`);
+      }
+    });
+  });
+}
+
 // ---------------- 深度抓包 ----------------
 
 const deepBtn = $("deep");

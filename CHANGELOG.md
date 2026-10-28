@@ -4,6 +4,67 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.9.0] - 2026-10-28
+
+### 新增：联盟佣金改走商品维度数据接口（原来这条是断的）
+
+之前联盟佣金一直在等「导出任务」生成下载地址——**实测那个 list 接口只返回
+task_id / file_name / status，永远没有下载地址**，抓包里也找不到任何 download 接口，
+所以每轮都在超时后放弃。
+
+改用联盟后台「商品分析」页面自己就在调的接口，参数与响应结构已从抓包逐一核对：
+
+```
+POST affiliate.tiktok.com/api/v1/oec/affiliate/compass/transaction/detail_list/get
+{"params":{"detail_list_type":2,"product_list_params":[{
+  "time_descriptor":{"granularity_type":1,"timezone_offset":28800,"start_time":…,"end_time":…,
+                     "time_option_type":1,"time_context":"101"},
+  "metric_types":[1,3,2,4,9,20,13,14,19,6,24,22,16,17,18,25,26,23,5],
+  "page_param":{"page_no":1,"page_size":100},"sorter":{…},"filter":{}}]},
+ "module_type":104,"locale":"zh-CN"}
+```
+
+之前探测没命中，是因为**少了 `time_context:"101"`，metric_types 也不全**。
+
+返回 `product_performances[].product_base.id`（商品ID）与
+`product_metrics.product_estimated_commission`（预估佣金），按商品ID汇总后
+写成 CSV，表头 `Product ID / Est. commission`——**与旧工作簿的联盟报表同构，
+核算引擎零改动就能吃**。
+
+### 新增：广告导出接口抓包模式
+
+广告导出卡住的根因不是程序，是**抓包时人不在广告页面上**，ads 域的写请求从未发生。
+新增面板按钮「抓广告导出接口」：
+
+- 自动找出已打开的广告标签页，没有就明确提示先切到广告页面
+- 打开观察窗口后，ads 域的写请求**实时**回传并单独落到 `data/capture/ads_export.jsonl`
+- 抓到「创建导出任务」类请求就自动收工，不用干等满时间
+
+### 修复：webRequest 抓包没记请求体
+
+`chrome.webRequest.onBeforeRequest` 的 extraInfoSpec 里漏了 `"requestBody"`，
+导致 `details.requestBody` 一直是 undefined——**记下来的只有 URL，没有请求体**，
+而反推接口参数恰恰需要请求体。补上后，表单提交 / iframe / Service Worker
+发起的请求也能拿到完整参数。
+
+### 改进：映射文件落到 data/mapping/
+
+扩展上传接口新增 `dir` 参数：映射类文件（商品管理 SKU、链接资料）落 `data/mapping/`，
+订单 / 广告 / 佣金落 `data/exports/_inbox/`，两类不再混在一个目录里。
+
+`src/loader.py` 的映射解析新增 `skus` 键支持——商品管理接口
+`/api/v1/product/stock/sku/list` 返回的是 `{"skus":[…]}`，之前只认 `items`。
+
+### 已确认可用的接口（抓包逐一核对过）
+
+| 用途 | 接口 | 状态 |
+| --- | --- | --- |
+| 订单 | `/api/fulfillment/order/export` → `export_record/get` → `download` | 已通 |
+| 商品管理 SKU（映射主来源） | `/api/v1/product/stock/sku/list` | 参数已核对 |
+| 链接资料（映射补充） | `/api/v2/insights/seller/ttp/product/sku/list/export` | 参数已核对 |
+| 联盟佣金 | `/api/v1/oec/affiliate/compass/transaction/detail_list/get` | 本版打通 |
+| 广告导出 | 待抓包确认 | 需人配合一次 |
+
 ## [v0.8.0] - 2026-10-28
 
 ### 新增：多国费率预置 + 汇率自动获取

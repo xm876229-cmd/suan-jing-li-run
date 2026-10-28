@@ -37,6 +37,7 @@ from src import paths  # noqa: E402
 ROOT = paths.ROOT
 CAPTURE_DIR = paths.CAPTURE
 INBOX_DIR = paths.INBOX
+MAPPING_DIR = paths.MAPPING
 LOG_FILE = paths.CAPTURE / "task.log"
 PORT = int(os.environ.get("JINGLI_PORT") or 8765)
 
@@ -227,7 +228,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
-        f = CAPTURE_DIR / f"capture-{datetime.now():%Y%m%d}.jsonl"
+        # 指定 file 就写到单独文件里（广告导出的抓包走这个，
+        # 免得跟几十万条日常流量混在一起翻不动）
+        name = str(payload.get("file") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_\-.]+\.jsonl", name):
+            f = CAPTURE_DIR / f"capture-{datetime.now():%Y%m%d}.jsonl"
+        else:
+            f = CAPTURE_DIR / name
         with f.open("a", encoding="utf-8", errors="replace") as fh:
             for rec in batch:
                 if not isinstance(rec, dict):
@@ -241,7 +248,12 @@ class Handler(BaseHTTPRequestHandler):
         _json(self, {"ok": True, "saved": len(batch), "file": f.name})
 
     def _post_upload(self):
-        """扩展把下载到的导出文件回传到这里，直接落进 inbox 目录。"""
+        """扩展把下载到的导出文件回传到这里。
+
+        默认落进 inbox 目录；带 dir="mapping" 的落到 data/mapping/。
+        映射类文件（商品管理 SKU、链接资料）要和订单、广告、佣金分开放，
+        否则核算时会被当成交付文件一起扫。
+        """
         try:
             length = int(self.headers.get("Content-Length") or 0)
             payload = json.loads(self.rfile.read(length) or b"{}")
@@ -254,14 +266,15 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": f"invalid payload: {e}"}, 400)
             return
 
+        target_dir = MAPPING_DIR if str(payload.get("dir") or "").lower() == "mapping" else INBOX_DIR
         safe = re.sub(r'[\\/:*?"<>|]', "_", name)
-        INBOX_DIR.mkdir(parents=True, exist_ok=True)
-        path = INBOX_DIR / safe
+        target_dir.mkdir(parents=True, exist_ok=True)
+        path = target_dir / safe
         if path.exists():
             stem, suf = path.stem, path.suffix
             i = 2
             while path.exists():
-                path = INBOX_DIR / f"{stem} ({i}){suf}"
+                path = target_dir / f"{stem} ({i}){suf}"
                 i += 1
         path.write_bytes(data)
         _append_log(f"文件已保存：{path.name}（{len(data)/1024:.0f} KB）")
