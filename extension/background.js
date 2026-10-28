@@ -1143,6 +1143,103 @@ async function pullAdsTasks(host, log) {
   return { saved, running: running.length, total: tasks.length, ready: ready.length };
 }
 
+// ---------------- 通用取数执行器（规格驱动） ----------------
+
+/** 当前选中的店铺 id（从扩展存储读，面板改设置时会写进来）。 */
+async function currentStoreId() {
+  const s = await skGet({ settings: {} });
+  return (s.settings || {}).store || "";
+}
+
+/**
+ * 按规格执行一次取数。
+ *
+ * 扩展在这里只干两件事：
+ *   1. 在页面上下文里把请求发出去（带 Cookie 与风控参数，只有那里有）
+ *   2. 把原始响应原样带回来
+ *
+ * 「取哪条路径、映射哪些字段、怎么汇总、出什么文件」全在本地程序那边，
+ * 规格见 config/api_specs.json。以后加数据源 = 加一段 JSON，
+ * 改取数逻辑也不用刷新扩展。
+ */
+async function runSpecTask(task, range, log) {
+  // 后台脚本没有 popup 那个 currentStore（那是面板里的 DOM 读取），
+  // 这里从扩展存储读当前选的店铺。
+  const store = await currentStoreId();
+  log("取取数规格…");
+  const specResp = await fetch(`${BRIDGE}/spec`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task, range, store }),
+  });
+  const sj = await specResp.json();
+  if (!sj.ok) throw new Error(sj.error || "取规格失败");
+
+  const spec = sj.spec || {};
+  const steps = spec.steps || [];
+  if (!steps.length) throw new Error(`规格里没有步骤（任务 ${task}）`);
+  const host = spec.host || "seller";
+  // 先确保那个域的页面开着、参数（fp、X-Tts-Oec-Bsid 等）是新鲜的。
+  // 接口要这些风控参数，缺了就返回含糊的 downstream server error。
+  await ensureHost(host, log);
+
+  const results = [];
+  for (const step of steps) {
+    const label = step.name || step.path;
+    log(`  · ${label}`);
+    const r = await callApi(host, step.path, step.method || "POST", step.body);
+    results.push({
+      path: step.path,
+      method: step.method || "POST",
+      request_body: step.body || null,
+      response: r.data || null,
+      error: r.error || "",
+    });
+    if (r.error) log(`    请求失败：${r.error}`);
+    else if (r.data && r.data.code !== undefined) log(`    code=${r.data.code}`);
+  }
+
+  log("交回本地程序解析落盘…");
+  const fr = await fetch(`${BRIDGE}/fetch-result`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task, range, store, results }),
+  });
+  const fj = await fr.json();
+  for (const i of fj.issues || []) log(`  ${i}`);
+  if (!fj.ok) throw new Error((fj.issues || []).join("；") || fj.error || "处理失败");
+  log(`完成：${(fj.files || []).length} 个文件`);
+  return { via: "规格驱动", files: fj.files };
+}
+
+/** 在页面上下文里发一个请求，把响应原样带回来。 */
+async function callApi(host, path, method, body) {
+  const url = await buildUrl(host, path);
+  const r = await runInPage(host, async (u, m, b) => {
+    try {
+      const opt = {
+        method: m,
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+      };
+      if (m !== "GET" && m !== "HEAD" && b != null) opt.body = JSON.stringify(b);
+      const resp = await fetch(u, opt);
+      const text = await resp.text();
+      let j = null;
+      try { j = JSON.parse(text); } catch (e) { j = { _raw: text.slice(0, 2000) }; }
+      return { ok: true, status: resp.status, data: j };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  }, [url, method, body]);
+
+  if (r.missingTab) return { error: `没有开着的 ${host} 页面` };
+  if (r.error) return { error: r.error };
+  const res = r.result || {};
+  if (!res.ok) return { error: res.error || "请求失败" };
+  return { status: res.status, data: res.data };
+}
+
 // ---------------- 任务：广告商品维度花费（直接取数，不等导出） ----------------
 
 /**
@@ -1847,8 +1944,10 @@ async function consumePending() {
 const TASK_IMPL = {
   orders: runOrders,
   sku: runSkuStats,
-  affiliate: runAffiliate,
-  ads: runAds,
+  // 这两个改走「规格驱动」：扩展不再写死接口，
+  // 规格见 config/api_specs.json（改取数逻辑不用刷新扩展）
+  affiliate: (range, log) => runSpecTask("affiliate", range, log),
+  ads: (range, log) => runSpecTask("ads", range, log),
 };
 const TASK_HINT = { orders: "seller", sku: "seller", affiliate: "affiliate", ads: "seller" };
 

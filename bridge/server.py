@@ -211,6 +211,10 @@ class Handler(BaseHTTPRequestHandler):
             self._post_run()
         elif self.path.startswith("/pending"):
             self._post_pending()
+        elif self.path.startswith("/spec"):
+            self._post_spec()
+        elif self.path.startswith("/fetch-result"):
+            self._post_fetch_result()
         else:
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
@@ -279,6 +283,62 @@ class Handler(BaseHTTPRequestHandler):
         path.write_bytes(data)
         _append_log(f"文件已保存：{path.name}（{len(data)/1024:.0f} KB）")
         _json(self, {"ok": True, "path": str(path), "bytes": len(data)})
+
+    def _post_spec(self):
+        """给扩展发取数规格。
+
+        扩展不再写死任何接口，它只照着这里的规格发请求。
+        规格在 config/api_specs.json 里，变量（{{startDate}} 等）在这里就填好，
+        扩展那边连替换都不用做——它只负责「把请求发出去、把响应带回来」。
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+
+        try:
+            from src import fetcher
+            task = str(payload.get("task") or "")
+            specs = fetcher.load_specs()
+            rng = payload.get("range") or {}
+            store = str(payload.get("store") or "")
+            if task:
+                spec = fetcher.get_task_spec(task, specs)
+            else:
+                spec = {"tasks": specs.get("tasks", {})}
+            vars_ = fetcher.make_vars(rng, store)
+            # 把步骤里的占位符填好再发出去
+            if task:
+                spec = dict(spec)
+                spec["steps"] = [fetcher.fill_vars(s, vars_) for s in (spec.get("steps") or [])]
+            _json(self, {"ok": True, "task": task, "spec": spec})
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": str(e)}, 400)
+
+    def _post_fetch_result(self):
+        """扩展把原始响应交回来，按规格解析成文件落进 inbox。
+
+        解析、映射、汇总、出文件全在 Python 侧（src/fetcher.py），
+        所以调这些逻辑不用刷新扩展。
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+
+        try:
+            from src import fetcher
+            task = str(payload.get("task") or "")
+            results = payload.get("results") or []
+            rng = payload.get("range") or {}
+            store = str(payload.get("store") or "")
+            r = fetcher.process_results(task, results, rng, store)
+            _json(self, {"ok": r["ok"], "files": r.get("files") or [],
+                         "issues": r.get("issues") or []})
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": str(e), "issues": [str(e)]}, 400)
 
     def _post_log(self):
         try:
