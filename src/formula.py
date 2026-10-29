@@ -396,13 +396,64 @@ def _norm(s) -> str:
     return re.sub(r"[\s_\-]+", "", t).lower()
 
 
-def compile_expr(expr: str, titles: list[str] | None = None) -> tuple[str, dict[str, list[str]]]:
+# 公式里可以直接写的中文名（记不住英文就用中文）
+BUILTIN_CN: dict[str, str] = {
+    "订单数": "orders",
+    "件数": "qty",
+    "买家实付": "paid",
+    "GMV": "gmv",
+    "本行GMV": "gmv",
+    "成本单价": "cost_cny",
+    "商品成本": "cost",
+    "平均成本单价": "cost_unit",
+    "退款金额": "refund",
+    "达人佣金": "commission",
+    "广告花费": "ads",
+}
+
+# 费率项的默认中文名。可在费率页改，改完存在 rates.json 的 labels 段。
+DEFAULT_RATE_CN: dict[str, str] = {
+    "platform_commission": "平台佣金",
+    "tx_fee": "交易手续费",
+    "cashback": "奖金返现",
+    "super_coupon": "超级优惠券",
+    "growth_fee": "商家成长费",
+    "logistics": "物流费",
+    "dispatch_fee_cny": "发单费",
+    "order_service": "订单服务费",
+    "cny_to_local": "人民币汇率",
+    "usd_to_local": "美金汇率",
+    "other_fee": "其他费用",
+}
+
+
+def rate_aliases(labels: dict | None = None) -> dict[str, str]:
+    """中文名 → 公式里能写的写法。
+
+    费率项写成 params.<字段名>，费率页给每个项起的中文名可以直接用；
+    用户没起名就用内置的默认中文名。
+    """
+    out: dict[str, str] = dict(BUILTIN_CN)
+    names: dict[str, str] = {k: v for k, v in DEFAULT_RATE_CN.items()}
+    for k, v in (labels or {}).items():
+        if isinstance(v, str) and v.strip():
+            names[str(k)] = v.strip()
+    for field, cn in names.items():
+        out[cn] = f"params.{field}"
+    return out
+
+
+def compile_expr(expr: str, titles: list[str] | None = None,
+                 aliases: dict[str, str] | None = None) -> tuple[str, dict[str, list[str]]]:
     """把公式里的标题换成安全的变量名。
 
     返回 (可求值的表达式, {变量名: [候选标题(归一化)]})。
     两种写法都认：
         [折扣前小计|SKU Subtotal]   显式，可写多个候选
         折扣前小计                   裸写，只要这个标题在订单表里存在
+
+    aliases 是「中文名 → 内部写法」的映射（见 rate_aliases）。
+    中文名先替换，免得「订单数」这种词被当成订单表的列标题。
     """
     groups: dict[str, list[str]] = {}
 
@@ -416,7 +467,20 @@ def compile_expr(expr: str, titles: list[str] | None = None) -> tuple[str, dict[
         cands = [c for c in cands if c]
         return var_for(cands) if cands else "0"
 
-    text = TITLE_RE.sub(repl, str(expr or ""))
+    text = str(expr or "")
+
+    # ① 中文别名优先：在标题替换之前做，
+    #    否则「订单数」「买家实付」这类词会被当成订单表的列标题。
+    if aliases:
+        pairs = sorted(((str(k).strip(), str(v)) for k, v in aliases.items() if str(k).strip()),
+                       key=lambda kv: -len(kv[0]))
+        if pairs:
+            alt = "|".join(re.escape(k) for k, _ in pairs)
+            pat = re.compile(r"(?<![A-Za-z0-9_])(" + alt + r")(?![A-Za-z0-9_])")
+            lookup = {k: v for k, v in pairs}
+            text = pat.sub(lambda m: lookup.get(m.group(1), m.group(0)), text)
+
+    text = TITLE_RE.sub(repl, text)
 
     # 裸写标题也认：用户直接写 `折扣前小计 - 卖家折扣` 同样能算。
     # 按标题长度倒序替换，避免「数量」先命中把「购买数量」拆坏。
@@ -608,7 +672,14 @@ def compute_params(params_cfg: list[dict], ctx: dict) -> tuple[dict[str, float],
 
             kinds = item.get("kinds")
             expr = item.get("expr")
-            py_expr, groups = compile_expr(str(expr or ""), titles)
+            # 别名 = 内置量的中文名 + 费率项的中文名 + 其它参数的中文名（用表格里的名字）
+            aliases = dict(ctx.get("rate_aliases") or {})
+            for other in pending:
+                _ofid = str(other.get("id") or "").strip()
+                _olb = str(other.get("label") or "").strip()
+                if _ofid and _olb and _ofid != fid:
+                    aliases.setdefault(_olb, f"param.{_ofid}")
+            py_expr, groups = compile_expr(str(expr or ""), titles, aliases)
             local, miss = _local_ctx(by_kind, kinds, ctx, groups)
             missing.extend(miss)
             # 其它参数算出来的值放在 param.xxx 名下，显式引用才用：

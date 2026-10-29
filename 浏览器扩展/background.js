@@ -2008,7 +2008,9 @@ async function calcNow(range, log, opts = {}) {
       body: JSON.stringify({ country, from, to, store,
         // 带上 shop_id：数据按店铺分目录存放，核算时才知道该读哪一家。
         // 只传 store（配置里的别名）有时候对不上真实目录。
-        shop_id: CURRENT_SHOP.shop_id || "" }),
+        shop_id: CURRENT_SHOP.shop_id || "",
+        // auto：自动运行触发的，桥会按「自动运行」里的设置决定下载目录
+        auto: !!opts.auto }),
     });
   } catch (e) {
     throw new Error(`连不上本地桥（${e.message}），请确认 scripts\\start_bridge.bat 在跑`);
@@ -2092,6 +2094,9 @@ async function consumePending() {
   log("从待办队列领取任务");
   return executeTask(p.task, p.range || {}, log, {
     force: !!p.force, withCalc: p.withCalc, store: p.store, country: p.country,
+    // auto：这是不是「自动运行」派下来的任务。
+    // 桥那边靠它决定报表下载到哪个目录。
+    auto: !!p.auto,
   });
 }
 

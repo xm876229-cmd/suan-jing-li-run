@@ -28,9 +28,30 @@ DEFAULTS: dict = {
         # 核算完自动复制一份到 download_dir
         "auto_copy": False,
         "download_dir": "",
+        # 导出的报表带不带 Excel 公式。
+        # 带公式：明细页有辅助列，汇总页用 SUMIFS，改「口径」页的开关就能在 Excel 里切口径
+        "with_formula": False,
     },
     "fx": {
         "mode": "auto",
+    },
+    # 自动运行：到点自动抓数据 → 核算 → 出报表
+    "auto": {
+        "enabled": False,
+        # daily 每天 / weekly 每周某天
+        "freq": "daily",
+        "time": "09:00",
+        # 星期几（0=周一 … 6=周日），freq=weekly 时用
+        "weekday": 0,
+        # 算哪个区间：last_month 上个月 / month 本月到今天 /
+        #            yesterday 昨天 / last7 近 7 天 / all 全量
+        "range": "last_month",
+        # 只对某几家店跑（空 = 全部）
+        "stores": [],
+        # 报表下载到哪儿（空 = 不额外下载，只在「报表」目录里）
+        "download_dir": "",
+        # 报表带不带公式（跟随「报表」页的同名设置）
+        "with_formula": False,
     },
 }
 

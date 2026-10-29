@@ -64,6 +64,8 @@ class Params:
     rates_verified: bool = True
     # 本次实际用的汇率来源说明（由 cli 写入，供报表口径页使用）
     fx_note: str = ""
+    # 费率项的中文名（rates.json 的 labels 段），公式里可以直接用中文引用
+    cn_labels: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -116,6 +118,7 @@ def load_rates(path: Path) -> tuple[dict[str, Params], Switches]:
             currency=str(c.get("currency") or ""),
             region=str(c.get("region") or ""),
             rates_verified=bool(c.get("rates_verified", True)),
+            cn_labels=dict(data.get("labels") or {}),
         )
     sw = data.get("switches", {})
     switches = Switches(
@@ -618,6 +621,8 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
             "aliases": order_aliases,
             # 兜底单价：某个参数 kinds 里一件都没有时，公式里的 cost_unit 不至于变 0
             "cost_unit": (m.cost_local / m.items) if m.items else ZERO,
+            # 中文别名：公式里可以直接写「平台佣金」「订单数」，不用记英文
+            "rate_aliases": formula.rate_aliases(getattr(params, "cn_labels", None)),
         }
         vals, one_issues = formula.compute_params(param_cfg, ctx)
         if one_issues:

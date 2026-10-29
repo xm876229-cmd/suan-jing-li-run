@@ -85,6 +85,9 @@ def _all_reports() -> list[dict]:
             rel = p.relative_to(paths.OUTPUT)
             out.append({
                 "name": p.name,
+                # rel：相对 output 目录的完整路径。不同店的报表可能重名，
+                # 勾选下载时靠它区分，只靠文件名会张冠李戴。
+                "rel": str(rel).replace("\\", "/"),
                 "group": str(rel.parent) if str(rel.parent) != "." else "",
                 "size": st.st_size,
                 "mtime": st.st_mtime,
@@ -121,6 +124,7 @@ def reports() -> dict:
     return {"ok": True, "items": [
         {
             "name": r["name"],
+            "rel": r.get("rel") or r["name"],
             "group": r["group"],
             "size_mb": round(r["size"] / 1048576, 2),
             "at": datetime.fromtimestamp(r["mtime"]).strftime("%Y-%m-%d %H:%M"),
@@ -503,13 +507,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <path d="M8 1.8v1.6M8 12.6v1.6M14.2 8h-1.6M3.4 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7L3.6 3.6"
                 stroke-linecap="round"/>
         </svg><span>设置</span></a>
+      <a href="#/help" data-view="help">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <circle cx="8" cy="8" r="6.2"/>
+          <path d="M6.3 6.2a1.8 1.8 0 113.1 1.3c-.6.5-1.4.9-1.4 1.9" stroke-linecap="round"/>
+          <circle cx="8" cy="11.8" r=".7" fill="currentColor" stroke="none"/>
+        </svg><span>使用帮助</span></a>
       <a href="#/debug" data-view="debug">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <rect x="2" y="2" width="12" height="12" rx="2"/><path d="M5 6h6M5 9.5h4" stroke-linecap="round"/>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.20.1</span></div>
+      <div class="row"><span>版本</span><span>0.21.0</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -590,7 +600,21 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="head"><h1>报表</h1>
         <p>点「查看」直接在界面里看汇总和费用拆解，不用打开 Excel；点「下载」存到本地。</p></div>
       <div class="card"><h2>全部报表<span class="hint" id="rep-hint"></span></h2>
-        <div class="body tight" id="rep-list"><div class="empty">加载中…</div></div></div>
+        <div class="body" style="padding-bottom:0">
+          <div class="chips" id="rep-filter"><button data-store="" class="on">所有报表</button></div>
+          <div class="tools" style="margin:10px 0 0">
+            <button class="mini" id="rep-all">全选</button>
+            <button class="mini" id="rep-none">取消全选</button>
+            <button class="primary" id="rep-dl">下载勾选的</button>
+            <button id="rep-dl-all">下载这个店铺的全部</button>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:8px 0 12px">
+            报表按店铺分目录存放（<span class="mono">output\店名\</span>）。
+            勾几份就下载几份，打成一个 zip，解压后仍按店铺分着。
+          </p>
+        </div>
+        <div class="body tight" id="rep-list"><div class="empty">加载中…</div></div>
+      </div>
     </section>
 
     <section class="page" id="view-stores" hidden>
@@ -608,8 +632,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
     <section class="page" id="view-params" hidden>
       <div class="head"><h1>计算参数</h1>
-        <p>每一项就是一条公式，公式里直接写订单表的列标题——写标题就是映射，不用另外配。
-          标题可以写多个候选，第一个找不到就试下一个。每个国家各配一套。</p></div>
+        <p>每一项就是一条公式。公式里能写的东西，点下面的方块插进去就行——<b>不用记英文</b>。</p></div>
 
       <div class="card"><h2>预设<span class="hint">一整套口径的命名快照，随时切回</span></h2>
         <div class="body">
@@ -658,7 +681,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <p class="muted" style="font-size:12.5px;margin:0">
             <b>订单数</b>、<b>件数</b> 这两行是报表上的显示列，也各自有勾选，单独控制——
             勾了「0元样品」订单数就含样品单，取消就只算正常 + 退货单。<br>
-            发单费、订单服务费公式里的 <span class="mono">orders</span> 同样按<b>各自那一行</b>的勾选算，
+            发单费、订单服务费公式里的 <span class="mono">订单数</span> 同样按<b>各自那一行</b>的勾选算，
             所以「订单数列 973 单、服务费按 927 单」这种组合是可以的，互不干扰。
           </p>
         </div>
@@ -666,6 +689,28 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
       <div class="card"><h2>公式里能写什么<span class="hint">点一下就插到刚编辑的公式里</span></h2>
         <div class="body">
+          <div class="kv" style="margin-bottom:14px;border:1px solid var(--line);border-radius:10px;overflow:hidden">
+            <div>订单表的列</div>
+            <div>写成 <span class="mono">[列标题]</span>。列名会变、换国家就变，
+              所以可以写<b>多个候选，用竖线 | 分开</b>：
+              <span class="mono">[折扣前小计|SKU Subtotal Before Discount|SKU折扣前小计]</span>。
+              程序按顺序挨个找，找到第一个就用它——所以第一个填你常用的，后面填兜底的。
+              找不到任何一个，这项按 0 计，并在报表「异常」页列出来。</div>
+            <div>内置量</div>
+            <div><span class="mono">订单数</span>（分摊到这条链接的）、
+              <span class="mono">件数</span>、<span class="mono">GMV</span>、
+              <span class="mono">买家实付</span>、<span class="mono">成本单价</span>、
+              <span class="mono">广告花费</span>、<span class="mono">达人佣金</span>。
+              括号里是英文原名，认不出来看英文就行。</div>
+            <div>费率项</div>
+            <div>直接写中文名，比如 <span class="mono">平台佣金</span>、
+              <span class="mono">交易手续费</span>、<span class="mono">发单费</span>、
+              <span class="mono">人民币汇率</span>。
+              中文名在「费率」页的「费率项的中文名」里改，改完两边都能用。</div>
+            <div>算出来的别的参数</div>
+            <div>直接写表格里那一行的名字，比如 <span class="mono">商品成本</span>、
+              <span class="mono">订单服务费</span>，就是引用它们算出来的金额。</div>
+          </div>
           <div class="vars" id="vars"></div>
         </div></div>
 
@@ -718,6 +763,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="stats-line" id="cost-stats"></div>
         <div class="tools" style="margin-top:14px">
           <button id="btn-cost-check">拿订单核一遍</button>
+          <a class="mini-btn" id="btn-cost-tpl" href="/api/costs/template"
+             download="成本表导入模板.xlsx">下载导入模板</a>
           <label class="mini-btn">导入 Excel / CSV
             <input type="file" id="cost-file" accept=".xlsx,.xls,.csv" hidden></label>
           <button class="mini" id="btn-cost-add">＋ 新增编码</button>
@@ -725,6 +772,14 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </div>
         <div class="note" id="cost-note"></div>
         <div id="cost-check"></div>
+        <p class="muted" style="font-size:12.5px;margin:14px 0 0">
+          <b>不知道表格该长什么样？点「下载导入模板」。</b><br>
+          模板里第一列是<b>商品编码</b>（要和订单里的「卖家编码」一字不差），
+          第二列是<b>单个成本</b>（人民币，买几件不用乘，程序自己乘）。<br>
+          <b>导入是增量的：</b>表里没有的旧编码保留不动；新出现的编码新增；
+          已有、这次又给了的编码，<b>以这次导入的为准</b>（覆盖旧成本）。
+          导入完会告诉你新增几条、更新几条。
+        </p>
       </div></div>
 
       <div class="card"><h2>成本表的列<span class="hint">表头叫别的名字也能对上</span></h2>
@@ -805,6 +860,23 @@ _TEMPLATE = r"""<!DOCTYPE html>
             新增的项在「计算参数」里用 <span class="mono">params.字段名</span> 引用</div>
         </div>
       </div></div>
+      <div class="card"><h2>费率项的中文名<span class="hint">起了名之后，公式里直接写中文</span></h2>
+        <div class="body tight"><div class="tbl-wrap">
+          <table class="cfg-tbl" id="cnltbl"><thead><tr>
+            <th style="width:230px">费率项</th>
+            <th style="width:260px">中文名（公式里可用）</th>
+            <th style="width:230px">公式里就这么写</th>
+          </tr></thead><tbody id="cnlbody"></tbody></table>
+        </div></div>
+        <div class="body" style="padding-top:0">
+          <p class="muted" style="font-size:12.5px;margin:0">
+            记不住英文也没关系：在这里给每个费率项起个中文名，
+            「计算参数」的公式里就能直接写 <span class="mono">平台佣金</span>、
+            <span class="mono">交易手续费</span>，不用再写 <span class="mono">params.platform_commission</span>。
+            改完点「保存费率」生效。
+          </p>
+        </div>
+      </div>
     </section>
 
     <section class="page" id="view-settings" hidden>
@@ -825,9 +897,62 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="field" style="max-width:520px">
           <label>核算完自动复制到这个文件夹（留空则只在程序目录里）</label>
           <input type="text" id="set-dir" placeholder="D:\净利报表"></div>
+        <label class="switch" style="margin-top:12px">
+          <input type="checkbox" id="set-formula">
+          <span><b>导出的报表带 Excel 公式</b>
+            <em>带公式：明细页多几列辅助数据，汇总页用 SUMIFS 引用，
+              在 Excel 里改「口径」页的开关就能自己切含/不含样品单，不用回程序重算。
+              不带：文件小、打开快，数字是最终值。</em></span>
+        </label>
         <p class="muted" style="font-size:12.5px;margin:12px 0 0">
-          每次核算完成后，报表会同时出现在程序的 <span class="mono">output\店铺名\</span> 和这里。同名不会覆盖，会自动加 (2)(3)。</p>
+          每次核算完成后，报表会同时出现在程序的 <span class="mono">报表\店铺名\</span> 和这里。同名不会覆盖，会自动加 (2)(3)。</p>
       </div></div>
+
+      <div class="card"><h2>自动运行<span class="hint" id="auto-hint">到点自动抓数 → 核算 → 出报表</span></h2>
+        <div class="body">
+          <label class="switch">
+            <input type="checkbox" id="auto-on">
+            <span><b>开启自动运行</b>
+              <em>到点后程序自动派任务给浏览器扩展：抓数据、算净利、出报表。
+                浏览器关着也能跑——任务会排队，等扩展下次打开时补上。</em></span>
+          </label>
+          <div class="row" style="gap:14px;align-items:flex-end;flex-wrap:wrap;margin-top:14px">
+            <div class="field" style="width:150px"><label>频率</label>
+              <select id="auto-freq">
+                <option value="daily">每天</option>
+                <option value="weekly">每周某天</option></select></div>
+            <div class="field" style="width:110px" id="auto-wd-field" hidden><label>星期几</label>
+              <select id="auto-weekday">
+                <option value="0">周一</option><option value="1">周二</option>
+                <option value="2">周三</option><option value="3">周四</option>
+                <option value="4">周五</option><option value="5">周六</option>
+                <option value="6">周日</option></select></div>
+            <div class="field" style="width:120px"><label>几点跑</label>
+              <input type="time" id="auto-time" value="09:00"></div>
+            <div class="field" style="width:180px"><label>算哪个区间</label>
+              <select id="auto-range">
+                <option value="last_month">上个月</option>
+                <option value="month">本月到今天</option>
+                <option value="last7">最近 7 天</option>
+                <option value="yesterday">昨天</option>
+                <option value="all">全部数据</option></select></div>
+            <div class="field" style="flex:1;min-width:240px"><label>对哪些店跑（不选=全部）</label>
+              <select id="auto-stores" multiple size="3"
+                      style="width:100%;min-height:64px"></select></div>
+          </div>
+          <div class="row" style="gap:14px;align-items:flex-end;flex-wrap:wrap;margin-top:12px">
+            <div class="field" style="flex:1;min-width:300px"><label>报表下载到哪儿（留空=只在程序目录）</label>
+              <input type="text" id="auto-dir" placeholder="D:\净利报表"></div>
+            <label class="switch" style="width:auto">
+              <input type="checkbox" id="auto-formula">
+              <span><b>报表带公式</b><em>同「报表保存位置」里的设置</em></span>
+            </label>
+            <button class="ghost" id="auto-now" style="width:auto;padding:7px 16px;margin:0">现在跑一次</button>
+          </div>
+          <div class="note" id="auto-note"></div>
+          <p class="muted" style="font-size:12.5px;margin:12px 0 0" id="auto-next"></p>
+        </div></div>
+
       <div class="card"><h2>汇率</h2><div class="body">
         <div class="field"><label>取法</label><select id="set-fx">
           <option value="auto">联网自动抓（推荐）</option>
@@ -837,6 +962,70 @@ _TEMPLATE = r"""<!DOCTYPE html>
       </div></div>
       <div class="card"><h2>保存</h2><div class="body">
         <button class="primary" id="btn-set-save">保存设置</button></div></div>
+    </section>
+
+    <section class="page" id="view-help" hidden>
+      <div class="head"><h1>使用帮助</h1>
+        <p>第一次用先看这页，三分钟能跑起来。</p></div>
+
+      <div class="card"><h2>程序在哪、怎么启动<span class="hint">最常见的问题</span></h2>
+        <div class="body tight"><div class="kv">
+          <div>装好的版本</div><div>桌面上有<b>「净利助手」快捷方式</b>，双击它即可。
+            装到别的位置的：开始菜单搜「净利助手」，或直接双击安装目录里的
+            <span class="mono">jingli.exe</span></div>
+          <div>源码版</div><div>项目根目录里双击 <b class="mono">启动净利助手.bat</b>。
+            它会自动找一个能用的 Python 并启动。</div>
+          <div>程序界面在哪</div><div>程序启动后会自动打开浏览器；
+            没打开的话手动访问 <span class="mono">http://127.0.0.1:8765</span></div>
+          <div>关掉程序</div><div>关掉那个浏览器标签页不算关程序——
+            桥还在后台跑。要彻底停：关掉「净利助手」窗口，或在任务管理器里结束它。</div>
+        </div></div></div>
+
+      <div class="card"><h2>第一次用（只做一次）</h2>
+        <div class="body tight"><div class="kv">
+          <div>第 1 步</div><div>打开<b>战斧浏览器</b></div>
+          <div>第 2 步</div><div>地址栏输入 <span class="mono">chrome://extensions</span></div>
+          <div>第 3 步</div><div>打开右上角<b>「开发者模式」</b></div>
+          <div>第 4 步</div><div>点<b>「加载已解压的扩展程序」</b></div>
+          <div>第 5 步</div><div>选程序目录里的 <b class="mono">浏览器扩展</b> 文件夹
+            （和 jingli.exe 平级的那个）。<b>选文件夹本身，不是里面的文件。</b></div>
+        </div></div></div>
+
+      <div class="card"><h2>各文件夹是干嘛的</h2>
+        <div class="body tight"><div class="kv">
+          <div>浏览器扩展/</div><div>刚才加载的那个。里面是抓数用的代码，不用改</div>
+          <div>配置/</div><div>费率、店铺清单、计算参数、预设。<b>想改口径就在这儿</b>，
+            也可以用记事本直接改里面的 json</div>
+          <div>数据/</div><div>自动抓下来的原始数据、每家店的数据、历史快照。<b>别删</b></div>
+          <div>报表/</div><div>算好的 Excel，按店铺分文件夹。也可以在「报表」页直接下载</div>
+          <div>文档/</div><div>详细说明文档</div>
+          <div>使用说明.txt</div><div>给新手的简短说明，就放在最外面</div>
+          <div>_internal/</div><div>程序运行库，不用管</div>
+        </div></div></div>
+
+      <div class="card"><h2>三步用起来</h2>
+        <div class="body tight"><div class="kv">
+          <div>① 取数</div><div>点扩展图标 → 选日期 → 「立即运行：取数 + 算净利」。
+            第一次会自动认出你的店铺</div>
+          <div>② 核对</div><div>算完在「报表」页点「查看」，不用打开 Excel 就能看汇总和费用拆解</div>
+          <div>③ 下载</div><div>「报表」页可以按店铺筛选，勾几份点「下载勾选的」，
+            会打成一个 zip；也可以在「设置」里定好目录，以后自动放过去</div>
+        </div></div></div>
+
+      <div class="card"><h2>常见问题</h2>
+        <div class="body tight"><div class="kv">
+          <div>自动抓数失败</div><div>扩展面板里有<b>「手动导数据」</b>：
+            自己去店铺后台点导出，文件一下载就自动入库；
+            或者只开页面，导出后到「开始核算」页底部手动导入（要选国家和店铺）</div>
+          <div>成本对不上</div><div>「成本表」页点<b>「拿订单核一遍」</b>，
+            会列出哪些编码还没成本、哪些是按规则推导的</div>
+          <div>净利算得不对</div><div>先看报表的<b>「口径」页</b>：每一项算了哪些订单类型、
+            用的哪个汇率、哪个数据快照，都写在那里</div>
+          <div>想对比含/不含样品单</div><div>报表里有<b>「样品对比」页</b>，
+            两套净利并排列着；也可以在「计算参数」页勾「去除 0 元样品订单」</div>
+          <div>口径调乱了</div><div>「计算参数」页有<b>预设</b>：随时切回之前那套，
+            也能把现在这套存成预设</div>
+        </div></div></div>
     </section>
 
     <section class="page" id="view-debug" hidden>
@@ -872,6 +1061,13 @@ const RATE_LABELS = {
 };
 let feeFields = [];
 let rows = [], formulas = {}, rateRows = {}, storesCache = [];
+// 费率项的中文名（费率页可改）：公式里可以直接写中文
+let rateLabels = {};
+
+/** 费率项的中文名：优先用费率页起的名，没有就用内置默认名。 */
+function rateCn(k){
+  return (rateLabels && rateLabels[k]) || RATE_LABELS[k] || k;
+}
 
 function go(view){
   document.querySelectorAll('.page').forEach(p => p.hidden = p.id !== 'view-' + view);
@@ -1203,25 +1399,70 @@ $('#btn-run').onclick = async () => {
   loadStatus(); loadTrend();
 };
 
+let repAll = [];      // 全部报表
+let repStore = '';    // 当前按哪个店铺筛选（空 = 全部）
+
 async function loadReports(){
   try{
     const j = await (await fetch('/api/reports')).json();
-    $('#rep-hint').textContent = j.items.length ? '共 ' + j.items.length + ' 份' : '';
-    if(!j.items.length){
-      $('#rep-list').innerHTML = '<div class="empty"><b>还没有报表</b>去「开始核算」跑一次</div>';
+    repAll = j.items || [];
+    $('#rep-hint').textContent = repAll.length ? '共 ' + repAll.length + ' 份' : '';
+    // 店铺筛选条：所有报表 + 每家店
+    const stores = [...new Set(repAll.map(x => x.group || ''))];
+    const fc = $('#rep-filter');
+    if(fc){
+      fc.innerHTML = '<button data-store="" class="' + (repStore ? '' : 'on') + '">所有报表</button>'
+        + stores.map(s => `<button data-store="${esc(s)}" class="${repStore === s ? 'on' : ''}">`
+          + esc(s || '未分店') + '（' + repAll.filter(x => (x.group||'') === s).length + '）</button>').join('');
+      fc.querySelectorAll('[data-store]').forEach(b => b.onclick = () => {
+        repStore = b.dataset.store || '';
+        loadReports();
+      });
+    }
+    const items = repStore ? repAll.filter(x => (x.group||'') === repStore) : repAll;
+    if(!items.length){
+      $('#rep-list').innerHTML = '<div class="empty"><b>这里还没有报表</b>去「开始核算」跑一次</div>';
       return;
     }
-    $('#rep-list').innerHTML = '<table><thead><tr><th>文件名</th><th style="width:120px">店铺</th>'
+    $('#rep-list').innerHTML = '<table><thead><tr><th style="width:34px"></th><th>文件名</th>'
+      + '<th style="width:120px">店铺</th>'
       + '<th style="width:80px">大小</th><th style="width:130px">生成时间</th><th style="width:130px"></th>'
-      + '</tr></thead><tbody>' + j.items.map(it => `<tr>
+      + '</tr></thead><tbody>' + items.map(it => `<tr>
+          <td><input type="checkbox" data-rep="${esc(it.rel || it.name)}"></td>
           <td>${esc(it.name)}</td><td class="muted">${esc(it.group || '—')}</td>
           <td class="muted">${it.size_mb} MB</td><td class="muted">${it.at}</td>
-          <td><button class="mini" data-view-report="${esc(it.name)}">查看</button>
+          <td><button class="mini" data-view-report="${esc(it.rel || it.name)}">查看</button>
             <a href="/report?name=${encodeURIComponent(it.name)}" style="text-decoration:none">
             <button class="mini">下载</button></a></td></tr>`).join('') + '</tbody></table>';
     document.querySelectorAll('[data-view-report]').forEach(b =>
       b.onclick = () => viewReport(b.dataset.viewReport));
   }catch(e){ $('#rep-list').innerHTML = '<div class="empty">读取失败</div>'; }
+}
+
+/** 勾选中的报表（相对路径） */
+function repChecked(){
+  return Array.from(document.querySelectorAll('#rep-list [data-rep]:checked')).map(x => x.dataset.rep);
+}
+
+$('#rep-all').onclick = () => {
+  document.querySelectorAll('#rep-list [data-rep]').forEach(x => x.checked = true);
+};
+$('#rep-none').onclick = () => {
+  document.querySelectorAll('#rep-list [data-rep]').forEach(x => x.checked = false);
+};
+$('#rep-dl').onclick = () => {
+  const names = repChecked();
+  if(!names.length){ toast('先勾几份报表'); return; }
+  downloadReports(names);
+};
+$('#rep-dl-all').onclick = () => {
+  const items = repStore ? repAll.filter(x => (x.group||'') === repStore) : repAll;
+  if(!items.length){ toast('这里没有报表'); return; }
+  downloadReports(items.map(x => x.rel || x.name));
+};
+
+function downloadReports(names){
+  location.href = '/api/reports/zip?names=' + encodeURIComponent(names.join('||'));
 }
 
 async function viewReport(name){
@@ -1313,16 +1554,16 @@ const COURSE_LABELS = {
 
 // 除了 [标题] 之外，还能写在公式里的「算好的量」
 const FIELD_VARS = [
-  {k: 'gmv', t: 'GMV = Σ折扣前小计 − Σ卖家折扣'},
-  {k: 'paid', t: '买家实付合计'},
-  {k: 'qty', t: '件数'},
-  {k: 'orders', t: '订单数（按 SKU 行数分摊）'},
-  {k: 'cost_cny', t: '商品成本（人民币）'},
-  {k: 'cost', t: '商品成本（当地货币）'},
-  {k: 'cost_unit', t: '平均成本单价（人民币）'},
-  {k: 'refund', t: '退款金额'},
-  {k: 'commission', t: '达人佣金（整期）'},
-  {k: 'ads', t: '广告花费（整期）'},
+  {k: 'gmv', t: 'GMV = Σ折扣前小计 − Σ卖家折扣', cn: 'GMV'},
+  {k: 'paid', t: '买家实付合计', cn: '买家实付'},
+  {k: 'qty', t: '件数', cn: '件数'},
+  {k: 'orders', t: '订单数（按 SKU 行数分摊）', cn: '订单数'},
+  {k: 'cost_cny', t: '商品成本（人民币）', cn: '成本单价'},
+  {k: 'cost', t: '商品成本（当地货币）', cn: '商品成本'},
+  {k: 'cost_unit', t: '平均成本单价（人民币）', cn: '平均成本单价'},
+  {k: 'refund', t: '退款金额', cn: '退款金额'},
+  {k: 'commission', t: '达人佣金（整期）', cn: '达人佣金'},
+  {k: 'ads', t: '广告花费（整期）', cn: '广告花费'},
 ];
 
 const normParams = list => (list || []).map(p => ({
@@ -1621,6 +1862,7 @@ let varRates = [];
 async function loadFormulaVars(){
   try{
     const j = await (await fetch('/api/rates')).json();
+    rateLabels = j.labels || {};
     const set = new Set();
     Object.values(j.countries || {}).forEach(c => {
       Object.keys(c).forEach(k => {
@@ -1647,14 +1889,23 @@ function insertVar(txt){
 function renderVars(){
   const box = $('#vars');
   if(!box) return;
+  // 点一下插进公式：插中文名，不用记英文。
+  // 括号里的英文是「这玩意儿的原名」，看不懂英文也能靠中文点。
   const colChips = headers.map(h =>
     `<div class="v" data-ins="[${esc(h)}]"><code>[${esc(h)}]</code><span>订单表列</span></div>`);
   const baseChips = FIELD_VARS.map(v =>
-    `<div class="v" data-ins="${esc(v.k)}"><code>${esc(v.k)}</code><span>${esc(v.t)}</span></div>`);
-  const rateChips = varRates.map(k =>
-    `<div class="v" data-ins="params.${esc(k)}"><code>params.${esc(k)}</code><span>${esc(RATE_LABELS[k] || k)}</span></div>`);
-  const paramChips = rowsOf().filter(r => r.id).map(r =>
-    `<div class="v" data-ins="param.${esc(r.id)}"><code>param.${esc(r.id)}</code><span>${esc(r.label || r.id)} 的结果</span></div>`);
+    `<div class="v" data-ins="${esc(v.cn || v.k)}"><code>${esc(v.cn || v.k)}</code>
+      <span>${esc(v.t)}<i class="en">${esc(v.cn ? v.k : '')}</i></span></div>`);
+  const rateChips = varRates.map(k => {
+    const cn = rateCn(k);
+    return `<div class="v" data-ins="${esc(cn)}"><code>${esc(cn)}</code>
+      <span>${esc(cn)}${cn === k ? '' : ''}<i class="en">params.${esc(k)}</i></span></div>`;
+  });
+  const paramChips = rowsOf().filter(r => r.id).map(r => {
+    const lb = (r.label || r.id).trim();
+    return `<div class="v" data-ins="${esc(lb)}"><code>${esc(lb)}</code>
+      <span>这一项算出来的结果<i class="en">param.${esc(r.id)}</i></span></div>`;
+  });
   box.innerHTML = colChips.join('') + baseChips.join('') + rateChips.join('') + paramChips.join('');
   box.querySelectorAll('[data-ins]').forEach(el => el.onclick = () => insertVar(el.dataset.ins));
 }
@@ -2025,12 +2276,40 @@ function renderRates(){
     renderRates();
   });
 
+  renderCnLabels();
+
   $('#rhead').querySelectorAll('[data-delfee]').forEach(b => b.onclick = () => {
     const f = b.dataset.delfee;
     if(!confirm('从所有国家删掉「' + (RATE_LABELS[f] || f) + '」这一项？')) return;
     Object.values(rateRows).forEach(c => { delete c[f]; });
     feeFields = feeFields.filter(x => x !== f);
     renderRates();
+  });
+}
+
+/** 费率项的中文名：起了名，公式里就能直接写中文。 */
+function renderCnLabels(){
+  const body = $('#cnlbody');
+  if(!body) return;
+  const fields = [...new Set([...feeFields, ...Object.keys(rateLabels || {}),
+                              'cny_to_local', 'usd_to_local',
+                              'dispatch_fee_cny', 'order_service'])];
+  body.innerHTML = fields.map(f => `<tr>
+    <td><span class="mono" style="font-size:12px">${esc(f)}</span>
+      ${RATE_LABELS[f] && RATE_LABELS[f] !== f ? `<div class="muted" style="font-size:11px">${esc(RATE_LABELS[f])}</div>` : ''}</td>
+    <td><input type="text" data-cn="${esc(f)}" value="${esc((rateLabels && rateLabels[f]) || '')}"
+      placeholder="${esc(RATE_LABELS[f] || '起个中文名')}"></td>
+    <td class="mono" style="font-size:12px;color:var(--accent)">${esc((rateLabels && rateLabels[f]) || RATE_LABELS[f] || f)}</td>
+  </tr>`).join('');
+  body.querySelectorAll('[data-cn]').forEach(inp => {
+    inp.oninput = () => {
+      const f = inp.dataset.cn;
+      const v = inp.value.trim();
+      if(v) rateLabels[f] = v; else delete rateLabels[f];
+      const row = inp.closest('tr');
+      if(row) row.querySelector('td.mono:last-child').textContent = v || RATE_LABELS[f] || f;
+      renderVars();
+    };
   });
 }
 
@@ -2070,9 +2349,16 @@ $('#btn-rate-save').onclick = async () => {
     if(cny && dcny) copy.dispatch_fee_local = Math.round(dcny * cny * 10000) / 10000;
     out[nk] = copy;
   });
+  // 费率项的中文名：公式里直接写中文，不用记英文
+  const labels = {};
+  document.querySelectorAll('#cnlbody [data-cn]').forEach(inp => {
+    const v = (inp.value || '').trim();
+    if(v) labels[inp.dataset.cn] = v;
+  });
   try{
     const r = await fetch('/api/rates', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({countries: out})});
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({countries: out, labels})});
     const j = await r.json();
     toast(j.ok ? '费率已保存（' + j.countries + ' 个国家）' : ('保存失败：' + j.error));
     if(j.ok) loadRates();
@@ -2082,12 +2368,71 @@ $('#btn-rate-save').onclick = async () => {
 async function loadSettings(){
   try{
     const j = await (await fetch('/api/settings')).json();
-    const s = (j.settings || {}).report || {};
+    const all = j.settings || {};
+    const s = all.report || {};
     $('#set-template').value = s.name_template || '{店铺}_{区间}';
     $('#set-dir').value = s.download_dir || '';
-    $('#set-fx').value = ((j.settings || {}).fx || {}).mode || 'auto';
+    $('#set-fx').value = (all.fx || {}).mode || 'auto';
+    if($('#set-formula')) $('#set-formula').checked = !!s.with_formula;
+
+    // 自动运行
+    const a = all.auto || {};
+    $('#auto-on').checked = !!a.enabled;
+    $('#auto-freq').value = a.freq || 'daily';
+    $('#auto-time').value = a.time || '09:00';
+    $('#auto-range').value = a.range || 'last_month';
+    $('#auto-weekday').value = String(a.weekday ?? 0);
+    $('#auto-dir').value = a.download_dir || '';
+    if($('#auto-formula')) $('#auto-formula').checked = !!a.with_formula;
+    // 店铺多选
+    const sel = $('#auto-stores');
+    if(sel){
+      const want = (a.stores || []).map(String);
+      sel.innerHTML = storesCache.map(x =>
+        `<option value="${esc(x.id)}" ${want.includes(String(x.id)) ? 'selected' : ''}>${esc(x.name || x.id)}</option>`).join('');
+    }
+    syncAutoUi();
   }catch(e){}
 }
+
+/** 自动运行：频率是「每周」时才显示星期几 */
+function syncAutoUi(){
+  const f = $('#auto-freq');
+  if(f && $('#auto-wd-field')) $('#auto-wd-field').hidden = (f.value !== 'weekly');
+}
+
+/** 下次自动运行的时间 */
+function autoNextText(){
+  const on = $('#auto-on') && $('#auto-on').checked;
+  const el = $('#auto-next');
+  if(!el) return;
+  if(!on){ el.textContent = '自动运行没开。'; return; }
+  const freq = $('#auto-freq').value, t = $('#auto-time').value || '09:00';
+  const wd = ['周一','周二','周三','周四','周五','周六','周日'][Number($('#auto-weekday').value) || 0];
+  el.textContent = freq === 'weekly'
+    ? `已开启：每${wd} ${t} 自动跑一次（区间：${$('#auto-range').selectedOptions[0].text}）。`
+    : `已开启：每天 ${t} 自动跑一次（区间：${$('#auto-range').selectedOptions[0].text}）。`;
+}
+
+if($('#auto-freq')) $('#auto-freq').onchange = () => { syncAutoUi(); autoNextText(); };
+if($('#auto-on')) $('#auto-on').onchange = () => autoNextText();
+if($('#auto-range')) $('#auto-range').onchange = () => autoNextText();
+
+$('#auto-now').onclick = async () => {
+  const btn = $('#auto-now'), n = $('#auto-note');
+  btn.disabled = true;
+  try{
+    const r = await fetch('/api/auto-run-now', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({})});
+    const j = await r.json();
+    n.className = 'note show ' + (j.ok ? 'ok' : 'err');
+    n.textContent = j.ok ? (j.note || '已派发') : ('失败：' + (j.error || ''));
+  }catch(e){
+    n.className = 'note show err';
+    n.textContent = '出错：' + e.message;
+  }
+  btn.disabled = false;
+};
 
 $('#btn-set-save').onclick = async () => {
   try{
@@ -2096,10 +2441,22 @@ $('#btn-set-save').onclick = async () => {
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
         report: {name_template: $('#set-template').value.trim() || '{店铺}_{区间}',
-                 download_dir: dir, auto_copy: !!dir},
-        fx: {mode: $('#set-fx').value}})});
+                 download_dir: dir, auto_copy: !!dir,
+                 with_formula: !!($('#set-formula') && $('#set-formula').checked)},
+        fx: {mode: $('#set-fx').value},
+        auto: {
+          enabled: !!($('#auto-on') && $('#auto-on').checked),
+          freq: $('#auto-freq').value, time: $('#auto-time').value || '09:00',
+          weekday: Number($('#auto-weekday').value || 0),
+          range: $('#auto-range').value,
+          stores: Array.from(($('#auto-stores') ? $('#auto-stores').selectedOptions : []))
+                    .map(o => o.value),
+          download_dir: ($('#auto-dir') ? $('#auto-dir').value : '').trim(),
+          with_formula: !!($('#auto-formula') && $('#auto-formula').checked),
+        }})});
     const j = await r.json();
     toast(j.ok ? '设置已保存' : ('保存失败：' + j.error));
+    if(j.ok) autoNextText();
   }catch(e){ toast('出错：' + e.message); }
 };
 

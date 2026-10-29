@@ -29,12 +29,13 @@ UNINSTALL_KEY = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP_ID}"
 EXE_NAME = "jingli.exe"
 VBS_NAME = "start-bridge.vbs"
 
-# 安装时从发布目录拷贝的内容（data / output 不在其中，避免升级时覆盖用户数据）
-# 源码与文档也带上：装到别的电脑后，那份目录本身就是完整的，能独立维护
-COPY_ITEMS = ["jingli.exe", "_internal", "config", "extension", "docs",
-              "src", "scripts", "bridge", "README.md", "CHANGELOG.md", "jingli.py"]
-# 升级时需要保留的目录
-KEEP_DIRS = ["data", "output"]
+# 安装时从发布目录拷贝的内容（数据 / 报表 不在其中，避免升级时覆盖用户数据）
+# 目录一律中文名：用户打开安装目录，一眼就知道哪个是数据、哪个是报表、
+# 哪个是要在浏览器里加载的扩展。代码副本收进 _internal/源码/，不占顶层。
+COPY_ITEMS = ["jingli.exe", "_internal", "配置", "浏览器扩展", "文档",
+              "使用说明.txt", "README.md", "CHANGELOG.md"]
+# 升级时需要保留的目录（用户的实际数据，不能被覆盖）
+KEEP_DIRS = ["数据", "报表", "config", "output", "data"]
 
 
 def default_install_dir() -> Path:
@@ -111,7 +112,7 @@ def ensure_layout(dest: Path) -> None:
     """建好所有数据目录，并放一份说明文件。"""
     for rel in ("data/costs", "data/mapping", "data/exports/_inbox", "data/capture"):
         (dest / rel).mkdir(parents=True, exist_ok=True)
-    (dest / "output").mkdir(parents=True, exist_ok=True)
+    (dest / "报表").mkdir(parents=True, exist_ok=True)
 
     notes = {
         "data/costs/放成本表.txt":
@@ -233,7 +234,7 @@ def write_uninstall_entry(dest: Path) -> None:
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
             winreg.SetValueEx(k, "DisplayName", 0, winreg.REG_SZ, APP_NAME)
-            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.20.1")
+            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.21.0")
             winreg.SetValueEx(k, "Publisher", 0, winreg.REG_SZ, "净利助手")
             winreg.SetValueEx(k, "InstallLocation", 0, winreg.REG_SZ, str(dest))
             winreg.SetValueEx(k, "DisplayIcon", 0, winreg.REG_SZ, str(exe))

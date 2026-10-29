@@ -21,7 +21,7 @@ if not getattr(sys, "frozen", False):
 from src import paths  # noqa: E402
 
 ROOT = paths.ROOT
-FILES = ["extension/background.js", "extension/popup.js", "extension/inject.js", "extension/relay.js"]
+FILES = ["浏览器扩展/background.js", "浏览器扩展/popup.js", "浏览器扩展/inject.js", "浏览器扩展/relay.js"]
 
 # 语言内置与浏览器 API，不算缺失
 BUILTIN = set("""

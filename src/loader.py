@@ -24,6 +24,8 @@ from typing import Iterable, Optional
 
 import openpyxl
 
+from . import paths
+
 
 # ---------------- 基础转换 ----------------
 
@@ -104,7 +106,8 @@ ALIASES: dict[str, list[str]] = {
 }
 
 
-MAPPING_FILE = Path(__file__).resolve().parents[1] / "config" / "mapping.json"
+# 配置文件目录（打包后叫「配置」）
+MAPPING_FILE = paths.CONFIG / "mapping.json"
 _ALIASES_CACHE: dict = {"stamp": None, "data": None}
 
 

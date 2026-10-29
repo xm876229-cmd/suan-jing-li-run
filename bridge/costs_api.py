@@ -168,6 +168,64 @@ def import_costs(name: str, b64: str, mode: str = "merge") -> dict:
             "unchanged": same, "total": len(out), "file": name}
 
 
+def make_template() -> bytes:
+    """生成一份成本表导入模板（xlsx 字节）。
+
+    为什么要有模板：以前只说「导入 Excel / CSV」，没告诉人表格该长什么样，
+    于是每个人导出来的表都不一样，认列全靠猜。
+    模板把两列定死：第一列商品编码、第二列成本（人民币），照着填就行。
+    """
+    import io
+
+    import openpyxl
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "成本"
+    head = ["商品编码", "成本（人民币）"]
+    ws.append(head)
+    for c in ws[1]:
+        c.font = Font(bold=True)
+        c.fill = PatternFill("solid", fgColor="E8F3EE")
+        c.alignment = Alignment(horizontal="center")
+    # 两行示例，够看懂格式就行
+    ws.append(["MY-J68-22cmOilspillnet", 3.63])
+    ws.append(["V1-100*120", 2.5])
+    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["B"].width = 18
+    ws["B2"].number_format = "0.00"
+    ws["B3"].number_format = "0.00"
+
+    doc = wb.create_sheet("说明")
+    doc.column_dimensions["A"].width = 110
+    lines = [
+        ("成本表怎么填", True),
+        ("", False),
+        ("1. 第一列写「商品编码」，要和订单表里的「卖家编码 / Seller SKU」一模一样，一个字都不能差。", False),
+        ("   编码对不上，这行就认不出来，成本会按 0 计，报表「异常」页会列出来。", False),
+        ("2. 第二列写「单个成本」，单位是人民币。", False),
+        ("   买 3 件不是写总价 —— 数量在订单表里，程序自己乘。", False),
+        ("3. 表里不要有合并单元格、空行、合计行；多余的行会被忽略。", False),
+        ("4. 同一个编码出现多次，以最后一行为准。", False),
+        ("5. 导入是增量的：", True),
+        ("   · 表里没有的旧编码 → 保留不动", False),
+        ("   · 表里新出现的编码 → 新增", False),
+        ("   · 表里已有、这次又给了的编码 → 以这次导入的为准（覆盖旧成本）", False),
+        ("", False),
+        ("导入完，报表「异常」页会列出还没成本的编码，可以照着补。", False),
+    ]
+    for i, (text, bold) in enumerate(lines, 1):
+        c = doc.cell(row=i, column=1, value=text)
+        if bold:
+            c.font = Font(bold=True)
+    doc.row_dimensions[1].height = 22
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def check_costs(sample: int = 20) -> dict:
     """拿当前订单里的编码去对一遍成本表：哪些没成本、哪些是推导出来的。
 

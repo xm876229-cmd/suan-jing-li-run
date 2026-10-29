@@ -4,11 +4,13 @@
 
     release/
     ├── 净利助手/                 ← 免安装版（拷走就能用）
-    │   ├── jingli.exe
-    │   ├── _internal/            运行库
-    │   ├── config/               费率与店铺配置（可直接改）
-    │   ├── extension/            浏览器扩展（战斧里加载）
-    │   └── docs/ README.md
+    │   ├── jingli.exe            ← 程序本体，双击这个
+    │   ├── _internal/            运行库（不用管）
+    │   ├── 配置/                 费率与店铺配置（可直接改）
+    │   ├── 浏览器扩展/            在浏览器里加载的就是这个目录
+    │   ├── 数据/  报表/           运行时自动创建
+    │   ├── 文档/                 说明文档
+    │   └── 使用说明.txt
     ├── 净利助手-安装包.exe        ← 双击安装到本机
     └── 净利助手-免安装.zip        ← 整个目录打包
 
@@ -37,9 +39,14 @@ INSTALLER_NAME = "净利助手-安装包.exe"
 PORTABLE_ZIP = "净利助手-免安装.zip"
 
 # 拷到发布目录里的资源（运行时要按 exe 同目录读取）
-# 源码与文档一并带上：整个 release/净利助手 拷到别的电脑即可完全接管维护，
-# 不依赖本机这份项目目录。
+# 顶层一律中文名，用户打开就懂；代码副本收进 _internal/源码/，
+# 顶层只留用户真正要碰的东西。
+# 目录名从 paths 取：源码模式下这些目录已经被改成中文名了
 RESOURCES = ["config", "extension", "docs", "src", "scripts", "bridge"]
+# 顶层用中文名的目录（发布目录里的名字）
+CN_DIRS = {"config": "配置", "extension": "浏览器扩展", "docs": "文档"}
+# 收进 _internal/源码/ 的目录（用户基本不用碰）
+INNER_DIRS = {"src", "scripts", "bridge"}
 RESOURCE_FILES = ["README.md", "CHANGELOG.md", "jingli.py"]
 
 APP_ENTRY = "jingli.py"
@@ -146,19 +153,77 @@ def build_app() -> Path:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dst)
 
+    from src import paths as _paths
+    _real = {"config": _paths.CONFIG, "extension": _paths.EXTENSION,
+             "docs": ROOT / "docs"}
     for name in RESOURCES:
-        src = ROOT / name
-        if src.exists():
+        src = _real.get(name) or (ROOT / name)
+        if not src.exists():
+            continue
+        if name in CN_DIRS:
+            # 顶层用中文名：配置 / 浏览器扩展 / 文档
+            shutil.copytree(src, out / CN_DIRS[name], dirs_exist_ok=True)
+        elif name in INNER_DIRS:
+            # 代码副本收进 _internal/源码/，顶层清爽点
+            shutil.copytree(src, out / "_internal" / "源码" / name, dirs_exist_ok=True)
+        else:
             shutil.copytree(src, out / name, dirs_exist_ok=True)
     for name in RESOURCE_FILES:
         src = ROOT / name
         if src.exists():
             shutil.copy2(src, out / name)
 
+    # 使用说明：放在最显眼的位置，新手不用翻目录就知道从哪开始
+    _write_readme(out)
+
     if not (out / EXE_NAME).exists():
         raise SystemExit(f"构建失败：缺少 {EXE_NAME}")
     print(f"\n[OK] 免安装版：{out}")
     return out
+
+
+def _write_readme(out: Path) -> None:
+    """在发布目录写一份《使用说明.txt》。
+
+    新手最大的困惑是「一堆文件夹里哪个是程序本体、哪个是要加载的扩展」。
+    这份说明就摆在最外面，一眼看完。
+    """
+    text = """净利助手 · 使用说明
+================================================
+
+【程序在哪？】
+  jingli.exe  —— 双击这个启动程序。
+  装好后桌面会有「净利助手」快捷方式，双击它也一样。
+
+【第一次用（只需做一次）】
+  1. 打开战斧浏览器
+  2. 地址栏输入 chrome://extensions
+  3. 打开右上角「开发者模式」
+  4. 点「加载已解压的扩展程序」
+  5. 选这个目录里的「浏览器扩展」文件夹
+     （就是和 jingli.exe 平级的那个「浏览器扩展」）
+
+【各文件夹是干嘛的】
+  jingli.exe      程序本体，双击启动
+  浏览器扩展\\      在浏览器里加载的就是这个文件夹（只做一次）
+  配置\\           费率、店铺清单、计算参数、预设（可以直接用记事本改）
+  数据\\           自动抓下来的原始数据、店铺数据、快照（别删）
+  报表\\           算好的 Excel 报表（按店铺分文件夹）
+  文档\\           详细说明文档
+  使用说明.txt     这份文件
+  _internal\\       程序运行库和源码副本，不用管
+
+【常见问题】
+  · 扩展加载不了？确认第 5 步选的是「浏览器扩展」这个文件夹本身
+  · 报表去哪了？在程序界面的「报表」页点「下载」，
+    或直接看 报表\\ 目录（报表按店铺名分文件夹存放）
+  · 成本怎么导入？程序里「成本表」页点「下载导入模板」，
+    照着模板填好再导进去
+"""
+    try:
+        (out / "使用说明.txt").write_text(text, encoding="utf-8-sig")
+    except OSError:
+        pass
 
 
 def make_app_zip(app_dir: Path) -> Path:

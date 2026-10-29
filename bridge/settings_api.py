@@ -26,6 +26,8 @@ def read_rates() -> dict:
     return {
         "ok": True,
         "countries": doc.get("countries") or {},
+        # 费率项的中文名：公式里可以直接写中文，不用记英文
+        "labels": doc.get("labels") or {},
         "fx": {"mode": fx.get("mode", "auto"), "manual": fx.get("manual") or {},
                "ttl_hours": fx.get("ttl_hours", 12)},
     }
@@ -46,6 +48,12 @@ def save_rates(payload: dict) -> dict:
         doc["countries"] = payload["countries"]
     if isinstance(payload.get("fx"), dict):
         doc.setdefault("fx", {}).update(payload["fx"])
+    if isinstance(payload.get("labels"), dict):
+        # 费率项的中文名。空的名字不写，免得占位。
+        labels = {str(k): str(v).strip() for k, v in payload["labels"].items()
+                  if str(k).strip() and str(v).strip()}
+        if labels:
+            doc["labels"] = labels
 
     paths.RATES_FILE.write_text(
         json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -55,7 +63,18 @@ def save_rates(payload: dict) -> dict:
 
 # ---------------- 报表预览 ----------------
 
-def _find_report(name: str) -> Path | None:
+def _find_report(name: str, rel: str = "") -> Path | None:
+    """找一份报表。
+
+    rel 是相对 output 目录的路径（如「马来一号店/报表.xlsx」）。
+    传了 rel 就按它找——不同店铺的报表可能重名，只按文件名找会张冠李戴。
+    """
+    if rel:
+        rel = str(rel).replace("\\", "/")
+        if ".." in rel.split("/"):
+            return None
+        p = paths.OUTPUT / rel
+        return p if p.is_file() else None
     if not name or "/" in name or "\\" in name or ".." in name:
         return None
     if not name.lower().endswith(".xlsx"):
@@ -67,12 +86,40 @@ def _find_report(name: str) -> Path | None:
     return None
 
 
-def report_view(name: str) -> dict:
+def reports_zip(names: list[str]) -> tuple[bytes, str]:
+    """把选中的报表打成一个 zip。
+
+    names 里是相对 output 目录的路径。zip 内保留店铺子目录，
+    这样解压后还是分店放着的，不会一堆同名文件糊在一起。
+    """
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    picked: list[tuple[str, Path]] = []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for rel in names:
+            f = _find_report("", rel)
+            if not f:
+                continue
+            try:
+                arc = str(f.relative_to(paths.OUTPUT)).replace("\\", "/")
+            except ValueError:
+                arc = f.name
+            z.write(f, arc)
+            picked.append((arc, f))
+    if not picked:
+        return b"", ""
+    label = picked[0][0].split("/")[0] if len(picked) == 1 else "净利报表"
+    return buf.getvalue(), f"{label}.zip"
+
+
+def report_view(name: str, rel: str = "") -> dict:
     """把 xlsx 的汇总页与费用页读出来给界面显示。
 
     目的：想知道「这个月净利多少、钱花在哪」，不该逼用户打开 Excel。
     """
-    f = _find_report(name)
+    f = _find_report(name, rel)
     if not f:
         return {"ok": False, "error": "找不到这个报表"}
 

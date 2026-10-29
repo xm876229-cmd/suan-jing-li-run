@@ -409,6 +409,27 @@ class Handler(BaseHTTPRequestHandler):
                 _json(self, presets_api.list_backups())
             else:
                 _json(self, presets_api.list_presets((q.get("scope") or [""])[0]))
+        elif self.path.startswith("/api/reports/zip"):
+            # 勾选批量下载：打成一个 zip，zip 内保留店铺子目录
+            from urllib.parse import parse_qs, urlparse
+            from bridge import settings_api
+            q = parse_qs(urlparse(self.path).query)
+            names = [n for n in (q.get("names") or [""])[0].split("||") if n.strip()]
+            try:
+                data, fname = settings_api.reports_zip(names)
+            except Exception as e:  # noqa: BLE001
+                _json(self, {"ok": False, "error": f"打包失败：{e}"}, 500)
+                return
+            if not data:
+                _json(self, {"ok": False, "error": "没选中任何报表"}, 400)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition",
+                             "attachment; filename*=UTF-8''" + quote(fname))
+            self.end_headers()
+            self.wfile.write(data)
         elif self.path.startswith("/api/reports"):
             from bridge import ui
             _json(self, ui.reports())
@@ -442,6 +463,23 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/mapping"):
             from bridge import settings_api
             _json(self, settings_api.read_mapping())
+        elif self.path.startswith("/api/costs/template"):
+            from bridge import costs_api
+            try:
+                data = costs_api.make_template()
+            except Exception as e:  # noqa: BLE001
+                _json(self, {"ok": False, "error": f"生成模板失败：{e}"}, 500)
+                return
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header(
+                "Content-Disposition",
+                "attachment; filename*=UTF-8''" + quote("成本表导入模板.xlsx"))
+            self.end_headers()
+            self.wfile.write(data)
         elif self.path.startswith("/api/settings"):
             from src import settings as cfg_settings
             _json(self, {"ok": True, "settings": cfg_settings.load()})
@@ -492,6 +530,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_identify()
         elif self.path.startswith("/api/settings"):
             self._post_settings()
+        elif self.path.startswith("/api/auto-run-now"):
+            self._post_auto_now()
         elif self.path.startswith("/api/rates"):
             self._post_rates()
         elif self.path.startswith("/api/config/preview"):
@@ -903,6 +943,35 @@ class Handler(BaseHTTPRequestHandler):
             "store_dir": str(paths.store_dir(shop_id)),
         })
 
+    def _post_auto_now(self):
+        """「现在跑一次」：立刻派一个取数+核算的任务。
+
+        走的是同一条队列，所以扩展在线就马上开始，不在线就排队等着。
+        """
+        import time as _time
+        from datetime import datetime
+
+        from src import auto_run, settings as cfg_settings
+
+        cfg = (cfg_settings.load().get("auto") or {})
+        now = datetime.now()
+        rng = auto_run.build_range(str(cfg.get("range") or "last_month"), now)
+        stores = [str(s) for s in (cfg.get("stores") or []) if str(s).strip()]
+        job = {
+            "task": "all",
+            "range": rng,
+            "store": stores[0] if len(stores) == 1 else "",
+            "auto": True,
+            "manual": True,      # 手动点的：即使自动运行关着也照跑
+            "at": int(_time.time() * 1000),
+        }
+        with _PENDING_LOCK:
+            _PENDING.append(job)
+        _append_log(f"[自动] 手动触发一次：{auto_run.describe_range(str(cfg.get('range') or 'last_month'), now)}")
+        _json(self, {"ok": True, "range": rng,
+                     "note": "任务已派发。浏览器里的扩展会在下一次轮询时领走"
+                             "（一般几秒内），浏览器关着的话下次打开才会跑。"})
+
     def _post_settings(self):
         from src import settings as cfg_settings
         try:
@@ -1184,7 +1253,12 @@ class Handler(BaseHTTPRequestHandler):
                 cmd += ["--snapshots", ",".join(d.name for d in data_dirs)]
             elif snap_id:
                 cmd += ["--snapshot", snap_id]
-            if payload.get("with_formula"):
+            # 带不带公式：手动跑用界面上的勾选；自动跑用设置里的开关
+            _wf = payload.get("with_formula")
+            if _wf is None:
+                _auto_cfg = cfg_settings.load().get("auto") or {}
+                _wf = _auto_cfg.get("with_formula")
+            if _wf:
                 cmd += ["--with-formula"]
             if dfrom:
                 cmd += ["--from", str(dfrom)]
@@ -1255,11 +1329,15 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:  # noqa: BLE001
                     pass
 
-                # 自动复制到用户指定的位置（比如 D://净利报表）
+                # 自动复制到用户指定的位置（比如 D:////净利报表）
+                # 自动运行时用「自动运行」里的目录，手动跑用「报表」页里的目录
                 copied = None
                 try:
-                    copied = cfg_settings.copy_to_download_dir(
-                        out, stg.get("download_dir") or "")
+                    _dl = stg.get("download_dir") or ""
+                    if payload.get("auto"):
+                        _auto_cfg = cfg_settings.load().get("auto") or {}
+                        _dl = _auto_cfg.get("download_dir") or _dl
+                    copied = cfg_settings.copy_to_download_dir(out, _dl)
                 except Exception:  # noqa: BLE001
                     copied = None
                 if copied:
@@ -1425,6 +1503,51 @@ def _setup_log_file():
         print(f"日志文件不可用（忽略）：{e}")
 
 
+def _auto_runner() -> None:
+    """自动运行：到点往待办队列里塞一个「取数 + 核算」任务。
+
+    扩展会来领这个任务（GET /pending），所以浏览器关着也不影响桥本身。
+    跑完的报表照常出在「报表」目录，设定下载目录的话再复制一份过去。
+    """
+    import time
+    from datetime import datetime
+
+    from src import auto_run, settings as cfg_settings
+
+    last_key = ""     # 上次触发用的键（频率+时间+区间），防止同一分钟重复触发
+
+    while True:
+        time.sleep(20.0)
+        try:
+            cfg = (cfg_settings.load().get("auto") or {})
+            if not cfg.get("enabled"):
+                continue
+            now = datetime.now()
+            if not auto_run.should_run(cfg, now):
+                continue
+            key = f"{now:%Y-%m-%d %H:%M}|{cfg.get('freq')}|{cfg.get('time')}|{cfg.get('range')}"
+            if key == last_key:
+                continue
+            last_key = key
+            rng = auto_run.build_range(str(cfg.get("range") or "last_month"), now)
+            stores = [str(s) for s in (cfg.get("stores") or []) if str(s).strip()]
+            job = {
+                "task": "all",
+                "range": rng,
+                "store": stores[0] if len(stores) == 1 else "",
+                "auto": True,
+                "at": int(now.timestamp() * 1000),
+            }
+            with _PENDING_LOCK:
+                _PENDING.append(job)
+            _append_log(f"[自动] {now:%H:%M} 派发任务："
+                        f"{auto_run.describe_range(str(cfg.get('range') or 'last_month'), now)}"
+                        f"{'　店铺：' + '、'.join(stores) if stores else '　全部店铺'}")
+            print(f"[自动] 已派发任务 {rng}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[自动] 检查出错（忽略）：{e}", flush=True)
+
+
 def main() -> int:
     _setup_log_file()
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1436,6 +1559,10 @@ def main() -> int:
         _watch_code(srv)
     except Exception as e:  # noqa: BLE001
         print(f"热重载未启用（忽略）：{e}")
+    try:
+        threading.Thread(target=_auto_runner, daemon=True).start()
+    except Exception as e:  # noqa: BLE001
+        print(f"自动运行未启用（忽略）：{e}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

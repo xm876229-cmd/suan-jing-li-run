@@ -38,8 +38,37 @@ def app_root() -> Path:
 
 ROOT = app_root()
 
+# 用户要能一眼看出各文件夹是干嘛的，所以对外可见的目录一律中文名。
+# 代码包（src / bridge / scripts）保持英文：那是 Python 的包路径，
+# 改了名字所有 import 都得跟着改，收益远小于风险。
+DIR_DATA = "数据"
+DIR_OUTPUT = "报表"
+DIR_CONFIG = "配置"
+DIR_EXTENSION = "浏览器扩展"
+
+
+def _pick_dir(cn: str, en: str) -> Path:
+    """用中文目录名；发现还是旧的英文目录就顺手改名搬过去。
+
+    这样升级后老用户的数据不会被留在一个没人认得的小角落，
+    而新装的用户看到的就是「数据 / 报表 / 配置 / 浏览器扩展」。
+    改名失败（文件被占用等）就继续用老目录，绝不因此丢数据。
+    """
+    new = ROOT / cn
+    old = ROOT / en
+    if new.is_dir():
+        return new
+    if old.is_dir():
+        try:
+            old.rename(new)
+            return new
+        except OSError:
+            return old
+    return new
+
+
 # ---- 可写数据 ----
-DATA = Path(os.environ.get("JINGLI_DATA") or (ROOT / "data")).resolve()
+DATA = Path(os.environ.get("JINGLI_DATA") or _pick_dir(DIR_DATA, "data")).resolve()
 CAPTURE = DATA / "capture"
 EXPORTS = DATA / "exports"
 INBOX = EXPORTS / "_inbox"
@@ -63,11 +92,11 @@ KIND_BY_TABLE = {"order": "orders", "ads": "ads",
                   "affiliate": "affiliate", "mapping": "mapping"}
 
 # ---- 产出 ----
-OUTPUT = Path(os.environ.get("JINGLI_OUTPUT") or (ROOT / "output")).resolve()
+OUTPUT = Path(os.environ.get("JINGLI_OUTPUT") or _pick_dir(DIR_OUTPUT, "output")).resolve()
 
 # ---- 只读资源 ----
-CONFIG = ROOT / "config"
-EXTENSION = ROOT / "extension"
+CONFIG = _pick_dir(DIR_CONFIG, "config")
+EXTENSION = _pick_dir(DIR_EXTENSION, "extension")
 RATES_FILE = CONFIG / "rates.json"
 STORES_FILE = CONFIG / "stores.json"
 

@@ -5,15 +5,15 @@
 *.crdownload
 
 # ===== 计算产出（可随时重新生成，不入库） =====
-output/*
-!output/.gitkeep
+报表/*
+!报表/.gitkeep
 
 # ===== 抓包原始数据（含店铺数据，不入库） =====
-data/capture/*.jsonl
-data/exports/*
-!data/.gitkeep
-!data/exports/README.md
-!data/capture/endpoints.json
+数据/capture/*.jsonl
+数据/exports/*
+!数据/.gitkeep
+!数据/exports/README.md
+!数据/capture/endpoints.json
 *.out.xlsx
 *.out.csv
 *.log
@@ -44,25 +44,25 @@ desktop.ini
 # ===== 明确保留（不要删） =====
 # .workbuddy/ 为项目相关数据目录，正常纳入版本管理，不在此忽略
 
-data/capture/task.log
+数据/capture/task.log
 
-data/costs/*
-!data/costs/README.md
+数据/costs/*
+!数据/costs/README.md
 
-data/mapping/*
-!data/mapping/README.md
+数据/mapping/*
+!数据/mapping/README.md
 
 # 汇率缓存（联网抓来的实时汇率，随时会过期，不入库）
-data/fx_cache.json
+数据/fx_cache.json
 
 # ===== 打包产物（可随时重建，不入库） =====
 release/
 build/
 
 # 每家店的抓取数据与店铺元信息（运行时产生，不入库）
-data/stores/
+数据/stores/
 # 核算历史（走势图数据，本机产生）
-data/history.jsonl
+数据/history.jsonl
 
 # 应用预设前的自动备份（临时数据，不入库）
-config/_backup/
+配置/_backup/
