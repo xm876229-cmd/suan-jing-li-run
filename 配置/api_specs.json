@@ -41,19 +41,31 @@
               "campaign_id",
               "campaign_name",
               "product_id",
+              "product_status",
+              "campaign_is_del",
+              "campaign_opt_status",
+              "campaign_create_channel",
+              "product_picture",
+              "related_campaign_count",
+              "session_info",
+              "campaign_no_bid_budget",
+              "gmv_max_bid_type",
+              "campaign_target_roi_budget_mode",
+              "campaign_target_roi_budget",
+              "active_creative_boost_count",
               "mixed_real_cost",
               "onsite_roi2_shopping_sku",
               "mixed_real_cost_per_onsite_roi2_shopping_sku",
               "onsite_roi2_shopping_value",
               "onsite_mixed_real_roi2_shopping",
-              "extra_currency"
+              "spu_bi_appeal_info"
             ],
             "start_time": "{{startDate}}",
             "end_time": "{{endDate}}",
             "order_field": "mixed_real_cost",
             "order_type": 1,
             "page": 1,
-            "page_size": -1,
+            "page_size": 100,
             "filters": [
               {
                 "field": "campaign_status",
@@ -64,15 +76,14 @@
               },
               {
                 "field": "gmv_roi_mode",
-                "filter_type": 10,
                 "in_field_values": [
                   "2"
-                ]
+                ],
+                "filter_type": 10
               }
             ],
             "dims": [
-              "spu_id",
-              "campaign_id"
+              "spu_id"
             ]
           },
           "take": "data.table_v2",
@@ -156,19 +167,19 @@
                     14,
                     19,
                     6,
-                    24,
-                    22,
+                    12,
+                    11,
                     16,
                     17,
                     18,
-                    25,
-                    26,
-                    23,
+                    8,
+                    7,
+                    10,
                     5
                   ],
                   "page_param": {
                     "page_no": 1,
-                    "page_size": 100
+                    "page_size": 20
                   },
                   "sorter": {
                     "sort_type": 1,
@@ -179,7 +190,7 @@
               ]
             },
             "module_type": 104,
-            "locale": "zh-CN"
+            "locale": "en"
           },
           "take": "data.product_list_segments.*.product_performances",
           "layout": "objects",

@@ -79,8 +79,13 @@ def make_vars(range_: dict | None = None, store: str = "") -> dict:
         if not d:
             return 0
         try:
-            return int(datetime.strptime(d, "%Y-%m-%d")
+            # 平台要的是「当地 00:00」对应的 unix 时间戳。
+            # datetime 按 UTC 解析出的是 UTC 00:00，东八区就差 8 小时，
+            # 抓包对比过：2026-10-01 页面发的是 1790784000（= 09-30T16:00Z），
+            # 不是 1790812800（= 10-01T00:00Z）。所以要减掉时区偏移。
+            base = int(datetime.strptime(d, "%Y-%m-%d")
                        .replace(tzinfo=timezone.utc).timestamp())
+            return base - tz
         except ValueError:
             return 0
 
@@ -94,7 +99,9 @@ def make_vars(range_: dict | None = None, store: str = "") -> dict:
         "startDateCompact": _compact(start),
         "endDateCompact": _compact(end),
         "startTs": _ts(start),
-        "endTs": _ts(end) + 86399 if end else 0,   # 闭区间：末日 23:59:59
+        # 结束用「末日次日 00:00」（开区间），跟页面一致：
+        # 10/01~10/21 的 end_time 是 1792598400（= 10-21T16:00Z = 10-22 00:00 当地）
+        "endTs": _ts(end_excl) if end_excl else 0,
         "tzOffset": tz,
         "storeId": store or "",
     }
@@ -320,6 +327,21 @@ def write_result(name: str, content: str, out_dir: Path | None = None) -> Path:
 
 # ---------------- 主流程 ----------------
 
+def _dump_resp(task: str, idx: int, resp) -> None:
+    """把这一步的原始响应留一份，方便排查解析问题。
+
+    广告 / 联盟这两个接口平台经常改字段，结果可疑时（0 行、只解析出 1 行）
+    留个样本，下次排查不用再让用户重跑一遍。固定文件名覆盖写，不会越积越多。
+    """
+    try:
+        d = paths.DATA / "capture"
+        d.mkdir(parents=True, exist_ok=True)
+        txt = json.dumps(resp, ensure_ascii=False)
+        (d / f"_last_{task}_step{idx}.json").write_text(txt[:400_000], encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def process_results(task: str, results: list[dict], range_: dict | None = None,
                     store: str = "", specs: dict | None = None,
                     out_dir: Path | None = None) -> dict:
@@ -370,10 +392,15 @@ def process_results(task: str, results: list[dict], range_: dict | None = None,
 
         rows = normalize_rows(raw, step.get("layout") or "objects")
         if not rows:
+            _dump_resp(task, idx, resp)
             issues.append(f"步骤「{step.get('name') or path}」取到 0 行")
             continue
         objs = map_fields(rows, step.get("fields") or {})
         agg = aggregate(objs, step.get("group_by"), step.get("sum"))
+        # 广告/佣金这两步的接口经常改，解析结果可疑时留一份原始响应，
+        # 下次排查不用再让用户重跑一遍（覆盖写，不会越积越多）。
+        if task in ("ads", "affiliate") and len(agg) <= 1:
+            _dump_resp(task, idx, resp)
         csv_text = build_csv(agg, step.get("output") or {})
 
         out = step.get("output") or {}
