@@ -206,6 +206,30 @@ def _serve_daemon() -> int:
         time.sleep(2)
 
 
+def cmd_bridge(argv: list[str]) -> int:
+    """启动 / 确保取数桥在跑（后台、无窗口）。
+
+    双击程序文件夹里的「启动桥.bat」就是调这个。幂等：桥已经在跑就什么都不做，
+    没跑才把它拉起来——所以新人遇到「扩展点了没反应 / 桥好像死了」时，
+    不用管当前状态，双击这个 bat 就行，不会起两个冲突的桥。
+
+    桥是整套自动化的地基：浏览器扩展抓到的数据交给它、它负责落盘并触发核算。
+    桌面窗口打开时会自动起桥；但当桥意外退出、或用户只关了窗口没关桥时，
+    新人往往不知道去哪把它拉起来——这个入口就是给那种情况用的。
+    """
+    if bridge_running():
+        print(f"取数桥已在运行（端口 {_port()}）")
+        return 0
+    ok = start_bridge_hidden()
+    if ok:
+        print(f"取数桥已启动（端口 {_port()}，后台运行，不弹窗口）")
+        print(f"  参数配置页：http://127.0.0.1:{_port()}/config")
+        print(f"  程序首页  ：http://127.0.0.1:{_port()}")
+    else:
+        print("取数桥启动失败，请用「诊断信息 / doctor」看看 8765 端口是不是被占了")
+    return 0 if ok else 1
+
+
 def cmd_run(argv: list[str]) -> int:
     from src.cli import main as cli_main
     return cli_main(argv)
@@ -527,6 +551,8 @@ def main(argv: list[str] | None = None) -> int:
         return menu()
     if cmd == "serve":
         return cmd_serve()
+    if cmd in ("bridge", "启动桥", "重启桥"):
+        return cmd_bridge(rest)
     if cmd == "run":
         return cmd_run(rest)
     if cmd == "install":

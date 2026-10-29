@@ -191,6 +191,8 @@ def build_app() -> Path:
 
     # 使用说明：放在最显眼的位置，新手不用翻目录就知道从哪开始
     _write_readme(out)
+    # 启动桥入口：程序文件夹里显眼的一个 bat，双击确保桥在跑（新手友好）
+    _write_bridge_bat(out)
 
     if not (out / EXE_NAME).exists():
         raise SystemExit(f"构建失败：缺少 {EXE_NAME}")
@@ -229,6 +231,17 @@ def _write_readme(out: Path) -> None:
   使用说明.txt     这份文件
   _internal\\       程序运行库和源码副本，不用管
 
+【取数桥（后台服务）】
+  · 它是什么？接收浏览器扩展抓到的数据、存盘并触发核算的「地基」。
+    平时你打开「净利助手」窗口时它会自动在后台跑起来，不用管。
+  · 什么时候要手动重启？扩展点了没反应、或窗口关了但桥也跟着死了、
+    或改完「计算参数」后行为没变（老桥还在跑旧代码）时，就需要把桥拉起来 / 重启一下。
+  · 怎么重启（最简单）？双击程序文件夹里的「启动桥.bat」，
+    它会在后台把桥跑起来：已经运行就不动、不会起两个。
+  · 怎么确认桥在跑？浏览器打开 http://127.0.0.1:8765/config 能开就是活着；
+    或「启动桥.bat」里会显示「取数桥已在运行 / 已启动」。
+  · 配置页打不开？先看桥是不是没起（双击「启动桥.bat」），再看 8765 端口是否被别的程序占了。
+
 【常见问题】
   · 扩展加载不了？确认第 5 步选的是「浏览器扩展」这个文件夹本身
   · 报表去哪了？在程序界面的「报表」页点「下载」，
@@ -240,6 +253,35 @@ def _write_readme(out: Path) -> None:
         (out / "使用说明.txt").write_text(text, encoding="utf-8-sig")
     except OSError:
         pass
+
+
+def _write_bridge_bat(out: Path) -> None:
+    """在发布目录顶层放一个「启动桥.bat」。
+
+    新手最大的痛点：桥是一个后台无窗口服务，程序文件夹里只有 jingli.exe、
+    浏览器扩展、配置、文档，看不到「桥」在哪启动。双击这个 bat 即可确保桥在跑，
+    已运行就不动、不会起两个，专治「扩展点了没反应 / 桥好像死了」时的无从下手。
+    """
+    bat = (
+        "@echo off\r\n"
+        "chcp 65001 >nul\r\n"
+        "cd /d \"%~dp0\"\r\n"
+        "title 净利助手 · 启动 / 重启取数桥\r\n"
+        "echo 正在确保取数桥运行中（已在跑就不动，不会起两个）…\r\n"
+        "\"jingli.exe\" bridge\r\n"
+        "echo.\r\n"
+        "echo 取数桥是后台服务（不弹窗口）：负责接收浏览器扩展抓到的数据并触发核算。\r\n"
+        "echo   参数配置页：http://127.0.0.1:8765/config\r\n"
+        "echo   程序首页  ：http://127.0.0.1:8765\r\n"
+        "echo.\r\n"
+        "echo 桥已在后台运行，本窗口可以直接关掉。\r\n"
+        "pause\r\n"
+    )
+    try:
+        (out / "启动桥.bat").write_text(bat, encoding="utf-8-sig")
+        print(f"[OK] 启动桥.bat：{out / '启动桥.bat'}")
+    except OSError as e:
+        print(f"  ⚠ 写启动桥.bat 失败：{e}")
 
 
 def make_app_zip(app_dir: Path) -> Path:
