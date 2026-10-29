@@ -206,20 +206,136 @@ def _serve_daemon() -> int:
         time.sleep(2)
 
 
-def cmd_bridge(argv: list[str]) -> int:
-    """启动 / 确保取数桥在跑（后台、无窗口）。
+def _is_bridge_proc(pid: str) -> bool:
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"],
+                             capture_output=True, text=True, timeout=10,
+                             errors="replace").stdout.lower()
+    except Exception:  # noqa: BLE001
+        return False
+    return ("jingli.exe" in out) or ("python" in out)
 
-    双击程序文件夹里的「启动桥.bat」就是调这个。幂等：桥已经在跑就什么都不做，
-    没跑才把它拉起来——所以新人遇到「扩展点了没反应 / 桥好像死了」时，
-    不用管当前状态，双击这个 bat 就行，不会起两个冲突的桥。
+
+def _parent_pid(pid: str) -> str:
+    """取父进程 PID。
+
+    不用 wmic：新 Windows 已经弃用，部分安全策略还会直接拦。
+    改用 kernel32 的进程快照，稳定且无外部依赖。
+    """
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _PE32(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD),
+                        ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD),
+                        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                        ("th32ModuleID", wintypes.DWORD),
+                        ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD),
+                        ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", wintypes.DWORD),
+                        ("szExeFile", ctypes.c_char * 260)]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        snap = k32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+        if not snap or snap == wintypes.HANDLE(-1).value:
+            return ""
+        pe = _PE32()
+        pe.dwSize = ctypes.sizeof(_PE32)
+        target = int(pid)
+        parent = ""
+        try:
+            ok = k32.Process32First(snap, ctypes.byref(pe))
+            while ok:
+                if pe.th32ProcessID == target:
+                    parent = str(pe.th32ParentProcessID)
+                    break
+                ok = k32.Process32Next(snap, ctypes.byref(pe))
+        finally:
+            k32.CloseHandle(snap)
+        return parent
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _kill_bridge_on_port(port: int) -> list[str]:
+    """关掉占用端口的旧桥（连同拉起它的守护者进程），返回被关掉的 PID。
+
+    为什么要连父进程一起关：桥是「守护者 + 子进程」结构，只杀监听端口那个子进程，
+    守护者 2 秒后又把它拉起来，端口马上又被占。所以父进程（serve 守护者）也要关。
+    只认 jingli.exe / python，别的程序碰巧占用时一律不动，避免误杀。
+    """
+    killed: list[str] = []
+    if os.name != "nt":
+        return killed
+    try:
+        out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True,
+                             timeout=15, errors="replace").stdout
+    except Exception:  # noqa: BLE001
+        return killed
+
+    pids: list[str] = []
+    for ln in out.splitlines():
+        parts = ln.split()
+        if (len(parts) >= 5 and parts[0].upper().startswith("TCP")
+                and parts[1].endswith(f":{port}")
+                and ("LISTEN" in parts[3].upper() or "监听" in parts[3])):
+            pid = parts[4]
+            if pid.isdigit() and pid not in pids:
+                pids.append(pid)
+
+    me = str(os.getpid())
+    for pid in pids:
+        targets = [pid, _parent_pid(pid)]
+        for t in targets:
+            if not t or t == "0" or t == me or t in killed:
+                continue
+            if not _is_bridge_proc(t):
+                continue
+            try:
+                subprocess.run(["taskkill", "/PID", t, "/F", "/T"],
+                               capture_output=True, timeout=15)
+                killed.append(t)
+            except Exception:  # noqa: BLE001
+                pass
+    return killed
+
+
+def cmd_bridge(argv: list[str]) -> int:
+    """启动 / 重启取数桥（后台、无窗口）。
+
+    双击程序文件夹里的「启动桥.bat」会带 --force：
+      · 先关掉占用 8765 的旧桥（可能是别的目录启动的、读错配置的那个）
+      · 再起「当前这个目录」的桥，保证连的是同一份数据
+    不带 --force 时是幂等的：已经在跑就什么都不做。
 
     桥是整套自动化的地基：浏览器扩展抓到的数据交给它、它负责落盘并触发核算。
-    桌面窗口打开时会自动起桥；但当桥意外退出、或用户只关了窗口没关桥时，
-    新人往往不知道去哪把它拉起来——这个入口就是给那种情况用的。
     """
-    if bridge_running():
+    force = any(a.lower() in ("--force", "-f", "restart", "重启桥") for a in argv)
+
+    if bridge_running() and not force:
         print(f"取数桥已在运行（端口 {_port()}）")
+        print("  想强制换成本目录这个桥：双击「启动桥.bat」，或 jingli.exe bridge --force")
         return 0
+
+    if force:
+        print("先关闭占用端口的旧桥…")
+        killed = _kill_bridge_on_port(_port())
+        if killed:
+            print("  已关闭 PID：" + "、".join(killed))
+        else:
+            print("  端口上没有需要关闭的桥")
+        import time
+        for _ in range(40):
+            if not bridge_running():
+                break
+            time.sleep(0.25)
+
     ok = start_bridge_hidden()
     if ok:
         print(f"取数桥已启动（端口 {_port()}，后台运行，不弹窗口）")
