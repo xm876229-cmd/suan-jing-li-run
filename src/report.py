@@ -81,6 +81,14 @@ BASE_HEADERS = [
     "成本", "毛利", "毛利额",
 ]
 
+# 费用占比列：{费用项 id: 列名}
+# 放在费用列后面，看「这项费用占 GMV 多少」一眼就明白。
+# 口径跟模板《V1-净利》一致：费用 ÷ GMV。
+RATIO_ITEMS: list[tuple[str, str]] = [
+    ("dispatch", "发单费占比"),
+    ("ads", "广告费比"),
+]
+
 
 def fee_items(res: CalcResult) -> list[tuple[str, str]]:
     """费用项清单：{id, 中文名}。按参数表顺序，用户加一项就多一列/多一组。"""
@@ -111,11 +119,16 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
     # 不同链接即使卖家编码相同也绝不合并——卖家编码可在多条链接间复用，
     # 只有商品ID 是链接的唯一标识。
     fees = fee_items(res)
+    # 费用占比列：只对实际存在的费用项出列（用户把某项删了，列也没了）
+    ratios = [(fid, name) for fid, name in RATIO_ITEMS
+              if any(fid in (p.fees or {}) for p in res.products)]
     headers = list(BASE_HEADERS) + [name for _, name in fees] + \
+              [name for _, name in ratios] + \
               ["费用合计", "净利率", "净利(本地货币)", "净利(人民币)"]
     n_fee = len(fees)
     c_fee0 = len(BASE_HEADERS) + 1          # 第一个费用列
-    c_total = c_fee0 + n_fee                # 费用合计
+    c_ratio0 = c_fee0 + n_fee               # 第一个占比列
+    c_total = c_ratio0 + len(ratios)        # 费用合计
     c_rate = c_total + 1                    # 净利率
     c_net = c_rate + 1                      # 净利(本地)
     c_net_cny = c_net + 1                   # 净利(人民币)
@@ -134,11 +147,19 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
 
     money_cols = [5, 8, 9, 10, 12] + list(range(c_fee0, c_total + 1)) + [c_net, c_net_cny]
     pct_cols = [11, c_rate]
+    if ratios:
+        pct_cols += list(range(c_ratio0, c_ratio0 + len(ratios)))
     if has_alt:
         money_cols += [c_alt, c_diff]
 
     def fee_vals(p) -> list[float]:
         return [float((p.fees or {}).get(fid, 0.0)) for fid, _ in fees]
+
+    def ratio_vals(p) -> list[float]:
+        """费用占比：这项费用 ÷ GMV。GMV 为 0 时按 0 计。"""
+        g = float(p.gmv or 0.0)
+        return [(float((p.fees or {}).get(fid, 0.0)) / g) if g else 0.0
+                for fid, _ in ratios]
 
     row = 3
     for i, p in enumerate(res.products, 1):
@@ -148,6 +169,7 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
             p.gmv, p.orders, p.items, p.aov, p.buyer_paid,
             p.cost_local, p.gross_profit, p.gmv - p.cost_local,
             *fv,
+            *ratio_vals(p),
             sum(fv), p.net_margin, p.net_local, p.net_cny(res.params.cny_to_local),
         ]
         if has_alt:
@@ -171,6 +193,7 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
         t.gmv, t.orders, t.items, t.aov if t.orders else 0, t.buyer_paid,
         t.cost_local, t.gross_profit, t.gmv - t.cost_local,
         *tfv,
+        *ratio_vals(t),
         sum(tfv), t.net_margin, t.net_local, res.net_cny_total,
     ]
     if has_alt:

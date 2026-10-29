@@ -397,12 +397,25 @@ def _norm(s) -> str:
 
 
 # 公式里可以直接写的中文名（记不住英文就用中文）
+#
+# 「本行X」：按**这一项自己勾选的订单类别**现算的量。
+# 「X」：不带前缀的说法，默认也是本行的意思，
+#        但如果参数表里有一行就叫这个名字，那优先指那一行（见 compute_params）。
 BUILTIN_CN: dict[str, str] = {
+    "本行订单数": "orders",
+    "本行件数": "qty",
+    "本行买家实付": "paid",
+    "本行GMV": "gmv",
+    "本行成本单价": "cost_cny",
+    "本行商品成本": "cost",
+    "本行平均成本单价": "cost_unit",
+    "本行退款金额": "refund",
+    "本行广告花费": "ads",
+    "本行达人佣金": "commission",
     "订单数": "orders",
     "件数": "qty",
     "买家实付": "paid",
     "GMV": "gmv",
-    "本行GMV": "gmv",
     "成本单价": "cost_cny",
     "商品成本": "cost",
     "平均成本单价": "cost_unit",
@@ -412,18 +425,31 @@ BUILTIN_CN: dict[str, str] = {
 }
 
 # 费率项的默认中文名。可在费率页改，改完存在 rates.json 的 labels 段。
+#
+# 名字刻意跟参数表那一行区分开（费率叫「平台佣金率」，参数叫「平台佣金」）：
+# 否则公式里写「平台佣金」到底是费率还是算出来的金额就说不清了。
 DEFAULT_RATE_CN: dict[str, str] = {
-    "platform_commission": "平台佣金",
-    "tx_fee": "交易手续费",
-    "cashback": "奖金返现",
-    "super_coupon": "超级优惠券",
-    "growth_fee": "商家成长费",
-    "logistics": "物流费",
-    "dispatch_fee_cny": "发单费",
-    "order_service": "订单服务费",
+    "platform_commission": "平台佣金率",
+    "tx_fee": "交易手续费率",
+    "cashback": "奖金返现率",
+    "super_coupon": "超级优惠券率",
+    "growth_fee": "商家成长费率",
+    "logistics": "物流费率",
+    "dispatch_fee_cny": "发单费单价",
+    "order_service": "订单服务费单价",
     "cny_to_local": "人民币汇率",
     "usd_to_local": "美金汇率",
-    "other_fee": "其他费用",
+    "other_fee": "其他费用率",
+}
+
+
+# 「净利怎么算」那几行的结果名，也给个中文说法，
+# 这样 net_rate 能写「净利 / GMV」而不是「net / gmv」。
+FORMULA_CN: dict[str, str] = {
+    "gross_profit": "毛利",
+    "total_fees": "费用合计",
+    "net": "净利",
+    "net_rate": "净利率",
 }
 
 
@@ -449,8 +475,12 @@ def compile_expr(expr: str, titles: list[str] | None = None,
 
     返回 (可求值的表达式, {变量名: [候选标题(归一化)]})。
     两种写法都认：
-        [折扣前小计|SKU Subtotal]   显式，可写多个候选
+        [折扣前小计,SKU Subtotal]   显式，可写多个候选
         折扣前小计                   裸写，只要这个标题在订单表里存在
+
+    候选之间用什么符号隔开都行——逗号、分号、竖线、中文逗号/分号都认，
+    也支持用换行隔开（界面上「加一行」就是靠换行）。
+    竖线是历史写法，保留是为了老的配置还能用。
 
     aliases 是「中文名 → 内部写法」的映射（见 rate_aliases）。
     中文名先替换，免得「订单数」这种词被当成订单表的列标题。
@@ -463,7 +493,14 @@ def compile_expr(expr: str, titles: list[str] | None = None,
         return var
 
     def repl(m: re.Match) -> str:
-        cands = [_norm(c) for c in m.group(1).split("|") if c.strip()]
+        raw = m.group(1)
+        # 先按各种分隔符切，再把整段也当一个候选——
+        # 有些列标题本身就带逗号（"SKU, discounted"），切开就找不到了。
+        parts = [p.strip() for p in re.split(r"[,;|，；\n\r]+", raw)]
+        cands = [_norm(p) for p in parts if p]
+        whole = _norm(raw)
+        if whole and whole not in cands:
+            cands.append(whole)
         cands = [c for c in cands if c]
         return var_for(cands) if cands else "0"
 
@@ -672,13 +709,29 @@ def compute_params(params_cfg: list[dict], ctx: dict) -> tuple[dict[str, float],
 
             kinds = item.get("kinds")
             expr = item.get("expr")
-            # 别名 = 内置量的中文名 + 费率项的中文名 + 其它参数的中文名（用表格里的名字）
+            # 别名优先级（从高到低）：
+            #   1) 其它参数的中文名 → param.<id>（参数表里那一行的名字）
+            #   2) 费率项的中文名     → params.<字段>
+            #   3) 内置量的中文名     → gmv / paid / orders …
+            #
+            # 为什么参数名要压过费率名：「平台佣金」这个写法，
+            # 用户看到的是参数表里那一行，自然是指算出来的金额，
+            # 而不是费率。要引用费率就写「平台佣金率」。
+            #
+            # 「本行X」是内置量的另一种叫法：按**这一项自己勾选的订单类别**
+            # 现算的量（而不是参数表里那一行的值）。
+            # 「订单数」这行自己写「订单数」会变成自己引用自己，
+            # 所以配置里写「本行订单数」。
             aliases = dict(ctx.get("rate_aliases") or {})
             for other in pending:
                 _ofid = str(other.get("id") or "").strip()
                 _olb = str(other.get("label") or "").strip()
                 if _ofid and _olb and _ofid != fid:
-                    aliases.setdefault(_olb, f"param.{_ofid}")
+                    aliases[_olb] = f"param.{_ofid}"
+            # 自己那一行的名字，指向「本行」版本（自己引用自己没意义）
+            _own_label = str(item.get("label") or "").strip()
+            if _own_label and _own_label in aliases:
+                aliases[_own_label] = aliases.get("本行" + _own_label, aliases[_own_label])
             py_expr, groups = compile_expr(str(expr or ""), titles, aliases)
             local, miss = _local_ctx(by_kind, kinds, ctx, groups)
             missing.extend(miss)
@@ -747,8 +800,13 @@ def compute_params(params_cfg: list[dict], ctx: dict) -> tuple[dict[str, float],
 compute_fees = compute_params
 
 
-def compute_formulas(formulas: dict, ctx: dict) -> tuple[dict[str, float], list[str]]:
-    """按依赖顺序算公式。公式之间可以互相引用（如 net 引用 gross_profit）。"""
+def compute_formulas(formulas: dict, ctx: dict,
+                     aliases: dict[str, str] | None = None) -> tuple[dict[str, float], list[str]]:
+    """按依赖顺序算公式。公式之间可以互相引用（如 net 引用 gross_profit）。
+
+    aliases 是「中文名 → 变量名」的映射，让这几行也能直接写中文：
+        net = GMV - 商品成本 - 发单费 - ...
+    """
     values: dict[str, float] = {}
     issues: list[str] = []
     pending = dict(formulas or {})
@@ -760,6 +818,9 @@ def compute_formulas(formulas: dict, ctx: dict) -> tuple[dict[str, float], list[
         progressed = False
         for name in list(pending):
             expr = pending[name]
+            # 中文名先换成变量名（长的先换，免得「GMV」把「本行GMV」拆坏）
+            if aliases:
+                expr = _apply_aliases(expr, aliases)
             try:
                 val, _ = safe_eval(expr, {**ctx, **values})
             except FormulaError as e:
@@ -782,3 +843,20 @@ def compute_formulas(formulas: dict, ctx: dict) -> tuple[dict[str, float], list[
             break
 
     return values, issues
+
+
+def _apply_aliases(expr: str, aliases: dict[str, str]) -> str:
+    """把公式里的中文名换成内部变量名。
+
+    长的别名先替换：「GMV」和「本行GMV」都存在时，
+    先换「本行GMV」才不会把后者拆成「本行gmv」。
+    """
+    pairs = sorted(((str(k).strip(), str(v)) for k, v in (aliases or {}).items()
+                    if str(k).strip()),
+                   key=lambda kv: -len(kv[0]))
+    if not pairs:
+        return str(expr or "")
+    alt = "|".join(re.escape(k) for k, _ in pairs)
+    pat = re.compile(r"(?<![A-Za-z0-9_])(" + alt + r")(?![A-Za-z0-9_])")
+    lookup = {k: v for k, v in pairs}
+    return pat.sub(lambda m: lookup.get(m.group(1), m.group(0)), str(expr or ""))

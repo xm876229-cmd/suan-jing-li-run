@@ -658,8 +658,27 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
                 "gmv": m.gmv, "cost": m.cost_local,
                 "buyer_paid": m.buyer_paid, "order_count": m.orders,
                 "items": m.items, "refund": m.refund,
+                # 内置量的英文名也放进来，中文别名才找得到对应值
+                "orders": m.orders, "qty": m.items, "paid": m.buyer_paid,
+                "cost_cny": m.cost_local / (params.cny_to_local or 1.0),
+                "commission": m.fees.get("affiliate", ZERO),
+                "ads": m.fees.get("ads", ZERO),
                 "fees": m.fees, "params": params}
-        fvals, f_issues = formula.compute_formulas(net_formulas, fctx)
+        # 净利这几行也支持中文写法：GMV - 商品成本 - 发单费 - ...
+        # 优先级：参数表那一行的名字 > 费率项的中文名 > 内置量的中文名。
+        # 「平台佣金」指参数表里算出来的那一项；费率另有名字（平台佣金率）。
+        f_aliases = dict(ctx.get("rate_aliases") or {})
+        for it in param_cfg:
+            if not isinstance(it, dict):
+                continue
+            _fid = str(it.get("id") or "").strip()
+            _flb = str(it.get("label") or "").strip()
+            if _fid and _flb:
+                f_aliases[_flb] = _fid
+        # 公式结果名也能用中文：net_rate 写「净利 / GMV」
+        for _fid, _fcn in formula.FORMULA_CN.items():
+            f_aliases.setdefault(_fcn, _fid)
+        fvals, f_issues = formula.compute_formulas(net_formulas, fctx, f_aliases)
         if f_issues:
             fee_issues.extend(f_issues[:1])
         if "net" in fvals:

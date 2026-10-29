@@ -544,6 +544,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_costs(save=True)
         elif self.path.startswith("/api/data-import"):
             self._post_data_import()
+        elif self.path.startswith("/api/link-info"):
+            self._post_link_import()
         elif self.path.startswith("/api/presets/"):
             self._post_presets()
         elif self.path.startswith("/api/costs/import"):
@@ -885,6 +887,81 @@ class Handler(BaseHTTPRequestHandler):
         if _snap.get("id"):
             out["snapshot"] = _snap.get("id")
         _json(self, out)
+
+    def _post_link_import(self):
+        """导入店铺后台下载的「链接资料」表，读出每条链接的款式编码。
+
+        报表上「款式编码」那一列靠它。
+        店铺后台的表没有款式编码列，程序从商家 SKU 推导
+        （V27-White-10Pcs → V27），跟你手工维护的那列效果一致。
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+        try:
+            data = base64.b64decode(payload.get("b64") or "")
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"内容解码失败：{e}"}, 400)
+            return
+        if not data:
+            _json(self, {"ok": False, "error": "文件是空的"}, 400)
+            return
+
+        name = str(payload.get("name") or "链接资料.xlsx")
+        suffix = Path(name).suffix.lower() or ".xlsx"
+        tmp_dir = paths.DATA / "_import_tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp = tmp_dir / f"link-{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}{suffix}"
+        try:
+            tmp.write_bytes(data)
+            from src.loader import parse_mapping, read_table
+            idx = parse_mapping(read_table(tmp))
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"解析失败：{e}"}, 500)
+            return
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+        if not len(idx):
+            _json(self, {"ok": False,
+                         "error": "这张表里没找到「商品 ID」和「SKU ID」两列，"
+                                  "请确认下载的是店铺后台的「批量编辑 / 商品信息」表。"}, 400)
+            return
+
+        # 存进映射目录：核算时会被自动合并进映射主表
+        import csv as _csv
+        MAPPING_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        out_path = MAPPING_DIR / f"链接资料-{stamp}.csv"
+        sku_of_item: dict[int, str] = {}
+        for sku, items in idx.by_seller_sku.items():
+            for it in items:
+                sku_of_item.setdefault(id(it), sku)
+        with out_path.open("w", encoding="utf-8", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=["sku_id", "product_id", "seller_sku",
+                                              "product_name", "style_code"])
+            w.writeheader()
+            for sid, item in idx.by_sku_id.items():
+                w.writerow({"sku_id": sid, "product_id": item["product_id"],
+                            "seller_sku": sku_of_item.get(id(item), ""),
+                            "product_name": item.get("product_name", ""),
+                            "style_code": item.get("style_code", "")})
+
+        n_sku = len(idx.by_sku_id)
+        n_link = len(idx.by_product_styles)
+        n_multi = sum(1 for v in idx.by_product_styles.values() if len(v) > 1)
+        _append_log(f"[link] 导入链接资料：{n_sku} 个 SKU / {n_link} 条链接"
+                    f"（{n_multi} 条含多个款式编码）")
+        _json(self, {"ok": True, "path": str(out_path), "name": out_path.name,
+                     "sku_count": n_sku, "link_count": n_link, "multi_count": n_multi,
+                     "samples": [{"link": pid, "styles": idx.styles_of(pid)}
+                                 for pid in list(idx.by_product_styles)[:8]]})
 
     def _post_mapping(self):
         from bridge import settings_api

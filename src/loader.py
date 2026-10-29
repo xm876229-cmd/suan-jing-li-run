@@ -102,7 +102,11 @@ ALIASES: dict[str, list[str]] = {
     "commission": ["est.commission", "estcommission", "预估佣金", "佣金"],
     "commission_refund": ["refunds", "退款"],
     # 统计表 / 映射表
-    "style_code": ["款式编码", "款式", "stylecode"],
+    "style_code": ["款式编码", "款式", "stylecode",
+                   # 店铺后台导出的「链接资料」表，第 1 列是款式编码，
+                   # 但表头那格写的是「这列常态保留 勿删和覆盖」——
+                   # 平台不给你正经列名，只能按这个说法认。
+                   "这列常态保留", "常态保留", "勿删和覆盖"],
 }
 
 
@@ -243,9 +247,34 @@ class SkuIndex:
     ambiguous: set[str] = field(default_factory=set)
     # 同一个 SKU ID 指向不同商品：映射表脏数据，需要人工确认
     conflicts: set[str] = field(default_factory=set)
+    # 商品ID → 该链接下所有 SKU 的款式编码（按首次出现顺序，去重）
+    #
+    # 这跟模板《V1-净利》的逻辑一致：
+    #   TEXTJOIN("/", TRUE, UNIQUE(FILTER(链接资料!A:A, 链接资料!B:B=商品ID, "")))
+    # 也就是「这条链接下所有款式编码，去重后用 / 连起来」。
+    # 注意是链接下的**全部** SKU，不只是本期出了单的——
+    # 没出单的 SKU 同样属于这条链接。
+    by_product_styles: dict[str, list[str]] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.by_sku_id) + len(self.by_seller_sku)
+
+    def add_style(self, product_id: str, style_code: str) -> None:
+        """登记一个款式编码。按首次出现顺序去重（不区分大小写）。"""
+        pid = to_str(product_id)
+        code = to_str(style_code)
+        if not pid or not code:
+            return
+        lst = self.by_product_styles.setdefault(pid, [])
+        # Excel 的 UNIQUE 不区分大小写（V36 与 v36 算同一个），保留先出现的那个写法
+        for old in lst:
+            if old.lower() == code.lower():
+                return
+        lst.append(code)
+
+    def styles_of(self, product_id: str) -> str:
+        """某条链接的款式编码串：去重后用 / 连接。"""
+        return "/".join(self.by_product_styles.get(to_str(product_id), []))
 
     def merge(self, other: "SkuIndex") -> "SkuIndex":
         """把 other 里本索引没有的条目补进来（self 优先）。
@@ -260,6 +289,10 @@ class SkuIndex:
             for it in items:
                 if it not in bucket:
                     bucket.append(it)
+        # 款式编码也要合并：主表里的和目录表里的取并集
+        for pid, codes in other.by_product_styles.items():
+            for c in codes:
+                self.add_style(pid, c)
         return self
 
     def lookup(self, sku_id: str, seller_sku: str, product_name: str) -> tuple[str, str]:
@@ -310,6 +343,30 @@ class SkuIndex:
 
 
 MULTIPACK_RE = re.compile(r"^(?P<base>.+?)[-\s](?P<n>\d+)\s*[Pp][Cc][Ss]$")
+
+# 从卖家编码推导款式编码。
+#
+# 店铺后台下载的「链接资料」表里没有款式编码那一列（用户手工加的那列
+# 只有在模板里才有），但款式编码就藏在卖家编码的第一段里：
+#     V27-White-10Pcs      → V27
+#     V1【Set-LOVE】       → V1
+#     MY-J68-22cm+clip     → MY-J68
+# 规则：取第一个分隔符（- 【 （ ( 空格）之前的部分，
+# 但「MY-J68」这种两段式要保留两段，所以先试「字母前缀-字母+数字」的整段。
+_STYLE_TWO_SEG = re.compile(r"^([A-Za-z]{1,3}-[A-Za-z]+\d*)(?=[-\[【（(\s]|$)")
+_STYLE_FIRST_SEG = re.compile(r"^([^\-\[【（(\s]+)")
+
+
+def derive_style_code(seller_sku: str) -> str:
+    """从卖家编码推款式编码。推不出来就返回空，由调用方留空。"""
+    s = str(seller_sku or "").strip()
+    if not s:
+        return ""
+    m = _STYLE_TWO_SEG.match(s)
+    if m:
+        return m.group(1).strip()
+    m = _STYLE_FIRST_SEG.match(s)
+    return m.group(1).strip() if m else ""
 
 
 @dataclass
@@ -467,6 +524,10 @@ def parse_mapping(rows: list[tuple]) -> SkuIndex:
     兼容两种形态：
       · 链接资料模板：款式编码 | product_id | ... | sku_id | ... | seller_sku
       · SKU 统计表  ：SKU ID | Product ID | 商品 | GMV | 订单数 | 件数（表头可能在第 3 行）
+
+    店铺后台下载的「链接资料」表没有款式编码列，
+    这时从卖家编码推导（见 derive_style_code）——款式编码就藏在
+    卖家编码的第一段里，V27-White-10Pcs → V27。
     """
     idx = SkuIndex()
     hidx, cm = find_header_row(rows, ("sku_id", "product_id"))
@@ -486,11 +547,22 @@ def parse_mapping(rows: list[tuple]) -> SkuIndex:
         pid = to_str(r[c_prod])
         if not pid:
             continue
+        # 表头说明行（"Mandatory" / "Uneditable" / "商品 ID" 这类）不是数据
+        if not pid.isdigit():
+            continue
+        seller_sku = to_str(r[c_sku]) if c_sku is not None and c_sku < len(r) else ""
+        style = to_str(r[c_style]) if c_style is not None and c_style < len(r) else ""
+        if not style:
+            # 表里没有款式编码列（或这行是空的）→ 从卖家编码推
+            style = derive_style_code(seller_sku)
         item = {
             "product_id": pid,
-            "style_code": to_str(r[c_style]) if c_style is not None and c_style < len(r) else "",
+            "style_code": style,
             "product_name": to_str(r[c_name]) if c_name is not None and c_name < len(r) else "",
         }
+        # 款式编码登记到「商品ID → 款式编码」的索引上，
+        # 报表那列要的是「这条链接下所有款式编码」，不只是出了单的那几个。
+        idx.add_style(pid, item["style_code"])
         sid = to_str(r[c_skuid]) if c_skuid is not None and c_skuid < len(r) else ""
         if sid:
             old = idx.by_sku_id.get(sid)
@@ -554,11 +626,15 @@ def parse_mapping_json(path: Path) -> SkuIndex:
         pid = flat.get("productid", "")
         if not pid:
             continue
+        ssk = flat.get("sellersku", "") or flat.get("skuname", "") or flat.get("sku", "")
+        style = (flat.get("stylecode", "") or flat.get("sellerstylecode", "")
+                 or derive_style_code(ssk))
         item = {
             "product_id": pid,
-            "style_code": flat.get("stylecode", "") or flat.get("sellerstylecode", ""),
+            "style_code": style,
             "product_name": flat.get("productname", "") or flat.get("producttitle", ""),
         }
+        idx.add_style(pid, style)
         sid = flat.get("skuid", "")
         if sid:
             old = idx.by_sku_id.get(sid)
@@ -566,7 +642,6 @@ def parse_mapping_json(path: Path) -> SkuIndex:
                 idx.by_sku_id[sid] = item
             elif old["product_id"] != item["product_id"]:
                 idx.conflicts.add(sid)
-        ssk = flat.get("sellersku", "") or flat.get("skuname", "") or flat.get("sku", "")
         if ssk:
             bucket = idx.by_seller_sku[ssk]
             if item not in bucket:
@@ -777,7 +852,6 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
                 unresolved[l.seller_sku or l.sku_id] += 1
         elif style:
             styles_by_product[pid].add(style)
-
     # 卖家编码可以挂在多条链接下（用户明确说过：编码不唯一，只有 SKU ID 唯一），
     # 这种行无法靠编码判定归属，单独说明，不要混进「真的找不到」里。
     if sku_index.conflicts:
@@ -798,6 +872,19 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
     for l in lines:
         if l.product_id and not l.style_codes:
             l.style_codes = "/".join(sorted(styles_by_product.get(l.product_id, [])))
+
+    # 款式编码取「这条链接下全部 SKU」的，不是「本期出了单的那几个」。
+    #
+    # 模板《V1-净利》的算法是：
+    #   TEXTJOIN("/", TRUE, UNIQUE(FILTER(链接资料!A:A, 链接资料!B:B=商品ID, "")))
+    # 它查的是链接资料表（该链接的全部 SKU），跟本期有没有出单无关。
+    # 少算了会让报表上的款式编码看着不对——用户一眼就能看出来。
+    for l in lines:
+        if not l.product_id:
+            continue
+        full = sku_index.styles_of(l.product_id)
+        if full:
+            l.style_codes = full
 
 
 def attach_costs(lines: list[OrderLine], costs: dict[str, float], issues: list[str]) -> None:

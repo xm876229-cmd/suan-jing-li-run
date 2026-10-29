@@ -997,6 +997,14 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     const saved = await uploadToBridge(`sku_list_商品管理_${today}.json`, bytes.buffer, "mapping");
     log(`   已保存：${saved.path}（${skus.length} 个 SKU）`);
     done.push(`商品管理 ${skus.length} 条`);
+    // 同一批数据顺便存一份「链接资料」：报表的款式编码列靠它，
+    // 不用再单独抓一次接口，也不用手工下载后台的表。
+    try {
+      const linkSaved = await saveLinkInfoCsv(skus, today, log);
+      if (linkSaved) done.push(`链接资料 ${linkSaved.sku_count} 条`);
+    } catch (e) {
+      log(`   链接资料导出失败（不影响其余取数）：${(e && e.message) || e}`);
+    }
   } catch (e) {
     log(`   商品管理接口失败：${(e && e.message) || e}`);
   }
@@ -1031,6 +1039,95 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   await skSet({ skuCache: { at: Date.now(), items: null } });
   log(`映射取数完成：${done.join(" + ")}`);
   return { via: done.join(" + ") };
+}
+
+// ---------------- 任务：链接资料 ----------------
+
+/**
+ * 链接资料：报表上「款式编码」那一列的来源。
+ *
+ * 平台后台下载的「批量编辑 / 商品信息」表长这样：
+ *     product_id | category | product_name | sku_id | variation_value | price | seller_sku
+ * 它**没有款式编码列**——那一列是卖家自己加的。
+ * 但款式编码就藏在 seller_sku 的第一段里：
+ *     V27-White-10Pcs   → V27
+ *     MY-J68-22cm+clip  → MY-J68
+ *     V1【Set-LOVE】    → V1
+ * 所以自动取数时按同样的规则推导一份，不用手工维护。
+ *
+ * 数据源用的是商品管理的 SKU 全量接口——它带 seller_sku，且覆盖
+ * 所有链接（包括当期没出单的），跟后台下载的表是同一批数据。
+ */
+function deriveStyleCode(sellerSku) {
+  const s = String(sellerSku || "").trim();
+  if (!s) return "";
+  // 两段式（MY-J68）要保留两段，所以先试「字母前缀-字母+数字」整段
+  let m = s.match(/^([A-Za-z]{1,3}-[A-Za-z]+\d*)(?=[-\[【（(\s]|$)/);
+  if (m) return m[1].trim();
+  m = s.match(/^([^\-\[【（(\s]+)/);
+  return m ? m[1].trim() : "";
+}
+
+/**
+ * 把商品管理的 SKU 列表存成「链接资料」CSV（含推导出的款式编码）。
+ *
+ * 与后台下载的「批量编辑 / 商品信息」表同格式，程序按表头认。
+ * 抽成函数是为了让「取商品 SKU」和「只取链接资料」两条路共用同一份逻辑。
+ */
+async function saveLinkInfoCsv(skus, today, log) {
+  const rows = [];
+  const seen = new Set();
+  for (const it of skus || []) {
+    const sid = String(it.sku_id || it.skuId || "");
+    const pid = String(it.product_id || it.productId || "");
+    if (!sid || !pid || seen.has(sid)) continue;
+    seen.add(sid);
+    rows.push({
+      sku_id: sid,
+      product_id: pid,
+      seller_sku: String(it.seller_sku || it.sellerSku || ""),
+      product_name: String(it.product_title || it.productTitle || ""),
+      style_code: deriveStyleCode(it.seller_sku || it.sellerSku || ""),
+    });
+  }
+  if (!rows.length) return null;
+
+  const head = "sku_id,product_id,seller_sku,product_name,style_code";
+  const esc = (v) => {
+    const t = String(v == null ? "" : v);
+    return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  };
+  const csv = head + "\n"
+    + rows.map((r) => [r.sku_id, r.product_id, r.seller_sku, r.product_name, r.style_code]
+      .map(esc).join(",")).join("\n");
+  const bytes = new TextEncoder().encode(csv);
+  const saved = await uploadToBridge(`链接资料_${today}.csv`, bytes.buffer, "mapping");
+  if (log) log(`   链接资料已保存：${saved.path}（${rows.length} 个 SKU）`);
+
+  // 统计一下，方便核对
+  const byLink = new Map();
+  for (const r of rows) {
+    if (!r.style_code) continue;
+    if (!byLink.has(r.product_id)) byLink.set(r.product_id, new Set());
+    byLink.get(r.product_id).add(r.style_code);
+  }
+  const multi = Array.from(byLink.values()).filter((s) => s.size > 1).length;
+  return { sku_count: rows.length, link_count: byLink.size, multi_count: multi };
+}
+
+async function runLinkInfo(range, log, opts = {}) {
+  const host = await ensureHost("seller", log);
+  const today = shiftDate(new Date().toISOString().slice(0, 10), 0);
+
+  log("取商品管理全量 SKU（含链接资料与款式编码）…");
+  const skus = await pagePullSkuFromProductList(host, log);
+  if (!skus.length) throw new Error("商品管理接口返回 0 个 SKU");
+
+  const r = await saveLinkInfoCsv(skus, today, log);
+  if (!r) throw new Error("商品管理接口里没读到 sku_id / product_id");
+  log(`链接资料完成：${r.sku_count} 个 SKU / ${r.link_count} 条链接`
+    + `（${r.multi_count} 条含多个款式编码）`);
+  return r;
 }
 
 // ---------------- 任务：联盟佣金 ----------------
@@ -2108,18 +2205,24 @@ async function consumePending() {
 const TASK_IMPL = {
   orders: runOrders,
   sku: runSkuStats,
+  // 链接资料：报表「款式编码」列的来源。跟 sku 取的是同一个接口，
+  // 但单独跑一份 CSV，界面上「链接资料」页可以单独导入/更新。
+  link: runLinkInfo,
   // 这两个改走「规格驱动」：扩展不再写死接口，
   // 规格见 config/api_specs.json（改取数逻辑不用刷新扩展）
   affiliate: (range, log) => runSpecTask("affiliate", range, log),
   ads: (range, log) => runSpecTask("ads", range, log),
 };
-const TASK_HINT = { orders: "seller", sku: "seller", affiliate: "affiliate", ads: "seller" };
+const TASK_HINT = { orders: "seller", sku: "seller", link: "seller", affiliate: "affiliate", ads: "seller" };
 
 async function runTask(task, range, log, opts = {}) {
   if (task === "all") {
     const out = {};
     // 广告排在最后：它只查已完成任务，不会阻塞前面的取数；
-    // 剩下三个是算净利必需的，任何一个失败都不影响其余继续跑。
+    // 剩下几个是算净利必需的，任何一个失败都不影响其余继续跑。
+    //
+    // link（链接资料）不在这个列表里：它跟 sku 抓的是同一个接口，
+    // 重复抓一遍纯属浪费。sku 跑完会自动带出链接资料。
     for (const t of ["orders", "sku", "affiliate", "ads"]) {
       try {
         log(`—— 开始：${t} ——`);

@@ -352,6 +352,17 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .cfg-tbl td{padding:8px 12px}
   .cfg-tbl input[type=text],.cfg-tbl input[type=number]{min-width:0;width:100%;padding:6px 8px;font-size:12.5px}
   .cfg-tbl tr.off td{opacity:.42}
+  /* 公式单元格：可多行（候选标题一行一个）+ 下方实时提示 */
+  .cfg-tbl td.expr-cell{vertical-align:top}
+  .cfg-tbl td.expr-cell textarea{
+    font-size:12px;line-height:1.5;padding:6px 8px;border:1px solid var(--line);
+    border-radius:6px;background:#fff;color:var(--text-1);min-height:38px}
+  .cfg-tbl td.expr-cell textarea:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 2px rgba(31,59,77,.08)}
+  .expr-tools{display:flex;align-items:center;gap:8px;margin-top:4px}
+  .expr-tools .mini{padding:2px 8px;font-size:11.5px}
+  .expr-hint{font-size:11.5px;color:var(--text-2);line-height:1.45;flex:1}
+  .expr-hint.bad{color:var(--warn)}
   /* 快照多选清单 */
   .snap-list{border:1px solid var(--line);border-radius:10px;background:#fff;
     max-height:186px;overflow-y:auto;padding:4px 0}
@@ -519,7 +530,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.21.0</span></div>
+      <div class="row"><span>版本</span><span>0.21.1</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -622,6 +633,24 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <p>在战斧里登录过的店铺会自动出现在这里。名字可以自己改，只有你自己看得到——底下那串 ID 才是唯一标识。</p></div>
       <div class="card"><h2>所有店铺<span class="hint" id="store-hint"></span></h2>
         <div class="body tight" id="store-list"><div class="empty">加载中…</div></div></div>
+      <div class="card"><h2>链接资料（款式编码）<span class="hint">报表上那列「款式编码」靠它</span></h2>
+        <div class="body">
+          <p class="muted" style="font-size:12.5px;margin:0 0 12px">
+            在店铺后台点「批量编辑」下载<b>链接资料</b>（商品信息表），在这里传上来。
+            程序会读出每条链接下的所有款式编码，报表里那条链接就显示成
+            <span class="mono">V1/V2/V61</span> 这样的样子。<br>
+            店铺后台下载的表<b>没有款式编码那一列</b>，程序会从商家 SKU 推导
+            （<span class="mono">V27-White-10Pcs</span> → <span class="mono">V27</span>），
+            跟你手工维护的那列效果一致。
+          </p>
+          <div class="tools">
+            <label class="mini-btn">选择链接资料表
+              <input type="file" id="link-file" accept=".xlsx,.xls,.csv" hidden></label>
+            <button class="primary" id="btn-link-import">导入</button>
+          </div>
+          <div class="note" id="link-note"></div>
+          <div id="link-stat" class="muted" style="font-size:12px;margin-top:10px"></div>
+        </div></div>
       <div class="card"><h2>怎么识别店铺</h2><div class="body tight"><div class="kv">
         <div>识别方式</div><div>扩展在店铺页面里调平台的账号接口，取 shop_id、店铺名、国家</div>
         <div>为什么用 ID</div><div>店铺名可能重名、也可能改；shop_id 是平台给的唯一号，不会变</div>
@@ -689,27 +718,46 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
       <div class="card"><h2>公式里能写什么<span class="hint">点一下就插到刚编辑的公式里</span></h2>
         <div class="body">
-          <div class="kv" style="margin-bottom:14px;border:1px solid var(--line);border-radius:10px;overflow:hidden">
+          <div style="border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:14px">
+            <div style="padding:12px 16px;background:#fcfcfa;border-bottom:1px solid var(--line-soft)">
+              <b>公式长什么样</b>：用 <span class="mono">*</span>（乘）、
+              <span class="mono">+</span>（加）、<span class="mono">-</span>（减）、
+              <span class="mono">/</span>（除）把东西算出来。
+              <div style="margin-top:8px;font-size:12.5px;color:var(--text-2)">
+                照着抄这几个就够用了：
+              </div>
+              <div class="mono" style="margin-top:6px;font-size:12px;line-height:1.9">
+                平台佣金　　＝ 本行GMV × 平台佣金率<br>
+                交易手续费　＝ 本行买家实付 × 交易手续费率<br>
+                发单费　　　＝ 本行订单数 × 发单费单价 × 人民币汇率<br>
+                商品成本　　＝ 成本单价 × 人民币汇率
+              </div>
+            </div>
+            <div class="kv">
+            <div>本行 X</div>
+            <div><span class="mono">本行订单数</span>、<span class="mono">本行件数</span>、
+              <span class="mono">本行GMV</span>、<span class="mono">本行买家实付</span>、
+              <span class="mono">本行成本单价</span>。<br>
+              「本行」= 按<b>这一行自己勾选的订单类别</b>算。
+              所以「发单费」只算正常单的话，它的「本行订单数」就只含正常单。</div>
+            <div>费率项</div>
+            <div>费率带「率」字：<span class="mono">平台佣金率</span>、
+              <span class="mono">交易手续费率</span>、<span class="mono">奖金返现率</span>、
+              <span class="mono">发单费单价</span>、<span class="mono">订单服务费单价</span>、
+              <span class="mono">人民币汇率</span>。<br>
+              中文名在「费率」页的「费率项的中文名」里改，改完两边都能用。</div>
+            <div>参数表里别的行</div>
+            <div>直接写那一行的名字，比如 <span class="mono">商品成本</span>、
+              <span class="mono">订单服务费</span>，就是引用它们算出来的金额。</div>
             <div>订单表的列</div>
             <div>写成 <span class="mono">[列标题]</span>。列名会变、换国家就变，
-              所以可以写<b>多个候选，用竖线 | 分开</b>：
-              <span class="mono">[折扣前小计|SKU Subtotal Before Discount|SKU折扣前小计]</span>。
-              程序按顺序挨个找，找到第一个就用它——所以第一个填你常用的，后面填兜底的。
+              所以可以写<b>多个候选，一行一个</b>（点「＋ 加一行」就行）：
+              <div class="mono" style="margin:5px 0;font-size:11.5px;line-height:1.6">
+                [折扣前小计<br>SKU Subtotal Before Discount<br>SKU折扣前小计]
+              </div>
+              程序按顺序挨个找，找到第一个就用它——第一个填你常用的，后面填兜底的。
               找不到任何一个，这项按 0 计，并在报表「异常」页列出来。</div>
-            <div>内置量</div>
-            <div><span class="mono">订单数</span>（分摊到这条链接的）、
-              <span class="mono">件数</span>、<span class="mono">GMV</span>、
-              <span class="mono">买家实付</span>、<span class="mono">成本单价</span>、
-              <span class="mono">广告花费</span>、<span class="mono">达人佣金</span>。
-              括号里是英文原名，认不出来看英文就行。</div>
-            <div>费率项</div>
-            <div>直接写中文名，比如 <span class="mono">平台佣金</span>、
-              <span class="mono">交易手续费</span>、<span class="mono">发单费</span>、
-              <span class="mono">人民币汇率</span>。
-              中文名在「费率」页的「费率项的中文名」里改，改完两边都能用。</div>
-            <div>算出来的别的参数</div>
-            <div>直接写表格里那一行的名字，比如 <span class="mono">商品成本</span>、
-              <span class="mono">订单服务费</span>，就是引用它们算出来的金额。</div>
+            </div>
           </div>
           <div class="vars" id="vars"></div>
         </div></div>
@@ -717,7 +765,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="card"><h2>订单表识别<span class="hint">程序靠这几列判断订单类型、找链接、对成本</span></h2>
         <div class="body tight"><div class="tbl-wrap">
           <table class="cfg-tbl" id="oftbl"><thead><tr>
-            <th style="width:210px">用途</th><th>订单表里的标题（多个候选用 | 分开，按顺序试）</th>
+            <th style="width:210px">用途</th><th>订单表里的标题（多个候选一行一个，按顺序试）</th>
           </tr></thead><tbody id="ofbody"></tbody></table>
         </div></div>
         <div class="body" style="padding-top:0">
@@ -731,15 +779,18 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="card"><h2>净利怎么算<span class="hint">这一条也可以改</span></h2>
         <div class="body tight"><div class="tbl-wrap">
           <table class="cfg-tbl" id="ftbl"><thead><tr>
-            <th style="width:170px">结果</th><th>公式</th><th style="width:40px"></th>
+            <th style="width:170px">结果</th><th>公式（可直接写中文）</th><th style="width:40px"></th>
           </tr></thead><tbody id="fbody"></tbody></table>
         </div></div>
         <div class="body" style="padding-top:0">
           <p class="muted" style="font-size:12.5px;margin:0">
             默认就是把上面每一项减掉：
-            <span class="mono">net = gmv - cost - dispatch - platform_commission - tx_fee
-            - cashback - ads - affiliate - order_service</span>。
-            你在参数表里新增了一项，记得也把它加进这一行。
+            <span class="mono">净利 = GMV - 商品成本 - 发单费 - 平台佣金 - 交易手续费
+            - 奖金返现 - 广告花费 - 达人佣金 - 订单服务费</span>。
+            你在参数表里新增了一项，记得也把它加进这一行。<br>
+            这里也能用中文：参数表里那一行的名字直接写（<span class="mono">商品成本</span>），
+            费率写成「…率」（<span class="mono">平台佣金率</span>），
+            「净利」这种结果名也能直接引用。
           </p>
         </div>
       </div>
@@ -1309,6 +1360,43 @@ if($('#imp-store')) $('#imp-store').onchange = () => {
   if(s && s.country) $('#imp-country').value = s.country;
 };
 
+/** 导入店铺后台下载的「链接资料」表，读出每条链接的款式编码。 */
+if($('#btn-link-import')) $('#btn-link-import').onclick = async () => {
+  const inp = $('#link-file');
+  const btn = $('#btn-link-import'), n = $('#link-note'), st = $('#link-stat');
+  const f = inp && inp.files && inp.files[0];
+  if(!f){ note(n, '先选一个文件', 'err'); return; }
+  btn.disabled = true;
+  note(n, '正在读取…', 'ok');
+  try{
+    const b64 = await fileToB64(f);
+    const r = await fetch('/api/link-info', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: f.name, b64}),
+    });
+    const j = await r.json();
+    if(!j.ok){
+      note(n, '导入失败：' + (j.error || '未知原因'), 'err');
+      st.textContent = '';
+      return;
+    }
+    note(n, `导入成功：${j.sku_count} 个 SKU / ${j.link_count} 条链接`, 'ok');
+    const rows = (j.samples || []).map(x =>
+      `<tr><td class="mono" style="font-size:11.5px">${esc(x.link)}</td>
+       <td><b>${esc(x.styles)}</b></td></tr>`).join('');
+    st.innerHTML = j.multi_count
+      ? `其中 <b>${j.multi_count}</b> 条链接含多个款式编码（已用 / 连接）。下面是前几条：`
+      : '下面是前几条链接的款式编码：';
+    st.innerHTML += rows
+      ? `<table style="margin-top:8px;width:auto"><tbody>${rows}</tbody></table>`
+      : '';
+  }catch(e){
+    note(n, '出错：' + e.message, 'err');
+  }
+  btn.disabled = false;
+  if(inp) inp.value = "";
+};
+
 /** 列出这家店已有的取数快照，供「用哪次数据」多选使用。
  *  可勾选多份一起算——跨快照重复的订单只算一次（重叠以最新为准）。 */
 let snapStore = '';
@@ -1553,15 +1641,23 @@ const COURSE_LABELS = {
 };
 
 // 除了 [标题] 之外，还能写在公式里的「算好的量」
+/** 「净利怎么算」那几行的中文名（跟 src/formula.py 的 FORMULA_CN 对应）。 */
+const FORMULA_CN = {
+  gross_profit: '毛利',
+  total_fees: '费用合计',
+  net: '净利',
+  net_rate: '净利率',
+};
+
 const FIELD_VARS = [
-  {k: 'gmv', t: 'GMV = Σ折扣前小计 − Σ卖家折扣', cn: 'GMV'},
-  {k: 'paid', t: '买家实付合计', cn: '买家实付'},
-  {k: 'qty', t: '件数', cn: '件数'},
-  {k: 'orders', t: '订单数（按 SKU 行数分摊）', cn: '订单数'},
-  {k: 'cost_cny', t: '商品成本（人民币）', cn: '成本单价'},
-  {k: 'cost', t: '商品成本（当地货币）', cn: '商品成本'},
-  {k: 'cost_unit', t: '平均成本单价（人民币）', cn: '平均成本单价'},
-  {k: 'refund', t: '退款金额', cn: '退款金额'},
+  {k: 'gmv', t: 'GMV = Σ折扣前小计 − Σ卖家折扣', cn: '本行GMV'},
+  {k: 'paid', t: '买家实付合计', cn: '本行买家实付'},
+  {k: 'qty', t: '件数', cn: '本行件数'},
+  {k: 'orders', t: '订单数（按 SKU 行数分摊）', cn: '本行订单数'},
+  {k: 'cost_cny', t: '商品成本（人民币）', cn: '本行成本单价'},
+  {k: 'cost', t: '商品成本（当地货币）', cn: '本行商品成本'},
+  {k: 'cost_unit', t: '平均成本单价（人民币）', cn: '本行平均成本单价'},
+  {k: 'refund', t: '退款金额', cn: '本行退款金额'},
   {k: 'commission', t: '达人佣金（整期）', cn: '达人佣金'},
   {k: 'ads', t: '广告花费（整期）', cn: '广告花费'},
 ];
@@ -1796,9 +1892,15 @@ function renderParams(){
           kinds === null ? '<span class="tag">全部</span>'
           : (kinds.length === 0 ? '<span class="tag warn">不算</span>' : '')}</div>
       </td>
-      <td><input type="text" data-expr="${i}" value="${esc(r.expr || '')}"
-            placeholder="如 orders * params.dispatch_fee_cny * params.cny_to_local"
-            style="font-family:ui-monospace,Consolas,monospace"></td>
+      <td class="expr-cell">
+        <textarea data-expr="${i}" rows="2"
+          placeholder="如：本行订单数 * 发单费单价 * 人民币汇率"
+          style="font-family:ui-monospace,Consolas,monospace;width:100%;resize:vertical"></textarea>
+        <div class="expr-tools">
+          <button class="mini" data-addline="${i}" title="在光标处加一行（多个候选标题一行一个）">＋ 加一行</button>
+          <span class="expr-hint" data-hint="${i}"></span>
+        </div>
+      </td>
       ${kc}
       <td class="kcell"><input type="checkbox" data-on="${i}" ${r.enabled !== false ? 'checked' : ''}
             style="width:15px;height:15px;accent-color:var(--accent);cursor:pointer"></td>
@@ -1807,11 +1909,40 @@ function renderParams(){
     </tr>`;
   }).join('');
 
+  // textarea 的内容要放在 innerHTML 之后设，否则换行会被当成 HTML 空白吃掉
+  body.querySelectorAll('[data-expr]').forEach(inp => {
+    inp.value = rows[Number(inp.dataset.expr)].expr || '';
+  });
+
   body.querySelectorAll('[data-label]').forEach(inp =>
     inp.oninput = () => { rows[Number(inp.dataset.label)].label = inp.value; });
   body.querySelectorAll('[data-expr]').forEach(inp => {
-    inp.oninput = () => { rows[Number(inp.dataset.expr)].expr = inp.value; };
+    const i = Number(inp.dataset.expr);
+    inp.oninput = () => {
+      rows[i].expr = inp.value;
+      checkExpr(i);
+    };
     inp.onfocus = () => { lastFormulaInput = inp; };
+    inp.onblur = () => { checkExpr(i); };
+    checkExpr(i);
+  });
+  // 「＋ 加一行」：在光标处插一个换行，把候选标题拆成多行写
+  body.querySelectorAll('[data-addline]').forEach(b => b.onclick = () => {
+    const i = Number(b.dataset.addline);
+    const inp = body.querySelector(`[data-expr="${i}"]`);
+    if(!inp){ toast('先点一下要编辑的公式框'); return; }
+    inp.focus();
+    const s = inp.selectionStart ?? inp.value.length;
+    // 前面是「[」就紧跟着换行，否则先补一个逗号再换行
+    const before = inp.value.slice(0, s);
+    // 在方括号里（还没闭合）→ 直接换行，一行一个候选；
+    // 在方括号外面 → 先补个逗号再换行，免得拼成两个词。
+    const inBracket = before.lastIndexOf('[') > before.lastIndexOf(']');
+    const ins = (inBracket ? '' : ',') + '\n';
+    inp.value = before + ins + inp.value.slice(inp.selectionEnd ?? s);
+    rows[i].expr = inp.value;
+    inp.selectionStart = inp.selectionEnd = s + ins.length;
+    checkExpr(i);
   });
   body.querySelectorAll('[data-k]').forEach(cb => cb.onchange = () => {
     const [i, k] = cb.dataset.k.split(':');
@@ -1844,16 +1975,39 @@ function renderOrderFields(){
     const label = (v && v.label) || COURSE_LABELS[k] || k;
     return `<tr>
       <td>${esc(label)}<div class="pid">${esc(k)}</div></td>
-      <td><input type="text" data-of="${esc(k)}" value="${esc(titles.join(' | '))}"
-            placeholder="多个候选用 | 分开"></td>
+      <td class="expr-cell">
+        <textarea data-of="${esc(k)}" rows="2" placeholder="多个候选，一行一个"></textarea>
+        <div class="expr-tools">
+          <button class="mini" data-ofadd="${esc(k)}">＋ 加一行</button>
+          <span class="expr-hint">按顺序挨个找，找到第一个就用它</span>
+        </div>
+      </td>
     </tr>`;
   }).join('');
-  $('#ofbody').querySelectorAll('[data-of]').forEach(inp => inp.oninput = () => {
+  // textarea 内容要在 innerHTML 之后设，否则换行会被当成 HTML 空白吃掉
+  $('#ofbody').querySelectorAll('[data-of]').forEach(inp => {
     const k = inp.dataset.of;
-    const of2 = cur().order_fields;
-    const titles = inp.value.split('|').map(x => x.trim()).filter(Boolean);
-    if(!of2[k] || Array.isArray(of2[k])) of2[k] = {label: COURSE_LABELS[k] || k, titles};
-    else of2[k].titles = titles;
+    const v = cur().order_fields[k] || {};
+    const titles = Array.isArray(v) ? v : (v.titles || []);
+    inp.value = titles.join('\n');
+    inp.oninput = () => {
+      const of2 = cur().order_fields;
+      // 一行一个候选；顺带兼容旧的竖线写法
+      const list = inp.value.split(/[\n\r|]+/).map(x => x.trim()).filter(Boolean);
+      if(!of2[k] || Array.isArray(of2[k])) of2[k] = {label: COURSE_LABELS[k] || k, titles: list};
+      else of2[k].titles = list;
+    };
+  });
+  $('#ofbody').querySelectorAll('[data-ofadd]').forEach(b => b.onclick = () => {
+    const k = b.dataset.ofadd;
+    const inp = $('#ofbody').querySelector(`[data-of="${CSS.escape(k)}"]`);
+    if(!inp){ toast('先点一下要编辑的框'); return; }
+    inp.focus();
+    const s = inp.selectionStart ?? inp.value.length;
+    const ins = (inp.value.slice(0, s).trimEnd().endsWith('\n') || s === 0) ? '' : '\n';
+    inp.value = inp.value.slice(0, s) + ins + inp.value.slice(inp.selectionEnd ?? s);
+    inp.selectionStart = inp.selectionEnd = s + ins.length;
+    inp.oninput && inp.oninput();
   });
 }
 
@@ -1910,25 +2064,168 @@ function renderVars(){
   box.querySelectorAll('[data-ins]').forEach(el => el.onclick = () => insertVar(el.dataset.ins));
 }
 
+/** 公式实时校验：把公式翻译成人话，并指出不认识的词。
+ *
+ *  用户看英文公式最头疼的就是「这玩意儿到底算的啥」。
+ *  这里直接在输入框下面写出来：用了哪些量、乘了什么、有没有写错的词。
+ */
+function checkExpr(i){
+  const box = document.querySelector(`[data-hint="${i}"]`);
+  if(!box) return;
+  const rows = rowsOf();
+  const r = rows[i];
+  const raw = String((r && r.expr) || '').trim();
+  if(!raw){ box.textContent = ''; box.className = 'expr-hint'; return; }
+
+  // 已知的词：内置量、费率项、参数表那一行、订单表列标题
+  const known = new Map();
+  FIELD_VARS.forEach(v => {
+    if(v.cn) known.set(v.cn, v.t);
+    // 「本行GMV」的「GMV」也算认识（参数表里有一行就叫 GMV（收入））
+    if(v.cn && v.cn.startsWith('本行')) known.set(v.cn.slice(2), v.t);
+  });
+  varRates.forEach(k => known.set(rateCn(k), '费率：' + rateCn(k)));
+  rowsOf().filter(x => x.id).forEach(x => {
+    const lb = (x.label || x.id).trim();
+    known.set(lb, '参数表里「' + lb + '」那一项');
+  });
+  headers.forEach(h => known.set(h, '订单表的列'));
+
+  // 找出用到的词
+  const used = [];
+  const unknown = [];
+  // 先把方括号里的候选标题摘出来（那些是订单表列）
+  const cols = [];
+  let s = raw.replace(/\[([^\[\]]+)\]/g, (m, inner) => {
+    inner.split(/[,;|，；\n\r]+/).forEach(c => {
+      const t = c.trim();
+      if(t) cols.push(t);
+    });
+    return ' \u0001 ';
+  });
+  // 再按「中文词 / 英文标识」切出来
+  const tokens = s.match(/[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*|[一-龥A-Za-z_][一-龥A-Za-z0-9_ ]*/g) || [];
+  tokens.forEach(t => {
+    const w = t.trim();
+    if(!w || w === '\u0001') return;
+    if(known.has(w)){ if(!used.includes(w)) used.push(w); return; }
+    // 英文标识：内置量英文名 / params.字段 / param.字段
+    const BUILTIN_EN = ['gmv','paid','qty','orders','order_count','items',
+      'cost_cny','cost','cost_unit','refund','commission','ads'];
+    if(BUILTIN_EN.includes(w)) return;
+    if(/^params\.[A-Za-z0-9_]+$/.test(w)){
+      const f = w.split('.')[1];
+      if(varRates.includes(f)) return;
+      unknown.push(w); return;
+    }
+    if(/^param\.[A-Za-z0-9_]+$/.test(w)) return;
+    // 修饰过的中文词（如「本行订单数」）剥掉「本行」再找
+    if(w.startsWith('本行') && known.has(w.slice(2))){
+      if(!used.includes(w)) used.push(w);
+      return;
+    }
+    unknown.push(w);
+  });
+  cols.forEach(c => {
+    const hit = headers.some(h => h === c);
+    if(!hit && !unknown.includes(c)) unknown.push(c);
+  });
+
+  const parts = [];
+  if(used.length) parts.push('＝ ' + used.join(' × '));
+  if(cols.length) parts.push('订单表列：' + cols.join(' / '));
+  if(unknown.length){
+    box.className = 'expr-hint bad';
+    box.textContent = '⚠ 不认识：' + unknown.join('、') + (parts.length ? '　' + parts.join('　') : '');
+    return;
+  }
+  box.className = 'expr-hint';
+  box.textContent = parts.join('　') || '（还没写内容）';
+}
+
 function renderFormulas(){
   const keys = Object.keys(fmls);
   $('#fbody').innerHTML = keys.map((k, i) => `<tr>
-    <td><span class="mono" style="font-size:12.5px">${esc(k)}</span></td>
-    <td><input type="text" data-fi="${i}" value="${esc(fmls[k])}"
-         style="font-family:ui-monospace,Consolas,monospace"></td>
+    <td><span style="font-size:12.5px">${esc(FORMULA_CN[k] || k)}</span>
+        <div class="pid">${esc(k)}</div></td>
+    <td class="expr-cell">
+      <textarea data-fi="${i}" rows="2"
+        style="font-family:ui-monospace,Consolas,monospace;width:100%;resize:vertical"></textarea>
+      <div class="expr-tools">
+        <button class="mini" data-fadd="${i}" title="在光标处加一行">＋ 加一行</button>
+        <span class="expr-hint" data-fhint="${i}"></span>
+      </div>
+    </td>
     <td><button class="mini" data-fdel="${i}"
          style="padding:3px 7px;font-size:12px;color:var(--warn)">删</button></td>
   </tr>`).join('');
   $('#fbody').querySelectorAll('[data-fi]').forEach(inp => {
-    inp.oninput = () => { fmls[Object.keys(fmls)[Number(inp.dataset.fi)]] = inp.value; };
+    inp.value = fmls[Object.keys(fmls)[Number(inp.dataset.fi)]] || '';
+    inp.oninput = () => {
+      fmls[Object.keys(fmls)[Number(inp.dataset.fi)]] = inp.value;
+      checkFml(Number(inp.dataset.fi));
+    };
     inp.onfocus = () => { lastFormulaInput = inp; };
+    checkFml(Number(inp.dataset.fi));
+  });
+  $('#fbody').querySelectorAll('[data-fadd]').forEach(b => b.onclick = () => {
+    const i = Number(b.dataset.fadd);
+    const inp = $('#fbody').querySelector(`[data-fi="${i}"]`);
+    if(!inp){ toast('先点一下要编辑的公式框'); return; }
+    inp.focus();
+    const s = inp.selectionStart ?? inp.value.length;
+    const ins = '\n';
+    inp.value = inp.value.slice(0, s) + ins + inp.value.slice(inp.selectionEnd ?? s);
+    fmls[Object.keys(fmls)[i]] = inp.value;
+    inp.selectionStart = inp.selectionEnd = s + ins.length;
+    checkFml(i);
   });
   $('#fbody').querySelectorAll('[data-fdel]').forEach(b => b.onclick = () => {
     const k = Object.keys(fmls)[Number(b.dataset.fdel)];
-    if(!confirm('删掉公式「' + k + '」？')) return;
+    if(!confirm('删掉公式「' + (FORMULA_CN[k] || k) + '」？')) return;
     delete fmls[k];
     renderFormulas();
   });
+}
+
+/** 净利公式区的实时提示。跟参数表那套一样，只是变量来源不同。 */
+function checkFml(i){
+  const box = document.querySelector(`[data-fhint="${i}"]`);
+  if(!box) return;
+  const k = Object.keys(fmls)[i];
+  const raw = String(fmls[k] || '').trim();
+  if(!raw){ box.textContent = ''; box.className = 'expr-hint'; return; }
+  const known = new Set();
+  FIELD_VARS.forEach(v => {
+    if(v.cn) known.add(v.cn);
+    if(v.cn && v.cn.startsWith('本行')) known.add(v.cn.slice(2));
+  });
+  varRates.forEach(x => known.add(rateCn(x)));
+  rowsOf().filter(x => x.id).forEach(x => known.add((x.label || x.id).trim()));
+  Object.keys(FORMULA_CN).forEach(x => known.add(FORMULA_CN[x]));
+  ['gmv','paid','qty','orders','order_count','items','cost_cny','cost',
+   'cost_unit','refund','commission','ads','net','gross_profit',
+   'total_fees','net_rate'].forEach(x => known.add(x));
+
+  const unknown = [];
+  (raw.match(/[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*|[一-龥]+/g) || []).forEach(t => {
+    const w = t.trim();
+    if(!w || known.has(w)) return;
+    if(/^params\.[A-Za-z0-9_]+$/.test(w)){
+      const f = w.split('.')[1];
+      if(varRates.includes(f)) return;
+    }
+    if(/^param\.[A-Za-z0-9_]+$/.test(w)) return;
+    if(w.startsWith('本行') && known.has(w.slice(2))) return;
+    if(!unknown.includes(w)) unknown.push(w);
+  });
+  if(unknown.length){
+    box.className = 'expr-hint bad';
+    box.textContent = '⚠ 不认识：' + unknown.join('、');
+    return;
+  }
+  box.className = 'expr-hint';
+  box.textContent = '＝ ' + raw;
 }
 
 function paramPayload(){
