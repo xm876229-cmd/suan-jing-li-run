@@ -177,12 +177,15 @@
       ]
     }
   },
+  "ads_fields": {},
+  "affiliate_fields": {},
+  "mapping_fields": {},
   "params": [
     {
       "id": "gmv",
       "label": "GMV（收入）",
       "role": "gmv",
-      "expr": "[折扣前小计,SKU Subtotal Before Discount,SKU折扣前小计] - [卖家折扣,SKU Seller Discount,SKU卖家折扣]",
+      "expr": "本行GMV",
       "kinds": [
         "normal",
         "zero_amount"
@@ -192,7 +195,7 @@
       "id": "cost",
       "label": "商品成本",
       "role": "cost",
-      "expr": "成本单价 * 人民币汇率",
+      "expr": "成本单价 * 人民币本地",
       "kinds": [
         "normal",
         "zero_amount"
@@ -233,7 +236,7 @@
     {
       "id": "dispatch",
       "label": "发单费",
-      "expr": "本行订单数 * 发单费单价 * 人民币汇率",
+      "expr": "本行订单数 * 发单费单价 * 人民币本地",
       "kinds": [
         "normal",
         "refunded",
@@ -260,12 +263,14 @@
     {
       "id": "ads",
       "label": "广告花费",
-      "expr": "广告花费"
+      "expr": "广告花费",
+      "kinds": null
     },
     {
       "id": "affiliate",
       "label": "达人佣金",
-      "expr": "达人佣金"
+      "expr": "达人佣金",
+      "kinds": null
     },
     {
       "id": "cashback",
@@ -279,7 +284,7 @@
     {
       "id": "order_service",
       "label": "订单服务费",
-      "expr": "本行订单数 * 订单服务费单价",
+      "expr": "本行订单数 * 订单服务费",
       "kinds": [
         "normal",
         "refunded"
@@ -291,6 +296,5 @@
     "total_fees": "发单费 + 平台佣金 + 交易手续费 + 奖金返现 + 广告花费 + 达人佣金 + 订单服务费",
     "net": "GMV - 商品成本 - 发单费 - 平台佣金 - 交易手续费 - 奖金返现 - 广告花费 - 达人佣金 - 订单服务费",
     "net_rate": "净利 / GMV"
-  },
-  "by_country": {}
+  }
 }

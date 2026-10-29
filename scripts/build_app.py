@@ -183,6 +183,16 @@ def build_app() -> Path:
         src = ROOT / name
         if src.exists():
             shutil.copy2(src, out / name)
+
+    # 成本主表 / 映射主表也带进发布包：安装版和免安装版开箱就是最新成本，
+    # 不用再让用户重新导一遍。抓包原始数据（很大）不带。
+    for sub in ("costs", "mapping"):
+        f = _paths.DATA / sub / "master.csv"
+        if f.is_file():
+            dst = out / "数据" / sub / "master.csv"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dst)
+            print(f"[OK] 带上 数据/{sub}/master.csv（{f.stat().st_size / 1024:.0f} KB）")
     # 源码模式的入口脚本也收进 _internal，顶层只留 jingli.exe
     if (ROOT / "jingli.py").exists():
         (out / "_internal" / "源码").mkdir(parents=True, exist_ok=True)
