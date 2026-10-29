@@ -934,7 +934,9 @@ async function pagePullSkuByExport(host, start, endExclusive) {
 }
 
 async function pagePullSkuRanged(host, start, endExclusive, log) {
-  const MAX_TRIES = [3, 1];     // 先按 3 天切，仍失败就按天
+  // 只按 3 天切一次。以前还会再按 1 天切 21 段重试，但实测两边返回的都是
+  // 同一个 code=98001021（平台下游错误），跟区间大小无关，纯粹多花一分多钟。
+  const MAX_TRIES = [3];
 
   for (const chunk of MAX_TRIES) {
     const segs = splitDateRange(start, endExclusive, chunk);
@@ -978,7 +980,7 @@ async function pagePullSkuRanged(host, start, endExclusive, log) {
       if (rebound.size) log(`注意：区间内有 ${rebound.size} 个 SKU 改绑过商品`);
       return Array.from(bySku.values());
     }
-    log(`按 ${chunk} 天切段仍全部失败，换更细的粒度…`);
+    log(`按 ${chunk} 天切段仍全部失败（平台返回下游错误，与区间大小无关）`);
   }
   return [];
 }
@@ -2217,8 +2219,27 @@ const TASK_IMPL = {
   link: runLinkInfo,
   // 这两个改走「规格驱动」：扩展不再写死接口，
   // 规格见 config/api_specs.json（改取数逻辑不用刷新扩展）
-  affiliate: (range, log) => runSpecTask("affiliate", range, log),
-  ads: (range, log) => runSpecTask("ads", range, log),
+  //
+  // 但规格接口会受平台版本/风控影响（返回 code=3 / code=10000 之类）。
+  // 那种情况不要直接判死：广告还能靠「导出任务」下载用户点过导出的文件，
+  // 联盟还能靠页面上的明细接口，所以失败后回退到老的完整实现。
+  affiliate: async (range, log) => {
+    try {
+      return await runSpecTask("affiliate", range, log);
+    } catch (e) {
+      log(`   规格接口不可用（${(e && e.message) || e}），改走联盟页面方式…`);
+      return runAffiliate(range, log);
+    }
+  },
+  ads: async (range, log) => {
+    try {
+      return await runSpecTask("ads", range, log);
+    } catch (e) {
+      log(`   规格接口不可用（${(e && e.message) || e}），改下广告导出任务…`);
+      // 只查一轮：有用户点过导出的成品就下，没有就跳过，不空等 5 分钟
+      return runAds(range, log, { noDirect: true, quick: true });
+    }
+  },
 };
 const TASK_HINT = { orders: "seller", sku: "seller", link: "seller", affiliate: "affiliate", ads: "seller" };
 
