@@ -465,6 +465,14 @@ _TEMPLATE = r"""<!DOCTYPE html>
     background:var(--bg,#f7f7f5);padding:6px 0 10px}
   #ptabs .mini{font-size:13px;padding:7px 15px;border-radius:9px}
   .pane[hidden]{display:none}
+
+  /* 导入数据页的拖放区：整块都能接文件，不用瞄准某个小按钮 */
+  .dropzone{border:1.5px dashed var(--line);border-radius:12px;padding:26px 18px;
+    text-align:center;background:#fcfcfa;transition:.15s;cursor:pointer}
+  .dropzone:hover{border-color:var(--accent);background:var(--accent-soft,#f0f7f5)}
+  .dropzone.over{border-color:var(--accent);background:var(--accent-soft,#f0f7f5);
+    box-shadow:0 0 0 3px rgba(15,110,86,.08)}
+  .dropzone b{font-size:13.5px}
 </style>
 </head>
 <body>
@@ -490,6 +498,11 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <circle cx="8" cy="8" r="6"/><path d="M6.6 5.6l4 2.4-4 2.4z" stroke-linejoin="round"/>
         </svg><span>开始核算</span></a>
+      <a href="#/import" data-view="import">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M8 2.6v7.2M5.2 7l2.8 2.8L10.8 7" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M2.8 11.2v1.4a1.6 1.6 0 001.6 1.6h7.2a1.6 1.6 0 001.6-1.6v-1.4" stroke-linecap="round"/>
+        </svg><span>导入数据</span></a>
       <a href="#/reports" data-view="reports">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <path d="M4 2h5l3 3v9a1 1 0 01-1 1H4a1 1 0 01-1-1V3a1 1 0 011-1z" stroke-linejoin="round"/>
@@ -537,7 +550,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.21.6</span></div>
+      <div class="row"><span>版本</span><span>0.21.7</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -560,7 +573,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <section class="page" id="view-run" hidden>
       <div class="head"><h1>开始核算</h1>
         <p>用已经下载到本机的订单数据出报表。选好店铺和日期，点一下就行。
-           自动取数失败时，可以在下面手动导入自己导出的表。</p></div>
+           没有自动取到数据？去左栏<b>「导入数据」</b>传你自己导出的表。</p></div>
       <div class="card"><h2>核算范围</h2><div class="body">
         <div class="chips" id="chips">
           <button data-k="month">本月</button><button data-k="lastmonth">上月</button>
@@ -594,23 +607,74 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="card"><h2>会用到哪些数据<span class="hint" id="run-files-hint"></span></h2>
         <div class="body tight" id="run-files"><div class="empty">读取中…</div></div>
         <div class="body" style="border-top:1px solid var(--line-soft);padding-top:12px">
-          <div class="row" style="gap:8px;align-items:flex-end">
-            <div class="field" style="flex:1"><label>存到哪家店</label>
-              <select id="imp-store"><option value="">未识别店铺（公共目录）</option></select></div>
-            <div class="field" style="width:160px"><label>国家（决定费率与列名）</label>
-              <select id="imp-country"><option value="">跟随店铺</option></select></div>
-            <button class="ghost" id="btn-import" style="width:auto;padding:7px 16px;margin:0">手动导入文件</button>
+          <div class="row" style="gap:12px;align-items:center">
+            <button class="ghost" style="width:auto;padding:7px 16px;margin:0" onclick="go('import')">＋ 导入我自己导出的表</button>
+            <span class="muted" style="font-size:12.5px">自动取数没拿到？去「导入数据」页直接传订单 / 广告 / 联盟佣金 / 链接资料，算法完全一样</span>
           </div>
-          <input type="file" id="imp-file" multiple hidden
-                 accept=".csv,.xlsx,.xls,.txt,.json">
-          <p class="muted" style="font-size:12px;margin:8px 0 0">
-            自动取数失败时用它兜底：自己在 TikTok 后台导出订单 / 广告 / 联盟佣金 / 商品表，
-            在这里传上来就行，之后的计算跟自动取到的数据完全一样。
-            <b>国家一定要选对</b>：费率按国家分，订单表的列名也按国家/语言分，
-            选错了列认不出来、费率也套错，数字会全错还不报错。
-            传上去后会自动认一下是张什么表，认不出来会告诉你。
+        </div></div>
+    </section>
+
+    <section class="page" id="view-import" hidden>
+      <div class="head"><h1>导入数据</h1>
+        <p>不经过插件也能算：你自己在店铺后台把表导出来，在这里传上来。
+           订单 / 广告 / 联盟佣金 / 链接资料都收，之后跟自动取到的数据<b>走同一套算法</b>。</p></div>
+
+      <div class="card"><h2>① 这份数据是哪家店、哪个国家<span class="hint">选错国家，列名认不出、费率也套错</span></h2>
+        <div class="body">
+          <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap">
+            <div class="field" style="flex:1;min-width:240px"><label>店铺</label>
+              <select id="imp2-store"><option value="">未识别店铺（公共目录）</option></select></div>
+            <div class="field" style="min-width:190px"><label>国家（决定费率与列名）</label>
+              <select id="imp2-country"><option value="">跟随店铺</option></select></div>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:10px 0 0">
+            选店铺后国家会自动带上，一般不用改。订单表的列名按国家/语言分（马来站和菲律宾站不一样），
+            费率也按国家分——<b>选错了不会报错，但数字会全错</b>。
           </p>
-          <div class="note" id="imp-note"></div>
+        </div></div>
+
+      <div class="card"><h2>② 把表拖进来<span class="hint">可一次多选，程序自动认是哪种表</span></h2>
+        <div class="body">
+          <div class="dropzone" id="imp2-drop">
+            <svg width="26" height="26" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                 stroke-width="1.3" style="color:var(--text-3)"><path d="M8 2.6v7.2M5.2 7l2.8 2.8L10.8 7"
+                 stroke-linecap="round" stroke-linejoin="round"/><path d="M2.8 11.2v1.4a1.6 1.6 0 001.6 1.6h7.2a1.6 1.6 0 001.6-1.6v-1.4" stroke-linecap="round"/></svg>
+            <div style="margin:6px 0 2px"><b>把导出的文件拖到这里</b></div>
+            <div class="muted" style="font-size:12.5px">
+              或者 <label class="mini-btn" style="margin:0">选择文件
+                <input type="file" id="imp2-file" multiple hidden accept=".csv,.xlsx,.xls,.txt,.json"></label>
+              （csv / xlsx / xls，可多选）
+            </div>
+            <div class="muted" style="font-size:12px;margin-top:10px">
+              订单表 · 广告表 · 联盟佣金表 · 商品映射表 都能认
+            </div>
+          </div>
+          <input type="file" id="imp2-link-file" accept=".xlsx,.xls,.csv" hidden>
+          <input type="file" id="imp2-map-file" accept=".xlsx,.xls,.csv" hidden>
+          <div class="tools" style="margin-top:12px;flex-wrap:wrap">
+            <button class="ghost" id="btn-imp2-map">单独导入「商品映射表」（SKU → 商品ID）</button>
+            <button class="ghost" id="btn-imp2-link">单独导入「链接资料」（款式编码）</button>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:10px 0 0">
+            <b>商品映射表很关键</b>：订单导出表里只有 SKU ID / 商家 SKU，<b>没有商品 ID</b>，
+            所以「哪笔订单属于哪条链接」全靠这张映射表。不传的话程序只能按 SKU 猜，
+            猜不出来的全归到「无ID」——汇总页就只剩一行，看不出是哪个链接赚的。<br>
+            从店铺后台「商品 → 批量编辑 / 导出」下载商品表（里面要有 <span class="mono">Product ID</span>
+            和 <span class="mono">SKU ID</span> 两列），点上面这个按钮传上来即可。<br>
+            链接资料是全局的、不分店铺；不传就按商家 SKU 自动推款式编码
+            （<span class="mono">V27-White</span> → <span class="mono">V27</span>）。
+          </p>
+          <div class="note" id="imp2-note"></div>
+          <div id="imp2-result"></div>
+        </div></div>
+
+      <div class="card"><h2>③ 已经传了哪些<span class="hint" id="imp2-hint"></span></h2>
+        <div class="body tight" id="imp2-files"><div class="empty">读取中…</div></div>
+        <div class="body" style="border-top:1px solid var(--line-soft);padding-top:12px">
+          <div class="row">
+            <button class="primary" onclick="go('run')">传完了，去核算</button>
+            <button onclick="go('stores')">管理店铺</button>
+          </div>
         </div></div>
     </section>
 
@@ -1126,7 +1190,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="body tight"><div class="kv">
           <div>自动抓数失败</div><div>扩展面板里有<b>「手动导数据」</b>：
             自己去店铺后台点导出，文件一下载就自动入库；
-            或者只开页面，导出后到「开始核算」页底部手动导入（要选国家和店铺）</div>
+            或者只开页面，导出后到左栏「导入数据」页传上来（要选国家和店铺）</div>
           <div>成本对不上</div><div>「成本表」页点<b>「拿订单核一遍」</b>，
             会列出哪些编码还没成本、哪些是按规则推导的</div>
           <div>净利算得不对</div><div>先看报表的<b>「口径」页</b>：每一项算了哪些订单类型、
@@ -1207,7 +1271,8 @@ function go(view){
   if(view === 'settings') loadSettings();
   if(view === 'debug') loadDebug();
   if(view === 'stores') loadStores();
-  if(view === 'run'){ loadRunFiles(); loadSnapshots(); loadImportOptions(); }
+  if(view === 'run'){ loadRunFiles(); loadSnapshots(); }
+  if(view === 'import'){ loadImportOptions(); loadImportFiles(); }
   if(view === 'overview'){ loadStatus(); loadTrend(); }
   if(location.hash !== '#/' + view) location.hash = '#/' + view;
 }
@@ -1351,8 +1416,13 @@ if($('#store')) $('#store').onchange = () => { loadSnapshots(); loadRunFiles(); 
 /** 填充导入区的「店铺」和「国家」下拉。 */
 async function loadImportOptions(){
   try{
-    const sel = $('#imp-store');
+    // 直接进「导入数据」页时缓存可能是空的，自己补一次
+    if(!storesCache.length){
+      try{ storesCache = (await (await fetch('/api/stores')).json()).stores || []; }catch(e){}
+    }
+    const sel = $('#imp2-store');
     if(sel){
+      const keep = sel.value;
       sel.innerHTML = '<option value="">未识别店铺（公共目录）</option>';
       storesCache.forEach(s => {
         const o = document.createElement('option');
@@ -1360,28 +1430,28 @@ async function loadImportOptions(){
         o.textContent = (s.name || s.id) + (s.country ? '（' + s.country + '）' : '');
         sel.append(o);
       });
+      if(keep) sel.value = keep;
     }
     const r = await (await fetch('/api/rates')).json();
-    const cs = $('#imp-country');
+    const cs = $('#imp2-country');
     if(cs){
+      const keep = cs.value;
       cs.innerHTML = '<option value="">跟随店铺</option>';
       Object.keys(r.countries || {}).forEach(c => {
         const o = document.createElement('option');
         o.value = c; o.textContent = c;
         cs.append(o);
       });
+      if(keep) cs.value = keep;
     }
   }catch(e){}
 }
 
 /** 选店铺时把国家自动带上：各国费率、列名都不同，选错就全错。 */
-if($('#imp-store')) $('#imp-store').onchange = () => {
-  const sid = $('#imp-store').value;
-  const s = storesCache.find(x => x.id === sid);
-  const cs = $('#imp-country');
-  if(s && cs && s.country){
-    cs.value = s.country;
-  }
+if($('#imp2-store')) $('#imp2-store').onchange = () => {
+  const st = $('#imp2-store'), cs = $('#imp2-country');
+  const s = storesCache.find(x => x.id === st.value);
+  if(s && cs && s.country) cs.value = s.country;
 };
 
 /** 读取文件为 base64，分块拼避免一次申请超大字符串。 */
@@ -1395,10 +1465,11 @@ async function fileToB64(f){
   return btoa(bin);
 }
 
-async function importFiles(files){
-  const n = $('#imp-note');
+async function importFiles(files, kindHint){
+  const n = $('#imp2-note'), box = $('#imp2-result');
   if(!files || !files.length) return;
-  note(n, '导入中…', 'ok');
+  note(n, '导入中…（' + files.length + ' 个文件）', 'ok');
+  if(box) box.innerHTML = '';
   const lines = [];
   for(const f of files){
     try{
@@ -1407,35 +1478,127 @@ async function importFiles(files){
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
           name: f.name, b64,
-          shop_id: ($('#imp-store') ? $('#imp-store').value : '') || '',
-          country: ($('#imp-country') ? $('#imp-country').value : '') || '',
+          shop_id: ($('#imp2-store') ? $('#imp2-store').value : '') || '',
+          country: ($('#imp2-country') ? $('#imp2-country').value : '') || '',
+          kind: kindHint || '',
         }),
       });
       const j = await r.json();
       const warn = j.warning ? ` <span style="color:#B45309">⚠ ${esc(j.warning)}</span>` : '';
       lines.push(j.ok
-        ? `${esc(j.name)} → <b>${esc(j.label)}</b>`
+        ? `✓ ${esc(f.name)} → <b>${esc(j.label)}</b>`
           + `<span class="muted">（按${esc(j.country || '默认')}的列标题识别）</span>${warn}`
-        : `${esc(f.name)} → <span style="color:#C0392B">失败：${esc(j.error || '')}</span>`);
+        : `✕ ${esc(f.name)} → <span style="color:#C0392B">失败：${esc(j.error || '')}</span>`);
     }catch(err){
-      lines.push(`${esc(f.name)} → <span style="color:#C0392B">失败：${esc(err.message || String(err))}</span>`);
+      lines.push(`✕ ${esc(f.name)} → <span style="color:#C0392B">失败：${esc(err.message || String(err))}</span>`);
     }
   }
   note(n, lines.join('<br>'), 'ok');
-  // 导入完立刻刷新：文件清单、快照列表、总览数字
-  loadRunFiles(); loadSnapshots(); loadStatus();
+  // 导入完立刻刷新：本页清单、核算页文件、快照、总览数字
+  loadImportFiles(); loadRunFiles(); loadSnapshots(); loadStatus();
 }
 
-if($('#btn-import')) $('#btn-import').onclick = () => $('#imp-file').click();
-if($('#imp-file')) $('#imp-file').onchange = (e) => {
+if($('#imp2-file')) $('#imp2-file').onchange = (e) => {
   importFiles(Array.from(e.target.files || []));
   e.target.value = "";            // 清空，同一个文件才能再选一次
 };
-if($('#imp-store')) $('#imp-store').onchange = () => {
-  // 选了店铺就把国家跟着带出来，省得再选一遍（也能避免选错国费率）
-  const s = storesCache.find(x => x.id === $('#imp-store').value);
-  if(s && s.country) $('#imp-country').value = s.country;
+
+/* 拖放：整块区域都能接文件，不用先点按钮再翻路径 */
+(function bindImportDrop(){
+  const dz = $('#imp2-drop');
+  if(!dz) return;
+  const stop = e => { e.preventDefault(); e.stopPropagation(); };
+  ['dragenter', 'dragover'].forEach(ev =>
+    dz.addEventListener(ev, e => { stop(e); dz.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev =>
+    dz.addEventListener(ev, e => { stop(e); dz.classList.remove('over'); }));
+  dz.addEventListener('drop', e => {
+    const fs = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if(fs.length) importFiles(fs);
+  });
+  dz.addEventListener('click', e => {
+    if(e.target.closest('label')) return;   // 点「选择文件」让它自己弹
+    const inp = $('#imp2-file');
+    if(inp) inp.click();
+  });
+})();
+
+/** 单独导入「商品映射表」（SKU → 商品ID）：强制按映射表存，不靠表头猜 */
+if($('#btn-imp2-map')) $('#btn-imp2-map').onclick = () => {
+  const inp = $('#imp2-map-file');
+  if(inp) inp.click();
 };
+if($('#imp2-map-file')) $('#imp2-map-file').onchange = (e) => {
+  const fs = Array.from(e.target.files || []);
+  if(fs.length) importFiles(fs, 'mapping');
+  e.target.value = '';
+};
+
+/** 单独导入「链接资料」（款式编码）：全局生效，不分店铺 */
+if($('#btn-imp2-link')) $('#btn-imp2-link').onclick = () => {
+  const inp = $('#imp2-link-file');
+  if(inp) inp.click();
+};
+if($('#imp2-link-file')) $('#imp2-link-file').onchange = async (e) => {
+  const f = (e.target.files || [])[0];
+  if(!f) return;
+  const n = $('#imp2-note');
+  note(n, '正在读取链接资料…', 'ok');
+  try{
+    const b64 = await fileToB64(f);
+    const j = await (await fetch('/api/link-info', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: f.name, b64}),
+    })).json();
+    note(n, j.ok
+      ? `✓ 链接资料已导入：<b>${j.sku_count}</b> 个 SKU / <b>${j.link_count}</b> 条链接`
+        + (j.multi_count ? `<span class="muted">（其中 ${j.multi_count} 条链接含多个款式编码）</span>` : '')
+      : '导入失败：' + esc(j.error || '未知原因'), j.ok ? 'ok' : 'err');
+  }catch(err){ note(n, '出错：' + esc(err.message), 'err'); }
+  e.target.value = '';
+};
+
+/** 「已经传了哪些」：按店铺列文件，没选店铺的单独标出来 */
+async function loadImportFiles(){
+  const box = $('#imp2-files'), hint = $('#imp2-hint');
+  if(!box) return;
+  try{
+    const j = await (await fetch('/api/data-files')).json();
+    const groups = (j.groups || []).filter(g => (g.items || []).length);
+    const unknown = j.unknown || [], legacy = j.legacy || [];
+    let n = legacy.length + unknown.length;
+    groups.forEach(g => n += g.items.length);
+    if(hint) hint.textContent = n ? n + ' 个文件' : '';
+    if(!n){
+      box.innerHTML = '<div class="empty"><b>还没传过文件</b>上面选好店铺，把后台导出的表拖进来就行</div>';
+      return;
+    }
+    const KIND_CN = {orders:'订单', ads:'广告', affiliate:'联盟', mapping:'映射', other:'其他'};
+    let html = '';
+    groups.forEach(g => {
+      const k = g.kinds || {};
+      const bits = Object.keys(k).filter(x => x !== 'other')
+        .map(x => KIND_CN[x] + ' ' + k[x]).join(' · ');
+      html += `<div style="padding:12px 20px 6px;font-size:12.5px;color:var(--text-2);background:#fcfcfa;
+        border-bottom:1px solid var(--line-soft)">${esc(g.name)}
+        <span class="tag gray">${esc(g.country || '')}</span>
+        ${bits ? '<span class="tag">' + esc(bits) + '</span>' : ''}</div>`;
+      html += '<table><tbody>' + g.items.map(f => `<tr>
+        <td style="width:58%">${esc(f.name)}</td><td class="muted" style="width:16%">${f.size_kb} KB</td>
+        <td class="muted" style="width:26%">${f.at}</td></tr>`).join('') + '</tbody></table>';
+    });
+    if(unknown.length){
+      html += `<div style="padding:12px 20px 6px;font-size:12.5px;color:var(--warn);background:#fdf6f5;
+        border-bottom:1px solid var(--line-soft)">⚠ 没选店铺的数据（${unknown.length} 个）——不会参与核算</div>`;
+      html += '<table><tbody>' + unknown.map(f => `<tr>
+        <td style="width:58%">${esc(f.name)}</td><td class="muted" style="width:16%">${f.size_kb} KB</td>
+        <td class="muted" style="width:26%">${f.at}</td></tr>`).join('') + '</tbody></table>';
+    }
+    box.innerHTML = html;
+  }catch(err){
+    box.innerHTML = '<div class="empty">读取失败：' + esc(err.message) + '</div>';
+  }
+}
 
 /** 导入店铺后台下载的「链接资料」表，读出每条链接的款式编码。 */
 if($('#btn-link-import')) $('#btn-link-import').onclick = async () => {

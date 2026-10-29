@@ -875,6 +875,12 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
+        # 用户点「单独导入商品映射表」时会带 kind=mapping：
+        # 表头不标准、自动认不出也要按映射表存，否则白传一趟。
+        forced = str(payload.get("kind") or "").strip()
+        if forced and not kind:
+            kind = forced
+
         if kind == "mapping" or payload.get("kind") == "mapping":
             target_dir = MAPPING_DIR
         elif shop_id:
