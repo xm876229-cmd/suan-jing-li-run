@@ -558,9 +558,12 @@ def compile_expr(expr: str, titles: list[str] | None = None,
         """
         extra: list[str] = []
         for c in cands:
-            for x in field_titles.get(c, []):
-                if x and x not in cands and x not in extra:
-                    extra.append(x)
+            # 原样和归一化后的名字都试一次：公式里可能写字段 key（subtotal_before），
+            # 也可能写中文标签（折扣前小计），表头识别里存的键是归一化后的。
+            for key in (c, _norm(c)):
+                for x in field_titles.get(key, []):
+                    if x and x not in cands and x not in extra:
+                        extra.append(x)
         return cands + extra if extra else cands
 
     def repl(m: re.Match) -> str:

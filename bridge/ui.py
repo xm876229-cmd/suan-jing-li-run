@@ -537,7 +537,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.21.4</span></div>
+      <div class="row"><span>版本</span><span>0.21.5</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -2006,8 +2006,18 @@ function paramOptionsHTML(){
     groups.push('<optgroup label="参数表里别的行（结果）">' +
       prs.map(x => opt(x, x)).join('') + '</optgroup>');
   }
+  // 订单表字段：插字段名（折扣前小计），程序按「表头识别」里配的候选自动匹配，
+  // 表头改名只要加候选，公式不用动。
+  const of = (cur() && cur().order_fields) || {};
+  const ofEntries = Object.entries(of)
+    .map(([k, v]) => [String((v && (v.label || v.titles && v.titles[0])) || k), k])
+    .filter(([lb]) => lb);
+  if(ofEntries.length){
+    groups.push('<optgroup label="订单表字段（按表头识别自动匹配）">' +
+      ofEntries.map(([lb]) => opt('[' + lb + ']', lb)).join('') + '</optgroup>');
+  }
   if(headers && headers.length){
-    groups.push('<optgroup label="订单表列">' +
+    groups.push('<optgroup label="订单表真实列名">' +
       headers.map(h => opt('[' + h + ']', h)).join('') + '</optgroup>');
   }
   return '<option value="">＋ 插入参数…</option>' + groups.join('');

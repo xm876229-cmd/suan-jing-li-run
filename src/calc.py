@@ -89,17 +89,32 @@ def _f(c: dict, key: str, default: float = 0.0) -> float:
         return float(default)
 
 
-def _build_field_titles(order_aliases: dict) -> dict[str, list[str]]:
+def _build_field_titles(order_aliases: dict,
+                        order_fields: dict | None = None) -> dict[str, list[str]]:
     """把「字段 → 备胎标题」摊平成 {归一化标题: [归一化备胎...]}。
 
     公式里写 [折扣前小计] 这种主标题时，compile_expr 用它去查真正的列：
     先按主标题找，找不到就按顺序试这个字段配的其它标题。
+
+    同时把「字段名」本身（如 subtotal_before）和它的中文名（如 折扣前小计）
+    也映射到同一组候选——这样公式可以直接写字段名，表头变了只要在
+    「表头识别」里加候选，公式一个字都不用改。
     """
     out: dict[str, list[str]] = {}
-    for _key, titles in (order_aliases or {}).items():
+    of = order_fields or {}
+    for key, titles in (order_aliases or {}).items():
         cands = [formula._norm(t) for t in titles if str(t).strip()]
+        if not cands:
+            continue
         for t in cands:
             out.setdefault(t, cands)
+        # 逻辑字段名 / 中文标签 → 同一组候选
+        out.setdefault(formula._norm(key), cands)
+        meta = of.get(key) if isinstance(of, dict) else None
+        if isinstance(meta, dict):
+            lbl = str(meta.get("label") or "").strip()
+            if lbl:
+                out.setdefault(formula._norm(lbl), cands)
     return out
 
 
@@ -469,7 +484,7 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
     order_aliases = merged_aliases(cc["order_fields"])
     # 把「订单表识别」里的字段 → 备胎标题 摊平成 {归一化标题: [归一化备胎...]}，
     # 公式里写 [折扣前小计] 这类主标题时，程序据此去找真正的列。
-    field_titles = _build_field_titles(order_aliases)
+    field_titles = _build_field_titles(order_aliases, cc.get("order_fields"))
 
     # 订单实付分配：按 GMV 占比时，先算出每个订单的 GMV 合计。
     # 用全量订单（不受日期过滤影响），避免跨期的订单被截断后分配比例失真。
