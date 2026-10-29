@@ -537,7 +537,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.21.3</span></div>
+      <div class="row"><span>版本</span><span>0.21.4</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -1142,10 +1142,15 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="head"><h1>调试</h1>
         <p>出问题时先看这里：扩展有没有在干活、桥收到了什么、数据存在哪。</p></div>
       <div class="card"><h2>取数桥<span class="hint">接收扩展数据、触发核算的后台服务</span></h2><div class="body">
+        <div class="kv" id="br-status" style="margin-bottom:12px">读取中…</div>
         <div class="tools">
+          <button class="primary" id="btn-bridge-restart">重启用本程序的桥</button>
           <button id="btn-bridge-stop">关闭取数桥</button>
-          <span class="muted" style="font-size:12.5px">关闭后本界面会断开；要用时双击程序文件夹里的「启动桥.bat」或重开程序</span>
         </div>
+        <p class="muted" style="font-size:12.5px;margin:10px 0 0">
+          「重启用本程序的桥」会先关掉别的桥，再起当前程序目录这个；<br>
+          「关闭取数桥」只停不启，之后双击程序文件夹里的「启动桥.bat」再开。
+        </p>
       </div></div>
       <div class="card"><h2>运行环境</h2><div class="body tight"><div class="kv" id="dbg-env"></div></div></div>
       <div class="card"><h2>扩展日志<span class="hint" id="dbg-log-hint"></span></h2>
@@ -2773,19 +2778,57 @@ $('#btn-cost-tpl').onclick = async (e) => {
   }catch(err){ toast('保存失败：' + err.message); }
 };
 
-// 关闭取数桥（调试页）：窗口里调原生接口，真正把桥进程停掉
-$('#btn-bridge-stop').onclick = async () => {
-  const api = (window.pywebview && window.pywebview.api) || null;
-  if(!api || !api.stop_bridge){
-    toast('请在程序窗口里操作（浏览器里关不了桥）');
+// 取数桥状态：端口 / 数据根 / 桥程序，并标出「是不是本程序起的」
+async function loadBridgeStatus(){
+  const box = $('#br-status');
+  if(!box) return;
+  let s = {}, ok = false;
+  try{ s = await (await fetch('/api/bridge/status')).json(); ok = !!s.ok; }catch(e){ ok = false; }
+  if(!ok){
+    box.innerHTML = '<div><span class="muted">状态</span>　<b style="color:var(--warn)">读不到（桥可能已停）</b></div>';
     return;
   }
+  let appDir = '';
+  try{
+    const api = window.pywebview && window.pywebview.api;
+    if(api && api.app_dir) appDir = await api.app_dir();
+  }catch(e){}
+  const same = appDir && s.exe_dir &&
+    String(appDir).toLowerCase() === String(s.exe_dir).toLowerCase();
+  const tag = appDir
+    ? (same ? '<span class="tag">就是本程序</span>' : '<span class="tag warn">不是本程序</span>')
+    : '';
+  box.innerHTML =
+    `<div><span class="muted">状态</span>　<b style="color:var(--accent)">运行中</b>　端口 ${esc(s.port || 8765)}</div>` +
+    `<div><span class="muted">数据根</span>　<span class="mono" style="font-size:12px">${esc(s.root || '')}</span></div>` +
+    `<div><span class="muted">桥程序</span>　<span class="mono" style="font-size:12px">${esc(s.exe_dir || '')}</span> ${tag}</div>`;
+}
+
+// 重启用本程序的桥：先关掉别的桥，再起当前程序目录这个
+$('#btn-bridge-restart').onclick = async () => {
+  const api = (window.pywebview && window.pywebview.api) || null;
+  if(!api || !api.restart_bridge){ toast('请在程序窗口里操作'); return; }
+  if(!confirm('会先关掉当前正在跑的桥，再用本程序目录的桥重启。确定？')) return;
+  toast('正在重启取数桥…');
+  try{
+    const msg = await api.restart_bridge();
+    toast(msg);
+    setTimeout(() => { try{ location.reload(); }catch(e){} }, 1200);
+  }catch(err){ toast('重启失败：' + err.message); }
+};
+
+// 关闭取数桥：只停不启
+$('#btn-bridge-stop').onclick = async () => {
+  const api = (window.pywebview && window.pywebview.api) || null;
+  if(!api || !api.stop_bridge){ toast('请在程序窗口里操作（浏览器里关不了桥）'); return; }
   if(!confirm('关闭取数桥后，本界面会断开。确定关闭？')) return;
   try{
     const ok = await api.stop_bridge();
     toast(ok ? '取数桥已关闭。要用时双击「启动桥.bat」或重开程序' : '没有正在跑的桥');
   }catch(err){ toast('关闭失败：' + err.message); }
 };
+
+if($('#br-status')){ loadBridgeStatus(); setInterval(loadBridgeStatus, 10000); }
 
 $('#btn-cost-add').onclick = () => {
   const code = (prompt('商品编码（和订单里的「卖家 SKU」一致）') || '').trim();

@@ -501,6 +501,15 @@ class Handler(BaseHTTPRequestHandler):
                 "attachment; filename*=UTF-8''" + quote("成本表导入模板.xlsx"))
             self.end_headers()
             self.wfile.write(data)
+        elif self.path.startswith("/api/bridge/status"):
+            from src import paths as _paths
+            from pathlib import Path as _P2
+            _json(self, {
+                "ok": True,
+                "port": PORT,
+                "root": str(_paths.DATA_HOME),
+                "exe_dir": str(_P2(sys.executable).resolve().parent),
+            })
         elif self.path.startswith("/api/settings"):
             from src import settings as cfg_settings
             _json(self, {"ok": True, "settings": cfg_settings.load()})

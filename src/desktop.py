@@ -107,6 +107,27 @@ class NativeApi:
         except Exception:  # noqa: BLE001
             return False
 
+    def app_dir(self) -> str:
+        """当前程序（exe）所在目录，界面用来判断「桥是不是这个程序起的」。"""
+        try:
+            from pathlib import Path
+            return str(Path(sys.executable).resolve().parent)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def restart_bridge(self) -> str:
+        """关掉别的桥，用「当前程序目录」这个桥重启。"""
+        try:
+            import subprocess
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "nt" else 0
+            subprocess.run([sys.executable, "bridge", "--force"], timeout=90,
+                           creationflags=flags,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           stdin=subprocess.DEVNULL)
+            return "已用本程序的桥重启"
+        except Exception as e:  # noqa: BLE001
+            return f"重启失败：{e}"
+
 
 def main() -> int:
     if getattr(sys, "frozen", False):
