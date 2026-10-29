@@ -28,6 +28,8 @@ DEFAULTS: dict = {
         # 核算完自动复制一份到 download_dir
         "auto_copy": False,
         "download_dir": "",
+        # 「下载导入模板」存到哪儿（空 = 存到程序里的「报表」目录）
+        "template_dir": "",
         # 导出的报表带不带 Excel 公式。
         # 带公式：明细页有辅助列，汇总页用 SUMIFS，改「口径」页的开关就能在 Excel 里切口径
         "with_formula": False,

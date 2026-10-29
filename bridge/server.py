@@ -468,9 +468,15 @@ class Handler(BaseHTTPRequestHandler):
             # 「直接存到报表目录」的接口，前端提示用户文件在哪。
             from bridge import costs_api
             from src import paths as _paths
+            from src import settings as _settings
+            from pathlib import Path as _P
             try:
                 data = costs_api.make_template()
-                out = _paths.OUTPUT / "成本表导入模板.xlsx"
+                # 用户可在「设置 → 报表保存位置」里单独指定模板导出目录；
+                # 没指定就落到程序里的「报表」目录。
+                td = ((_settings.load().get("report") or {}).get("template_dir") or "").strip()
+                out_dir = _P(td).expanduser() if td else _paths.OUTPUT
+                out = out_dir / "成本表导入模板.xlsx"
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(data)
                 _json(self, {"ok": True, "path": str(out)})

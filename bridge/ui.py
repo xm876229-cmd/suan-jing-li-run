@@ -864,7 +864,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="tools" style="margin-top:14px">
           <button id="btn-cost-check">拿订单核一遍</button>
           <a class="mini-btn" id="btn-cost-tpl" href="/api/costs/template"
-             download="成本表导入模板.xlsx">下载导入模板</a>
+             download="成本表导入模板.xlsx"
+             title="窗口内会存到「设置 → 报表保存位置」里指定的模板目录（留空=程序里的「报表」目录）">下载导入模板</a>
           <label class="mini-btn">导入 Excel / CSV
             <input type="file" id="cost-file" accept=".xlsx,.xls,.csv" hidden></label>
           <button class="mini" id="btn-cost-add">＋ 新增编码</button>
@@ -997,6 +998,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="field" style="max-width:520px">
           <label>核算完自动复制到这个文件夹（留空则只在程序目录里）</label>
           <input type="text" id="set-dir" placeholder="D:\净利报表"></div>
+        <div class="field" style="max-width:520px;margin-top:12px">
+          <label>「下载导入模板」存到这个文件夹（留空则存到程序的「报表」目录）</label>
+          <input type="text" id="set-tpl-dir" placeholder="D:\净利模板"></div>
         <label class="switch" style="margin-top:12px">
           <input type="checkbox" id="set-formula">
           <span><b>导出的报表带 Excel 公式</b>
@@ -2970,6 +2974,7 @@ async function loadSettings(){
     const s = all.report || {};
     $('#set-template').value = s.name_template || '{店铺}_{区间}';
     $('#set-dir').value = s.download_dir || '';
+    if($('#set-tpl-dir')) $('#set-tpl-dir').value = s.template_dir || '';
     $('#set-fx').value = (all.fx || {}).mode || 'auto';
     if($('#set-formula')) $('#set-formula').checked = !!s.with_formula;
 
@@ -3040,6 +3045,7 @@ $('#btn-set-save').onclick = async () => {
       body: JSON.stringify({
         report: {name_template: $('#set-template').value.trim() || '{店铺}_{区间}',
                  download_dir: dir, auto_copy: !!dir,
+                 template_dir: ($('#set-tpl-dir') ? $('#set-tpl-dir').value : '').trim(),
                  with_formula: !!($('#set-formula') && $('#set-formula').checked)},
         fx: {mode: $('#set-fx').value},
         auto: {
