@@ -36,7 +36,49 @@ def app_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _data_root() -> Path:
+    """可写数据根（配置 / 数据 / 报表）。
+
+    为什么要跟「程序目录」分开：以前 ROOT = exe 所在目录，
+    换个地方启动 exe（安装目录 / release / build/app/jingli）就换一份配置——
+    从构建目录启动时读到的是空的 配置\，界面就变成 0 国 0 店。
+
+    查找顺序：
+      1. JINGLI_HOME 环境变量：把数据钉死在某处
+      2. 从程序目录向上找 `数据目录.txt`（第一行 = 数据根路径）：
+         项目里放一个，release/、build/app/ 下启动的 exe 都会指回同一份数据
+      3. 兜底：源码 = 项目根；打包 = exe 所在目录（兼容安装版/便携版）
+    """
+    env = (os.environ.get("JINGLI_HOME") or "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+
+    start = app_root()
+    p = start
+    for _ in range(6):
+        f = p / "数据目录.txt"
+        try:
+            if f.is_file():
+                lines = f.read_text(encoding="utf-8-sig").strip().splitlines()
+                if lines:
+                    t = Path(lines[0].strip().strip('"')).expanduser()
+                    if not t.is_absolute():
+                        t = p / t
+                    t = t.resolve()
+                    if t.is_dir():
+                        return t
+        except OSError:
+            pass
+        if p.parent == p:
+            break
+        p = p.parent
+    return start
+
+
 ROOT = app_root()
+# 可写数据（配置/数据/报表）的根：默认跟程序目录一致；
+# 可用 JINGLI_HOME 或上层「数据目录.txt」固定到一处，让所有实例共用同一份。
+DATA_HOME = _data_root()
 
 # 用户要能一眼看出各文件夹是干嘛的，所以对外可见的目录一律中文名。
 # 代码包（src / bridge / scripts）保持英文：那是 Python 的包路径，
@@ -47,15 +89,19 @@ DIR_CONFIG = "配置"
 DIR_EXTENSION = "浏览器扩展"
 
 
-def _pick_dir(cn: str, en: str) -> Path:
+def _pick_dir(cn: str, en: str, base: Path | None = None) -> Path:
     """用中文目录名；发现还是旧的英文目录就顺手改名搬过去。
 
     这样升级后老用户的数据不会被留在一个没人认得的小角落，
     而新装的用户看到的就是「数据 / 报表 / 配置 / 浏览器扩展」。
     改名失败（文件被占用等）就继续用老目录，绝不因此丢数据。
+
+    base 默认是可写数据根（配置/数据/报表都放这）；
+    只读资源（浏览器扩展）传 base=ROOT，跟着程序目录走。
     """
-    new = ROOT / cn
-    old = ROOT / en
+    base = base or DATA_HOME
+    new = base / cn
+    old = base / en
     if new.is_dir():
         return new
     if old.is_dir():
@@ -96,7 +142,7 @@ OUTPUT = Path(os.environ.get("JINGLI_OUTPUT") or _pick_dir(DIR_OUTPUT, "output")
 
 # ---- 只读资源 ----
 CONFIG = _pick_dir(DIR_CONFIG, "config")
-EXTENSION = _pick_dir(DIR_EXTENSION, "extension")
+EXTENSION = _pick_dir(DIR_EXTENSION, "extension", base=ROOT)
 RATES_FILE = CONFIG / "rates.json"
 STORES_FILE = CONFIG / "stores.json"
 
@@ -167,6 +213,7 @@ def describe() -> dict[str, str]:
     return {
         "运行模式": "打包 exe" if is_frozen() else "源码",
         "程序目录": str(ROOT),
+        "数据根": str(DATA_HOME),
         "数据目录": str(DATA),
         "产出目录": str(OUTPUT),
         "配置目录": str(CONFIG),
