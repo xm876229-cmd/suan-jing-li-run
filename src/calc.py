@@ -507,14 +507,28 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
     missing_cost_lines = 0
     untimed = 0
 
+    # 有没有任何一行拿到了商品ID？
+    # 一条都没有，说明「商品映射表」是空的（SKU 取数失败 / 手工没导）。
+    # 这种情况下所有订单会挤成「无ID」一行，报表等于看不出是哪条链接赚的。
+    # 退一步：按「商品名称」归并——订单表里本来就有商品标题，同一链接的不同
+    # 变体标题相同，拆出来的粒度跟按商品ID基本一致。
+    has_any_pid = any(bool(l.product_id) for l in lines)
+    name_fallback = 0
+
     for l in lines:
         if parse_dt(l.created if date_field == "created" else l.paid) is None:
             untimed += 1
 
         # 找不到商品ID 的行不丢弃、也不算异常：按「无ID」单独成组照常计入合计。
         # 这类行通常是没有映射的新商品，不影响整体净利。
-        pid = l.product_id or "无ID"
-        if not l.product_id:
+        pid = l.product_id
+        if not pid and not has_any_pid:
+            nm = re.sub(r"\s+", " ", (l.product_name or "")).strip()
+            if nm:
+                pid = nm                     # 按商品名兜底归并
+                name_fallback += 1
+        if not pid:
+            pid = "无ID"
             no_pid += 1
         m = buckets.get(pid)
         if m is None:
@@ -723,6 +737,12 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
 
     products = sorted(buckets.values(), key=lambda x: x.gmv, reverse=True)
 
+    if name_fallback:
+        issues.append(
+            f"这次一份商品映射表都没拿到，{name_fallback} 行订单已按「商品名称」归并成链接"
+            f"（拆出的粒度跟按商品ID基本一样，但同名商品会被合并）。"
+            f"要按商品ID精确归并，请在「导入数据」页传一张商品映射表（Product ID + SKU ID）"
+        )
     if no_pid:
         issues.append(
             f"{no_pid} 行订单在所有映射来源里都找不到商品归属，已归入「无ID」照常计入合计。"

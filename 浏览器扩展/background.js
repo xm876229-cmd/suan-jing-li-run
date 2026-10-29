@@ -1348,16 +1348,23 @@ async function runSpecTask(task, range, log) {
   const spec = sj.spec || {};
   const steps = spec.steps || [];
   if (!steps.length) throw new Error(`规格里没有步骤（任务 ${task}）`);
-  const host = spec.host || "seller";
+  const specHost = spec.host || "seller";
+  // spec.host 写的是「哪个后台」（seller / affiliate），**不是域名**。
+  // 真正的域名（如 seller-my.tiktok.com）要由 ensureHost 从学到的参数里取。
+  // 之前把 "seller" 直接当域名去匹标签页（*://seller/*），永远匹配不到，
+  // 于是广告 / 联盟佣金两步一律报「没有开着的 seller 页面」。
+  const hint = (specHost === "seller" || specHost === "affiliate") ? specHost : "seller";
   // 先确保那个域的页面开着、参数（fp、X-Tts-Oec-Bsid 等）是新鲜的。
   // 接口要这些风控参数，缺了就返回含糊的 downstream server error。
-  await ensureHost(host, log);
+  const host = await ensureHost(hint, log);
+  // spec.host 本身就是域名时（以后可能有），直接用；否则用 ensureHost 返回的真实域名
+  const realHost = (specHost === hint) ? (host || hint) : specHost;
 
   const results = [];
   for (const step of steps) {
     const label = step.name || step.path;
     log(`  · ${label}`);
-    const r = await callApi(host, step.path, step.method || "POST", step.body);
+    const r = await callApi(realHost, step.path, step.method || "POST", step.body);
     results.push({
       path: step.path,
       method: step.method || "POST",
