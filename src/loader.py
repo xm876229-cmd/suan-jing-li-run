@@ -518,7 +518,7 @@ def parse_costs(rows: list[tuple], cost_fields: dict | None = None) -> dict[str,
     return out
 
 
-def parse_mapping(rows: list[tuple]) -> SkuIndex:
+def parse_mapping(rows: list[tuple], mapping_fields: dict | None = None) -> SkuIndex:
     """解析 SKU→商品 映射表。
 
     兼容两种形态：
@@ -530,7 +530,8 @@ def parse_mapping(rows: list[tuple]) -> SkuIndex:
     卖家编码的第一段里，V27-White-10Pcs → V27。
     """
     idx = SkuIndex()
-    hidx, cm = find_header_row(rows, ("sku_id", "product_id"))
+    aliases = merged_aliases(mapping_fields) if mapping_fields else None
+    hidx, cm = find_header_row(rows, ("sku_id", "product_id"), aliases=aliases)
     if hidx < 0:
         return idx
     c_prod = cm.get("product_id")
@@ -754,10 +755,16 @@ def parse_orders(rows: list[tuple], order_fields: dict | None = None,
     return lines
 
 
-def parse_ads(rows: list[tuple], usd_to_local: float = 1.0) -> tuple[dict[str, float], list[str]]:
-    """广告报表：按 商品ID 汇总花费，并按货币换算成本地货币。"""
+def parse_ads(rows: list[tuple], usd_to_local: float = 1.0,
+              ads_fields: dict | None = None) -> tuple[dict[str, float], list[str]]:
+    """广告报表：按 商品ID 汇总花费，并按货币换算成本地货币。
+
+    ads_fields 是界面上配的「广告表字段 → 标题候选」，配了优先用，
+    这样平台把「成本」改成「花费」之类的也能自己加候选，不必改代码。
+    """
     issues: list[str] = []
-    hidx, cm = find_header_row(rows, ("product_id", "ad_cost"))
+    aliases = merged_aliases(ads_fields) if ads_fields else None
+    hidx, cm = find_header_row(rows, ("product_id", "ad_cost"), aliases=aliases)
     if hidx < 0 or "product_id" not in cm or "ad_cost" not in cm:
         return {}, ["广告表未识别出「商品 ID」与「成本」列，广告费按 0 计"]
 
@@ -790,9 +797,14 @@ def parse_ads(rows: list[tuple], usd_to_local: float = 1.0) -> tuple[dict[str, f
     return dict(out), issues
 
 
-def parse_commissions(rows: list[tuple]) -> tuple[dict[str, float], list[str]]:
-    """联盟佣金报表：按 商品ID 汇总预估佣金。值可能是 'RM2,678.75' 这类字符串。"""
-    hidx, cm = find_header_row(rows, ("product_id", "commission"))
+def parse_commissions(rows: list[tuple],
+                      affiliate_fields: dict | None = None) -> tuple[dict[str, float], list[str]]:
+    """联盟佣金报表：按 商品ID 汇总预估佣金。值可能是 'RM2,678.75' 这类字符串。
+
+    affiliate_fields 是界面上配的「联盟佣金表字段 → 标题候选」。
+    """
+    aliases = merged_aliases(affiliate_fields) if affiliate_fields else None
+    hidx, cm = find_header_row(rows, ("product_id", "commission"), aliases=aliases)
     if hidx < 0 or "product_id" not in cm or "commission" not in cm:
         return {}, ["联盟佣金表未识别出「Product ID」与「Est. commission」列，达人佣金按 0 计"]
 
@@ -911,7 +923,10 @@ def load_from_files(order_file: Path, ads_file: Optional[Path] = None,
                     costs_file: Optional[Path] = None,
                     usd_to_local: float = 1.0,
                     order_fields: dict | None = None,
-                    cost_fields: dict | None = None) -> RawData:
+                    cost_fields: dict | None = None,
+                    ads_fields: dict | None = None,
+                    affiliate_fields: dict | None = None,
+                    mapping_fields: dict | None = None) -> RawData:
     """从四个独立导出文件装配数据。"""
     issues: list[str] = []
     sources: dict[str, str] = {}
@@ -926,7 +941,7 @@ def load_from_files(order_file: Path, ads_file: Optional[Path] = None,
     sku_index = SkuIndex()
     if mapping_file:
         if Path(mapping_file).exists():
-            sku_index = parse_mapping(read_table(mapping_file))
+            sku_index = parse_mapping(read_table(mapping_file), mapping_fields)
             sources["映射"] = Path(mapping_file).name
             if not len(sku_index):
                 issues.append(f"映射文件里没有识别出 SKU ID / Product ID 列：{Path(mapping_file).name}")
@@ -945,13 +960,13 @@ def load_from_files(order_file: Path, ads_file: Optional[Path] = None,
 
     ads: dict[str, float] = {}
     if ads_file and Path(ads_file).exists():
-        ads, ad_issues = parse_ads(read_table(ads_file), usd_to_local)
+        ads, ad_issues = parse_ads(read_table(ads_file), usd_to_local, ads_fields)
         issues += ad_issues
         sources["广告"] = Path(ads_file).name
 
     commissions: dict[str, float] = {}
     if commission_file and Path(commission_file).exists():
-        commissions, com_issues = parse_commissions(read_table(commission_file))
+        commissions, com_issues = parse_commissions(read_table(commission_file), affiliate_fields)
         issues += com_issues
         sources["联盟佣金"] = Path(commission_file).name
 
@@ -1139,7 +1154,10 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
                    usd_to_local: float = 1.0,
                    mapping_file: Optional[Path] = None,
                    order_fields: dict | None = None,
-                   cost_fields: dict | None = None) -> RawData:
+                   cost_fields: dict | None = None,
+                   ads_fields: dict | None = None,
+                   affiliate_fields: dict | None = None,
+                   mapping_fields: dict | None = None) -> RawData:
     """从**多个**目录一起读数据，跨目录合并去重。
 
     folders 按「从旧到新」排序传入。单个目录时行为和从前一样。
@@ -1184,7 +1202,7 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
     sku_index = SkuIndex()
     parts: list[str] = []
     if mapping_file and Path(mapping_file).exists():
-        midx = parse_mapping(read_table(Path(mapping_file)))
+        midx = parse_mapping(read_table(Path(mapping_file)), mapping_fields)
         if len(midx):
             sku_index.merge(midx)
             parts.append(f"{Path(mapping_file).name}（累积主表）")
@@ -1192,7 +1210,7 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
             issues.append(f"映射主表里没识别出 SKU ID / Product ID 列：{Path(mapping_file).name}")
 
     for mf, mrows in buckets["mapping"]:
-        tidx = parse_mapping(mrows)
+        tidx = parse_mapping(mrows, mapping_fields)
         if len(tidx):
             sku_index.merge(tidx)
             parts.append(mf.name)
@@ -1232,7 +1250,7 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
     ads: dict[str, float] = {}
     if buckets["ads"]:
         mrows, dropped, diff = _merge_same_kind(buckets["ads"], "ads")
-        ads, ad_issues = parse_ads(mrows, usd_to_local)
+        ads, ad_issues = parse_ads(mrows, usd_to_local, ads_fields)
         issues += ad_issues
         sources["广告"] = " + ".join(p.name for p, _ in buckets["ads"])
         if len(buckets["ads"]) > 1:
@@ -1244,7 +1262,7 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
     commissions: dict[str, float] = {}
     if buckets["affiliate"]:
         mrows, dropped, diff = _merge_same_kind(buckets["affiliate"], "affiliate")
-        commissions, com_issues = parse_commissions(mrows)
+        commissions, com_issues = parse_commissions(mrows, affiliate_fields)
         issues += com_issues
         sources["联盟佣金"] = " + ".join(p.name for p, _ in buckets["affiliate"])
         if len(buckets["affiliate"]) > 1:
@@ -1266,16 +1284,23 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
                   usd_to_local: float = 1.0,
                   mapping_file: Optional[Path] = None,
                   order_fields: dict | None = None,
-                  cost_fields: dict | None = None) -> RawData:
+                  cost_fields: dict | None = None,
+                  ads_fields: dict | None = None,
+                  affiliate_fields: dict | None = None,
+                  mapping_fields: dict | None = None) -> RawData:
     """从目录自动识别四类文件（单个目录的快捷方式）。"""
     return load_from_dirs([Path(folder)], costs_file, usd_to_local, mapping_file,
-                          order_fields, cost_fields)
+                          order_fields, cost_fields,
+                          ads_fields, affiliate_fields, mapping_fields)
 
 
 def load_from_workbook(path: Path, usd_to_local: float = 1.0,
                        costs_file: Optional[Path] = None,
                        order_fields: dict | None = None,
-                       cost_fields: dict | None = None) -> RawData:
+                       cost_fields: dict | None = None,
+                       ads_fields: dict | None = None,
+                       affiliate_fields: dict | None = None,
+                       mapping_fields: dict | None = None) -> RawData:
     """兼容旧版主工作簿（订单表前面插了四列人工列，链接资料是完整模板）。"""
     path = Path(path)
     issues: list[str] = []
@@ -1295,7 +1320,7 @@ def load_from_workbook(path: Path, usd_to_local: float = 1.0,
 
     titles: list[str] = []
     orders = parse_orders(order_rows, order_fields, titles)
-    sku_index = parse_mapping(link_rows)
+    sku_index = parse_mapping(link_rows, mapping_fields)
 
     costs = parse_costs(cost_rows, cost_fields)
     # 如果 data/costs 里有更新的一份，用它覆盖工作簿里的成本表
@@ -1305,8 +1330,8 @@ def load_from_workbook(path: Path, usd_to_local: float = 1.0,
         override = parse_costs(rows, cost_fields)
         if override:
             costs = override
-    ads, ad_issues = parse_ads(ad_rows, usd_to_local)
-    commissions, com_issues = parse_commissions(com_rows)
+    ads, ad_issues = parse_ads(ad_rows, usd_to_local, ads_fields)
+    commissions, com_issues = parse_commissions(com_rows, affiliate_fields)
     issues += ad_issues + com_issues
 
     attach_product_ids(orders, sku_index, issues)

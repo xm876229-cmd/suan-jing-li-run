@@ -43,6 +43,10 @@ def read_config() -> dict:
         "formulas": cfg.get("formulas") or {},
         "order_fields": cfg.get("order_fields") or {},
         "cost_fields": cfg.get("cost_fields") or {},
+        # 广告表 / 联盟佣金表 / 链接资料表的「表头识别」：结构同订单表
+        "ads_fields": cfg.get("ads_fields") or dict(formula.DEFAULT_ADS_FIELDS),
+        "affiliate_fields": cfg.get("affiliate_fields") or dict(formula.DEFAULT_AFFILIATE_FIELDS),
+        "mapping_fields": cfg.get("mapping_fields") or dict(formula.DEFAULT_MAPPING_FIELDS),
         # 总开关：true = 整张参数表都不算 0 元样品单
         "exclude_zero_amount": bool(cfg.get("exclude_zero_amount")),
         "kinds": cfg.get("kinds") or dict(KINDS),
@@ -100,7 +104,10 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
                 exclude_zero_amount: bool | None = None,
                 report_columns: list | None = None,
                 report_total_position: str | None = None,
-                report_titles: dict | None = None) -> dict:
+                report_titles: dict | None = None,
+                ads_fields: dict | None = None,
+                affiliate_fields: dict | None = None,
+                mapping_fields: dict | None = None) -> dict:
     """保存参数表。保留原来的 _readme 说明文字，别把它冲掉。"""
     old: dict = {}
     try:
@@ -116,6 +123,11 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
                            if order_fields is not None
                            else (old.get("order_fields") or {}))
     out["cost_fields"] = cost_fields if cost_fields is not None else (old.get("cost_fields") or {})
+    # 广告表 / 联盟佣金表 / 链接资料表：结构同订单表，同样清洗空标题
+    for _k, _v in (("ads_fields", ads_fields),
+                   ("affiliate_fields", affiliate_fields),
+                   ("mapping_fields", mapping_fields)):
+        out[_k] = _clean_order_fields(_v) if _v is not None else (old.get(_k) or {})
     out["params"] = params
     flag = old.get("exclude_zero_amount") if exclude_zero_amount is None else bool(exclude_zero_amount)
     if flag:
@@ -127,6 +139,8 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
             if not isinstance(v, dict):
                 continue
             if (v.get("params") or v.get("order_fields") or v.get("cost_fields")
+                    or v.get("ads_fields") or v.get("affiliate_fields")
+                    or v.get("mapping_fields")
                     or "exclude_zero_amount" in v
                     or (v.get("report_columns") and len(v["report_columns"]))
                     or str(v.get("report_total_position") or "").strip() in ("top", "bottom")

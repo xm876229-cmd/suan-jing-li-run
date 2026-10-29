@@ -273,6 +273,9 @@ def main(argv: list[str] | None = None) -> int:
     cc = _formula.country_config(fcfg, country)
     order_fields = cc.get("order_fields") or {}
     cost_fields = cc.get("cost_fields") or {}
+    ads_fields = cc.get("ads_fields") or {}
+    affiliate_fields = cc.get("affiliate_fields") or {}
+    mapping_fields = cc.get("mapping_fields") or {}
 
     # 快照：指定后就只用那一批文件算，而不是当前 inbox。
     # inbox 是「实时」的，扩展每取一次就多一份文件，而核算同类只取最新一份——
@@ -323,7 +326,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"找不到工作簿：{args.workbook}")
             return 2
         data = load_from_workbook(args.workbook, params.usd_to_local, costs_path,
-                                  order_fields=order_fields, cost_fields=cost_fields)
+                                  order_fields=order_fields, cost_fields=cost_fields,
+                                  ads_fields=ads_fields, affiliate_fields=affiliate_fields,
+                                  mapping_fields=mapping_fields)
         source = args.workbook.name
     elif args.orders:
         if not args.orders.exists():
@@ -331,19 +336,25 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         data = load_from_files(args.orders, args.ads, args.commissions,
                                map_path, costs_path, params.usd_to_local,
-                               order_fields=order_fields, cost_fields=cost_fields)
+                               order_fields=order_fields, cost_fields=cost_fields,
+                               ads_fields=ads_fields, affiliate_fields=affiliate_fields,
+                               mapping_fields=mapping_fields)
         source = "、".join(data.sources.values()) or args.orders.name
     else:
         if snap_dirs:
             # 多份快照合并：跨目录去重后再汇总
             data = load_from_dirs(snap_dirs, costs_path, params.usd_to_local, map_path,
-                                  order_fields=order_fields, cost_fields=cost_fields)
+                                  order_fields=order_fields, cost_fields=cost_fields,
+                                  ads_fields=ads_fields, affiliate_fields=affiliate_fields,
+                                  mapping_fields=mapping_fields)
         else:
             if not args.dir.exists():
                 print(f"找不到目录：{args.dir}")
                 return 2
             data = load_from_dir(args.dir, costs_path, params.usd_to_local, map_path,
-                                 order_fields=order_fields, cost_fields=cost_fields)
+                                 order_fields=order_fields, cost_fields=cost_fields,
+                                 ads_fields=ads_fields, affiliate_fields=affiliate_fields,
+                                 mapping_fields=mapping_fields)
         source = snap_note or args.dir.name
 
     if not data.orders:

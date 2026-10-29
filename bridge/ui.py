@@ -762,12 +762,15 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <div class="vars" id="vars"></div>
         </div></div>
 
-      <div class="card"><h2>订单表识别<span class="hint">程序靠这几列判断订单类型、找链接、对成本</span></h2>
-        <div class="body tight"><div class="tbl-wrap">
+      <div class="card"><h2>表头识别<span class="hint">每个表一套：程序靠这些列找数；标题可加多个候选，按顺序试</span></h2>
+        <div class="body tight">
+          <div class="tools" id="oftabs" style="margin-bottom:10px"></div>
+          <div class="tbl-wrap">
           <table class="cfg-tbl" id="oftbl"><thead><tr>
-            <th style="width:210px">用途</th><th>订单表里的标题（多个候选一行一个，按顺序试）</th>
+            <th style="width:210px">用途</th><th>表里的标题（多个候选一行一个，按顺序试）</th>
           </tr></thead><tbody id="ofbody"></tbody></table>
-        </div></div>
+          </div>
+        </div>
         <div class="body" style="padding-top:0">
           <p class="muted" style="font-size:12.5px;margin:0">
             这一栏只用来判断「这行订单算不算取消/退货/未付款」「属于哪条链接」「按哪个编码对成本」。
@@ -1831,6 +1834,9 @@ async function loadParams(){
       params: normParams(j.params),
       order_fields: clone(j.order_fields || {}),
       cost_fields: clone(j.cost_fields || {}),
+      ads_fields: clone(j.ads_fields || {}),
+      affiliate_fields: clone(j.affiliate_fields || {}),
+      mapping_fields: clone(j.mapping_fields || {}),
       exclude_zero_amount: !!j.exclude_zero_amount,
       report_columns: (j.report_columns && j.report_columns.length) ? j.report_columns : null,
       report_titles: j.report_titles || {},
@@ -1843,6 +1849,9 @@ async function loadParams(){
         params: (v.params && v.params.length) ? normParams(v.params) : clone(scopeData[""].params),
         order_fields: Object.assign(clone(scopeData[""].order_fields), v.order_fields || {}),
         cost_fields: Object.assign(clone(scopeData[""].cost_fields), v.cost_fields || {}),
+        ads_fields: Object.assign(clone(scopeData[""].ads_fields), v.ads_fields || {}),
+        affiliate_fields: Object.assign(clone(scopeData[""].affiliate_fields), v.affiliate_fields || {}),
+        mapping_fields: Object.assign(clone(scopeData[""].mapping_fields), v.mapping_fields || {}),
         exclude_zero_amount: ('exclude_zero_amount' in v)
           ? !!v.exclude_zero_amount : !!scopeData[""].exclude_zero_amount,
         report_columns: (v.report_columns && v.report_columns.length) ? v.report_columns : null,
@@ -1942,6 +1951,8 @@ function renderParams(){
           <button class="mini" data-addline="${i}" title="在光标处加一行（多个候选标题一行一个）">＋ 加一行</button>
           <span class="expr-hint" data-hint="${i}"></span>
         </div>
+        ${r.id === 'ads' ? '<div class="expr-hint" style="color:var(--text-2);margin-top:2px">广告表金额已按「货币」列自动换算成<b>本地货币</b>（USD/空 → × 美金汇率，MYR 直接用），公式直接引用即可，不用再乘汇率</div>' : ''}
+        ${r.id === 'affiliate' ? '<div class="expr-hint" style="color:var(--text-2);margin-top:2px">联盟佣金表金额本身就是<b>本地货币</b>（如 RM2,678.75），公式直接引用即可</div>' : ''}
       </td>
       ${kc}
       <td class="kcell"><input type="checkbox" data-on="${i}" ${r.enabled !== false ? 'checked' : ''}
@@ -2007,20 +2018,52 @@ function renderParams(){
   });
 }
 
-/* 订单表识别：这几列是程序判断订单类型、找链接、对成本用的。
-   一行一个标题：每个候选一个独立输入框（不再是一个大框里塞多行），
-   点「＋ 加一行」多一个空框，按顺序挨个找，找到第一个就用它。 */
+/* 表头识别：四个表各一套字段（订单 / 广告 / 联盟佣金 / 链接资料）。
+   每套结构都是 {字段: {label, titles:[...]}}；标题一行一个、按顺序找。
+   点 tab 切换表，互不影响。 */
+const OF_TABLES = [
+  { key: 'order_fields',     tab: '订单表',     hint: '判断订单类型、找链接、对成本' },
+  { key: 'ads_fields',       tab: '广告表',     hint: '取商品ID、花费、货币（花费会自动换成本地货币）' },
+  { key: 'affiliate_fields', tab: '联盟佣金表', hint: '取商品ID、预估佣金' },
+  { key: 'mapping_fields',   tab: '链接资料表', hint: '取款式编码、商品ID、SKU、卖家编码' },
+];
+let ofTable = 'order_fields';
+
+function curOfFields(){
+  const c = cur();
+  if(!c[ofTable] || typeof c[ofTable] !== 'object') c[ofTable] = {};
+  return c[ofTable];
+}
+
+function renderOfTabs(){
+  const box = $('#oftabs');
+  if(!box) return;
+  box.innerHTML = OF_TABLES.map(t =>
+    `<button class="mini${t.key === ofTable ? ' primary' : ''}" data-oftab="${t.key}"
+       title="${esc(t.hint)}">${esc(t.tab)}</button>`).join('');
+  box.querySelectorAll('[data-oftab]').forEach(b => b.onclick = () => {
+    ofTable = b.dataset.oftab;
+    renderOfTabs();
+    renderOrderFields();
+  });
+}
+
 function renderOrderFields(){
-  const of = cur().order_fields || {};
-  const keys = Object.keys(of).length ? Object.keys(of) : Object.keys(COURSE_LABELS);
+  renderOfTabs();
+  const of = curOfFields();
+  const keys = Object.keys(of);
+  if(!keys.length){
+    $('#ofbody').innerHTML = '<tr><td colspan="2" class="muted" style="padding:10px">这个表还没有配置字段</td></tr>';
+    return;
+  }
   $('#ofbody').innerHTML = keys.map(k => {
     const v = of[k] || {};
     const titles = (Array.isArray(v) ? v : (v.titles || [])).map(x => String(x ?? ''));
     const list = titles.length ? titles : [''];
-    const label = (v && v.label) || COURSE_LABELS[k] || k;
+    const label = (v && v.label) || k;
     const rows = list.map((t, j) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:5px">
         <input type="text" data-of="${esc(k)}" data-idx="${j}" value="${esc(t)}"
-               placeholder="订单表里的列标题" style="flex:1">
+               placeholder="这个表里的列标题" style="flex:1">
         <button class="mini" data-ofdel="${esc(k)}" data-idx="${j}"
                 title="删掉这一行" style="padding:2px 7px;color:var(--warn)">×</button>
       </div>`).join('');
@@ -2038,13 +2081,12 @@ function renderOrderFields(){
 
   // 取（必要时初始化）某个字段的 {label, titles}
   const ensure = (k) => {
-    const of2 = cur().order_fields;
-    const v = of2[k];
+    const v = of[k];
     if(!v || Array.isArray(v)){
-      of2[k] = {label: COURSE_LABELS[k] || k, titles: Array.isArray(v) ? v.slice() : []};
+      of[k] = {label: k, titles: Array.isArray(v) ? v.slice() : []};
     }
-    if(!Array.isArray(of2[k].titles)) of2[k].titles = [];
-    return of2[k];
+    if(!Array.isArray(of[k].titles)) of[k].titles = [];
+    return of[k];
   };
   $('#ofbody').querySelectorAll('input[data-of]').forEach(inp => {
     inp.oninput = () => {
@@ -2421,7 +2463,9 @@ function collectByCountry(){
   const rootFlag = !!(scopeData[""] && scopeData[""].exclude_zero_amount);
   scopeData && Object.entries(scopeData).forEach(([k, v]) => {
     if(!k) return;
-    const one = { params: v.params, order_fields: v.order_fields, cost_fields: v.cost_fields };
+    const one = { params: v.params, order_fields: v.order_fields, cost_fields: v.cost_fields,
+                  ads_fields: v.ads_fields, affiliate_fields: v.affiliate_fields,
+                  mapping_fields: v.mapping_fields };
     // 开关跟通用一样就不写，省得每个国家都留一条冗余
     if(!!v.exclude_zero_amount !== rootFlag) one.exclude_zero_amount = !!v.exclude_zero_amount;
     // 报表列配置：列勾选 / 自定义标题 / 合计位置，各国独立（和参数表一样）
@@ -2497,6 +2541,8 @@ $('#btn-save').onclick = async () => {
       body: JSON.stringify({params: g.params, by_country: collectByCountry(),
                             formulas: fmls, order_fields: g.order_fields,
                             cost_fields: g.cost_fields,
+                            ads_fields: g.ads_fields, affiliate_fields: g.affiliate_fields,
+                            mapping_fields: g.mapping_fields,
                             exclude_zero_amount: !!g.exclude_zero_amount,
                             report_columns: g.report_columns || [],
                             report_titles: g.report_titles || {},

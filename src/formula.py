@@ -232,6 +232,31 @@ DEFAULT_COST_FIELDS: dict[str, dict] = {
     "cost": {"label": "成本（人民币）", "titles": ["成本", "成本价", "采购成本", "Cost"]},
 }
 
+# 广告表：哪一列是商品ID、花费、货币。平台改列名就在「表头识别 → 广告表」里加候选。
+DEFAULT_ADS_FIELDS: dict[str, dict] = {
+    "product_id": {"label": "商品ID", "titles": ["Product ID", "商品ID"]},
+    "ad_cost": {"label": "广告花费", "titles": ["Cost", "成本", "Spend", "花费", "广告花费"]},
+    "ad_currency": {"label": "货币", "titles": ["Currency", "货币"]},
+}
+
+# 联盟佣金表：商品ID、预估佣金（可能带退款列）
+DEFAULT_AFFILIATE_FIELDS: dict[str, dict] = {
+    "product_id": {"label": "商品ID", "titles": ["Product ID", "商品ID"]},
+    "commission": {"label": "预估佣金", "titles": [
+        "Est. Commission", "Est Commission", "预估佣金", "佣金"]},
+    "commission_refund": {"label": "退款", "titles": ["Refunds", "退款"]},
+}
+
+# 链接资料（SKU→商品 映射）：款式编码、商品ID、SKU ID、卖家编码、商品名
+DEFAULT_MAPPING_FIELDS: dict[str, dict] = {
+    "style_code": {"label": "款式编码", "titles": [
+        "款式编码", "款式", "Style Code", "这列常态保留", "常态保留", "勿删和覆盖"]},
+    "product_id": {"label": "商品ID", "titles": ["Product ID", "商品ID"]},
+    "sku_id": {"label": "SKU ID", "titles": ["SKU ID"]},
+    "seller_sku": {"label": "卖家编码", "titles": ["Seller SKU", "卖家SKU", "商家SKU"]},
+    "product_name": {"label": "商品名称", "titles": ["Product Name", "商品名称"]},
+}
+
 DEFAULTS: dict = {
     "kinds": {
         "cancelled": "已取消订单",
@@ -242,6 +267,9 @@ DEFAULTS: dict = {
     },
     "order_fields": DEFAULT_ORDER_FIELDS,
     "cost_fields": DEFAULT_COST_FIELDS,
+    "ads_fields": DEFAULT_ADS_FIELDS,
+    "affiliate_fields": DEFAULT_AFFILIATE_FIELDS,
+    "mapping_fields": DEFAULT_MAPPING_FIELDS,
     # 计算参数表：每一项就是一条算式，公式里直接写订单表的列标题。
     "params": [
         {"id": "gmv", "label": "GMV（收入）", "role": "gmv",
@@ -314,7 +342,8 @@ def load_config(path: Path) -> dict:
         out["params"] = doc["fees"]
     if isinstance(doc.get("kinds"), dict) and doc["kinds"]:
         out["kinds"] = doc["kinds"]
-    for key in ("order_fields", "cost_fields"):
+    for key in ("order_fields", "cost_fields", "ads_fields",
+                "affiliate_fields", "mapping_fields"):
         if isinstance(doc.get(key), dict) and doc[key]:
             merged = dict(out[key])
             for k, v in doc[key].items():
@@ -350,6 +379,9 @@ def country_config(fcfg: dict, country: str) -> dict:
         "params": list(fcfg.get("params") or []),
         "order_fields": dict(fcfg.get("order_fields") or {}),
         "cost_fields": dict(fcfg.get("cost_fields") or {}),
+        "ads_fields": dict(fcfg.get("ads_fields") or {}),
+        "affiliate_fields": dict(fcfg.get("affiliate_fields") or {}),
+        "mapping_fields": dict(fcfg.get("mapping_fields") or {}),
         "formulas": dict(fcfg.get("formulas") or {}),
         "exclude_zero_amount": bool(fcfg.get("exclude_zero_amount")),
         # 报表列配置：先继承顶层，某国家单独设了才覆盖（没设的国家用通用那套）
@@ -360,7 +392,8 @@ def country_config(fcfg: dict, country: str) -> dict:
     one = (fcfg.get("by_country") or {}).get(country) or {}
     if isinstance(one.get("params"), list) and one["params"]:
         base["params"] = list(one["params"])
-    for key in ("order_fields", "cost_fields"):
+    for key in ("order_fields", "cost_fields", "ads_fields",
+                "affiliate_fields", "mapping_fields"):
         if isinstance(one.get(key), dict):
             base[key].update(one[key])
     if isinstance(one.get("formulas"), dict):
