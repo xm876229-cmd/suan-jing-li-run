@@ -2007,49 +2007,65 @@ function renderParams(){
   });
 }
 
-/* 订单表识别：这几列是程序判断订单类型、找链接、对成本用的 */
+/* 订单表识别：这几列是程序判断订单类型、找链接、对成本用的。
+   一行一个标题：每个候选一个独立输入框（不再是一个大框里塞多行），
+   点「＋ 加一行」多一个空框，按顺序挨个找，找到第一个就用它。 */
 function renderOrderFields(){
   const of = cur().order_fields || {};
   const keys = Object.keys(of).length ? Object.keys(of) : Object.keys(COURSE_LABELS);
   $('#ofbody').innerHTML = keys.map(k => {
     const v = of[k] || {};
-    const titles = Array.isArray(v) ? v : (v.titles || []);
+    const titles = (Array.isArray(v) ? v : (v.titles || [])).map(x => String(x ?? ''));
+    const list = titles.length ? titles : [''];
     const label = (v && v.label) || COURSE_LABELS[k] || k;
+    const rows = list.map((t, j) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:5px">
+        <input type="text" data-of="${esc(k)}" data-idx="${j}" value="${esc(t)}"
+               placeholder="订单表里的列标题" style="flex:1">
+        <button class="mini" data-ofdel="${esc(k)}" data-idx="${j}"
+                title="删掉这一行" style="padding:2px 7px;color:var(--warn)">×</button>
+      </div>`).join('');
     return `<tr>
       <td>${esc(label)}<div class="pid">${esc(k)}</div></td>
       <td class="expr-cell">
-        <textarea data-of="${esc(k)}" rows="2" placeholder="多个候选，一行一个"></textarea>
+        <div data-oflist="${esc(k)}">${rows}</div>
         <div class="expr-tools">
           <button class="mini" data-ofadd="${esc(k)}">＋ 加一行</button>
-          <span class="expr-hint">按顺序挨个找，找到第一个就用它</span>
+          <span class="expr-hint">一行一个标题，按顺序挨个找，找到第一个就用它</span>
         </div>
       </td>
     </tr>`;
   }).join('');
-  // textarea 内容要在 innerHTML 之后设，否则换行会被当成 HTML 空白吃掉
-  $('#ofbody').querySelectorAll('[data-of]').forEach(inp => {
-    const k = inp.dataset.of;
-    const v = cur().order_fields[k] || {};
-    const titles = Array.isArray(v) ? v : (v.titles || []);
-    inp.value = titles.join('\n');
+
+  // 取（必要时初始化）某个字段的 {label, titles}
+  const ensure = (k) => {
+    const of2 = cur().order_fields;
+    const v = of2[k];
+    if(!v || Array.isArray(v)){
+      of2[k] = {label: COURSE_LABELS[k] || k, titles: Array.isArray(v) ? v.slice() : []};
+    }
+    if(!Array.isArray(of2[k].titles)) of2[k].titles = [];
+    return of2[k];
+  };
+  $('#ofbody').querySelectorAll('input[data-of]').forEach(inp => {
     inp.oninput = () => {
-      const of2 = cur().order_fields;
-      // 一行一个候选；顺带兼容旧的竖线写法
-      const list = inp.value.split(/[\n\r|]+/).map(x => x.trim()).filter(Boolean);
-      if(!of2[k] || Array.isArray(of2[k])) of2[k] = {label: COURSE_LABELS[k] || k, titles: list};
-      else of2[k].titles = list;
+      const o = ensure(inp.dataset.of);
+      o.titles[Number(inp.dataset.idx)] = inp.value;
     };
   });
   $('#ofbody').querySelectorAll('[data-ofadd]').forEach(b => b.onclick = () => {
     const k = b.dataset.ofadd;
-    const inp = $('#ofbody').querySelector(`[data-of="${CSS.escape(k)}"]`);
-    if(!inp){ toast('先点一下要编辑的框'); return; }
-    inp.focus();
-    const s = inp.selectionStart ?? inp.value.length;
-    const ins = (inp.value.slice(0, s).trimEnd().endsWith('\n') || s === 0) ? '' : '\n';
-    inp.value = inp.value.slice(0, s) + ins + inp.value.slice(inp.selectionEnd ?? s);
-    inp.selectionStart = inp.selectionEnd = s + ins.length;
-    inp.oninput && inp.oninput();
+    const o = ensure(k);
+    o.titles.push('');
+    renderOrderFields();
+    const all = $('#ofbody').querySelectorAll(`input[data-of="${CSS.escape(k)}"]`);
+    if(all.length) all[all.length - 1].focus();
+  });
+  $('#ofbody').querySelectorAll('[data-ofdel]').forEach(b => b.onclick = () => {
+    const k = b.dataset.ofdel, idx = Number(b.dataset.idx);
+    const o = ensure(k);
+    if(o.titles.length <= 1) o.titles = [''];
+    else o.titles.splice(idx, 1);
+    renderOrderFields();
   });
 }
 
@@ -2143,6 +2159,15 @@ function checkExpr(i){
     known.set(lb, '参数表里「' + lb + '」那一项');
   });
   headers.forEach(h => known.set(h, '订单表的列'));
+  // 「订单表识别」里配的候选标题也算认识：用户就是按映射写标题的。
+  // 只认真实表头的话，没上传订单表 / 表头是本地化名字时，
+  // 合法的 [折扣前小计] 之类会被误报「不认识」。
+  Object.values(cur().order_fields || {}).forEach(v => {
+    (Array.isArray(v) ? v : (v.titles || [])).forEach(t => {
+      const s = String(t || '').trim();
+      if(s) known.set(s, '订单表列（订单表识别里配的）');
+    });
+  });
 
   // 找出用到的词
   const used = [];
@@ -2180,8 +2205,7 @@ function checkExpr(i){
     unknown.push(w);
   });
   cols.forEach(c => {
-    const hit = headers.some(h => h === c);
-    if(!hit && !unknown.includes(c)) unknown.push(c);
+    if(!known.has(c) && !unknown.includes(c)) unknown.push(c);
   });
 
   const parts = [];
@@ -2348,6 +2372,13 @@ function checkFml(i){
     if(RATE_LABELS[x] && RATE_LABELS[x] !== cn) known.add(RATE_LABELS[x]);
   });
   rowsOf().filter(x => x.id).forEach(x => known.add((x.label || x.id).trim()));
+  // 订单表识别里配的候选标题也算认识（净利公式里可能直接引用列）
+  Object.values(cur().order_fields || {}).forEach(v => {
+    (Array.isArray(v) ? v : (v.titles || [])).forEach(t => {
+      const s = String(t || '').trim();
+      if(s) known.add(s);
+    });
+  });
   Object.keys(FORMULA_CN).forEach(x => known.add(FORMULA_CN[x]));
   ['gmv','paid','qty','orders','order_count','items','cost_cny','cost',
    'cost_unit','refund','commission','ads','net','gross_profit',

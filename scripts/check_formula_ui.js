@@ -72,6 +72,12 @@ function rateCn(k) {
     || RATE_LABELS[k] || k;
 }
 function rowsOf() { return rows; }
+// 当前作用域的配置（含「订单表识别」里配的候选标题）。
+// checkExpr 现在会把这些候选也当成已知列名，否则用户按映射写中文标题会被误报。
+const cur = () => ({ order_fields: {
+  gmv: { label: 'GMV', titles: ['折扣前小计', 'SKU Subtotal Before Discount'] },
+  seller_discount: { label: '卖家折扣', titles: ['卖家折扣', 'SKU Seller Discount'] },
+}});
 
 // 桩：记录提示文字
 const hints = {};
@@ -97,7 +103,7 @@ const code = [
 
 const fn = new Function(
   'document', 'esc', 'headers', 'varRates', 'rateCn', 'rateLabels',
-  'rowsOf', 'FIELD_VARS', 'FORMULA_CN', 'fmls', 'RATE_LABELS', 'rateCnServer',
+  'rowsOf', 'cur', 'FIELD_VARS', 'FORMULA_CN', 'fmls', 'RATE_LABELS', 'rateCnServer',
   code + '\nreturn {checkExpr, checkFml};'
 );
 
@@ -108,7 +114,7 @@ const constFn = new Function(constSrc + '\nreturn {FIELD_VARS, FORMULA_CN};');
 const { FIELD_VARS, FORMULA_CN } = constFn();
 
 const api = fn(document, esc, headers, varRates, rateCn, rateLabels,
-               rowsOf, FIELD_VARS, FORMULA_CN, fmls, RATE_LABELS, rateCnServer);
+               rowsOf, cur, FIELD_VARS, FORMULA_CN, fmls, RATE_LABELS, rateCnServer);
 
 let failed = 0;
 function check(label, cond, extra) {
@@ -148,6 +154,13 @@ check('候选标题被列出来',
 rows[4].expr = '[不存在的列名]';
 api.checkExpr(4);
 check('认不出的列被标出', (hints['4'] || '').includes('不认识'), '提示=' + hints['4']);
+
+// 「订单表识别」里配的中文候选标题（不在真实表头里）也要认得，
+// 否则用户按映射写 [折扣前小计] 会被误报「不认识」。
+rows[4].expr = '[折扣前小计] - [卖家折扣]';
+api.checkExpr(4);
+check('订单表识别里配的中文候选也算认得出',
+      !(hints['4'] || '').includes('不认识'), '提示=' + hints['4']);
 
 console.log('\n【净利公式区】');
 api.checkFml(3);   // net_rate

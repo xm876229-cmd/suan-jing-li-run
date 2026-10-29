@@ -57,6 +57,42 @@ def read_config() -> dict:
     }
 
 
+def _clean_order_fields(fields: dict | None) -> dict:
+    """把订单表识别的候选标题洗干净：去空行、去重（不区分大小写），
+    统一成 {字段: {label, titles: [...]}}。
+
+    前端「一行一个标题」的输入框可能留下空串（点了加一行没填），
+    存进去下次渲染会多出空框，所以保存时清掉。
+    """
+    clean: dict = {}
+    for k, v in (fields or {}).items():
+        key = str(k or "").strip()
+        if not key:
+            continue
+        if isinstance(v, dict):
+            label = str(v.get("label") or key).strip()
+            raw = v.get("titles") or []
+        elif isinstance(v, list):
+            label = key
+            raw = v
+        else:
+            continue
+        seen: set = set()
+        titles: list[str] = []
+        for t in raw:
+            s = str(t or "").strip()
+            if not s:
+                continue
+            low = s.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            titles.append(s)
+        if titles:
+            clean[key] = {"label": label, "titles": titles}
+    return clean
+
+
 def save_config(params: list, formulas: dict, keep_readme: bool = True,
                 by_country: dict | None = None,
                 order_fields: dict | None = None,
@@ -76,7 +112,9 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
     if keep_readme and old.get("_readme"):
         out["_readme"] = old["_readme"]
     out["kinds"] = old.get("kinds") or dict(KINDS)
-    out["order_fields"] = order_fields if order_fields is not None else (old.get("order_fields") or {})
+    out["order_fields"] = (_clean_order_fields(order_fields)
+                           if order_fields is not None
+                           else (old.get("order_fields") or {}))
     out["cost_fields"] = cost_fields if cost_fields is not None else (old.get("cost_fields") or {})
     out["params"] = params
     flag = old.get("exclude_zero_amount") if exclude_zero_amount is None else bool(exclude_zero_amount)
