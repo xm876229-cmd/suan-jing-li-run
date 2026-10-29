@@ -137,6 +137,16 @@ check('写「发单费单价 / 人民币汇率」不再报不认识',
 check('认出了中文费率项', (hints['3'] || '').includes('发单费单价'), '提示=' + hints['3']);
 check('认出了汇率名', (hints['3'] || '').includes('人民币汇率'), '提示=' + hints['3']);
 
+console.log('\n【改了费率中文名后，默认名仍要认】');
+// 用户把 cny_to_local 的中文名改成「马币汇率」，公式里照文档写「人民币汇率」也该认
+rateLabels.cny_to_local = '马币汇率';
+rows[3].expr = '本行订单数 * 发单费单价 * 人民币汇率';
+api.checkExpr(3);
+check('自定义名生效后，写默认名「人民币汇率」不报不认识',
+      !(hints['3'] || '').includes('不认识'), '提示=' + hints['3']);
+delete rateLabels.cny_to_local;
+rows[3].expr = '本行订单数 * 发单费单价 * 人民币汇率';
+
 console.log('\n【真正写错的词仍要标出来】');
 rows[3].expr = '本行订单数 * 发单费单价 * 乱写的汇率';
 api.checkExpr(3);

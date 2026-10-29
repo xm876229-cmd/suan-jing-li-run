@@ -1976,6 +1976,32 @@ function renderDropZero(){
 /* 新国家：从通用那套复制，开关也跟着复制 */
 
 
+/* 公式框下的「插入参数」下拉：把能用到的量分组列出来，选一下就插到光标处。
+   新人不用记中文名、也不用去页面底部找变量芯片。 */
+function paramOptionsHTML(){
+  const opt = (val, label) => `<option value="${esc(val)}">${esc(label)}</option>`;
+  const groups = [];
+  if(FIELD_VARS && FIELD_VARS.length){
+    groups.push('<optgroup label="本行 / 算好的量">' +
+      FIELD_VARS.map(v => opt(v.cn || v.k, (v.cn || v.k) + (v.t ? '　· ' + v.t : ''))).join('') +
+      '</optgroup>');
+  }
+  if(varRates && varRates.length){
+    groups.push('<optgroup label="费率 / 汇率">' +
+      varRates.map(k => opt(rateCn(k), rateCn(k))).join('') + '</optgroup>');
+  }
+  const prs = rowsOf().filter(r => r.id).map(r => (r.label || r.id).trim()).filter(Boolean);
+  if(prs.length){
+    groups.push('<optgroup label="参数表里别的行（结果）">' +
+      prs.map(x => opt(x, x)).join('') + '</optgroup>');
+  }
+  if(headers && headers.length){
+    groups.push('<optgroup label="订单表列">' +
+      headers.map(h => opt('[' + h + ']', h)).join('') + '</optgroup>');
+  }
+  return '<option value="">＋ 插入参数…</option>' + groups.join('');
+}
+
 function renderParams(){
   const rows = rowsOf();
   const body = $('#pbody');
@@ -2001,6 +2027,8 @@ function renderParams(){
           style="font-family:ui-monospace,Consolas,monospace;width:100%;resize:vertical"></textarea>
         <div class="expr-tools">
           <button class="mini" data-addline="${i}" title="在光标处加一行（多个候选标题一行一个）">＋ 加一行</button>
+          <select class="ins-param" data-insfor="${i}" title="选一个参数，插到公式光标处"
+                  style="max-width:190px;font-size:12px;padding:3px 6px">${paramOptionsHTML()}</select>
           <span class="expr-hint" data-hint="${i}"></span>
         </div>
         ${r.id === 'ads' ? '<div class="expr-hint" style="color:var(--text-2);margin-top:2px">广告表金额已按「货币」列自动换算成<b>本地货币</b>（USD/空 → × 美金汇率，MYR 直接用），公式直接引用即可，不用再乘汇率</div>' : ''}
@@ -2031,6 +2059,24 @@ function renderParams(){
     inp.onblur = () => { checkExpr(i); };
     checkExpr(i);
   });
+  // 「插入参数」下拉：选一个就插到该行公式的光标处
+  body.querySelectorAll('[data-insfor]').forEach(sel => {
+    sel.onchange = () => {
+      const i = Number(sel.dataset.insfor);
+      const txt = sel.value;
+      sel.value = '';
+      if(!txt) return;
+      const inp = body.querySelector(`[data-expr="${i}"]`);
+      if(!inp) return;
+      const s = inp.selectionStart ?? inp.value.length, e = inp.selectionEnd ?? s;
+      inp.value = inp.value.slice(0, s) + txt + inp.value.slice(e);
+      rows[i].expr = inp.value;
+      inp.focus();
+      inp.selectionStart = inp.selectionEnd = s + txt.length;
+      checkExpr(i);
+    };
+  });
+
   // 「＋ 加一行」：在光标处插一个换行，把候选标题拆成多行写
   body.querySelectorAll('[data-addline]').forEach(b => b.onclick = () => {
     const i = Number(b.dataset.addline);
@@ -2186,6 +2232,9 @@ async function loadFormulaVars(){
     varRates = [...set];
   }catch(e){ varRates = []; }
   renderVars();
+  // 费率是异步加载的：加载完要重渲染参数表（让「插入参数」下拉带上费率），
+  // 并重新校验一遍公式——否则初始渲染时 varRates 为空，会把「人民币汇率」误报不认识。
+  if(typeof renderParams === 'function') renderParams();
 }
 
 function insertVar(txt){
@@ -2245,8 +2294,13 @@ function checkExpr(i){
   varRates.forEach(k => {
     const cn = rateCn(k);
     known.set(cn, '费率：' + cn);
-    // 旧名（不带率，如「平台佣金」）也认，避免用户沿用旧写法被误报不认识
-    if(RATE_LABELS[k] && RATE_LABELS[k] !== cn) known.set(RATE_LABELS[k], '费率：' + RATE_LABELS[k]);
+    // 用户可能把费率中文名改成了别的；引擎默认名（人民币汇率…）和旧名也认，
+    // 免得公式里照文档写默认名被误报「不认识」。下拉插入的是当前名，也不会错。
+    [rateLabels && rateLabels[k], rateCnServer && rateCnServer[k], RATE_LABELS[k], k]
+      .forEach(n => {
+        const s = String(n || '').trim();
+        if(s) known.set(s, '费率：' + s);
+      });
   });
   rowsOf().filter(x => x.id).forEach(x => {
     const lb = (x.label || x.id).trim();
@@ -2471,7 +2525,8 @@ function checkFml(i){
   varRates.forEach(x => {
     const cn = rateCn(x);
     known.add(cn);
-    if(RATE_LABELS[x] && RATE_LABELS[x] !== cn) known.add(RATE_LABELS[x]);
+    [rateLabels && rateLabels[x], rateCnServer && rateCnServer[x], RATE_LABELS[x], x]
+      .forEach(n => { const s = String(n || '').trim(); if(s) known.add(s); });
   });
   rowsOf().filter(x => x.id).forEach(x => known.add((x.label || x.id).trim()));
   // 订单表识别里配的候选标题也算认识（净利公式里可能直接引用列）
