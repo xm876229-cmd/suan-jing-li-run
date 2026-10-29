@@ -463,6 +463,19 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/mapping"):
             from bridge import settings_api
             _json(self, settings_api.read_mapping())
+        elif self.path.startswith("/api/costs/template/save"):
+            # 窗口内（WebView2）点下载链接不会弹下载框，所以另给一个
+            # 「直接存到报表目录」的接口，前端提示用户文件在哪。
+            from bridge import costs_api
+            from src import paths as _paths
+            try:
+                data = costs_api.make_template()
+                out = _paths.OUTPUT / "成本表导入模板.xlsx"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(data)
+                _json(self, {"ok": True, "path": str(out)})
+            except Exception as e:  # noqa: BLE001
+                _json(self, {"ok": False, "error": f"生成模板失败：{e}"}, 500)
         elif self.path.startswith("/api/costs/template"):
             from bridge import costs_api
             try:

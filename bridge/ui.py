@@ -2356,7 +2356,9 @@ function renderReportColumns(){
   if(!box) return;
   const cat = reportColumnCatalog();
   const c = cur();
-  const sel = (c.report_columns && c.report_columns.length) ? new Set(c.report_columns) : null;
+  // 显式数组（含空数组）= 按它来；null/undefined = 默认全选。
+  // 关键：空数组要当成「全不选」，不能又回退成全选（否则取消全选没反应）。
+  const sel = Array.isArray(c.report_columns) ? new Set(c.report_columns) : null;
   const titles = c.report_titles || {};
   const total = c.report_total_position === 'top' ? 'top' : 'bottom';
   box.innerHTML = cat.map(col => {
@@ -2376,15 +2378,21 @@ function renderReportColumns(){
     r.onchange = () => { c.report_total_position = r.value; };
   });
 
-  // 全选开关
+  // 全选开关：点一下全选 / 再点一下全部取消。
+  // 勾选要立刻写回 cur().report_columns，否则重渲染会按旧值恢复，看起来「点了没反应」。
   const allCb = $('#rcols-all');
-  allCb.checked = !sel;
+  allCb.checked = !sel || sel.size >= cat.length;
   allCb.onchange = () => {
-    box.querySelectorAll('[data-rcol]').forEach(cb => cb.checked = allCb.checked);
+    const on = allCb.checked;
+    c.report_columns = on ? cat.map(x => x.key) : [];
+    box.querySelectorAll('[data-rcol]').forEach(cb => cb.checked = on);
     renderReportColumns();
   };
   box.querySelectorAll('[data-rcol]').forEach(cb => cb.onchange = () => {
-    allCb.checked = [...box.querySelectorAll('[data-rcol]')].every(x => x.checked);
+    const keys = [...box.querySelectorAll('[data-rcol]')]
+      .filter(x => x.checked).map(x => x.dataset.rcol);
+    c.report_columns = keys;
+    allCb.checked = keys.length >= cat.length;
   });
   box.querySelectorAll('[data-rtitle]').forEach(inp => inp.oninput = () => {
     const k = inp.dataset.rtitle;
@@ -2661,6 +2669,18 @@ $('#btn-cost-prev').onclick = () => { if(costPageNo > 0){ costPageNo--; renderCo
 $('#btn-cost-next').onclick = () => {
   const pages = Math.max(1, Math.ceil(costFiltered.length / COST_PAGE));
   if(costPageNo < pages - 1){ costPageNo++; renderCosts(); }
+};
+
+// 「下载导入模板」：浏览器里正常下载；窗口（WebView2）里不弹下载框，
+// 改成直接存到报表目录，并告诉用户文件在哪。
+$('#btn-cost-tpl').onclick = async (e) => {
+  if(!window.pywebview) return;          // 浏览器：走 <a download>
+  e.preventDefault();
+  try{
+    const r = await fetch('/api/costs/template/save');
+    const j = await r.json();
+    toast(j.ok ? ('模板已保存到报表目录：' + j.path) : ('保存失败：' + (j.error || '')));
+  }catch(err){ toast('保存失败：' + err.message); }
 };
 
 $('#btn-cost-add').onclick = () => {
