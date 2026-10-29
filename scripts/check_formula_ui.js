@@ -37,8 +37,15 @@ const html = scriptBody();
 // 全局变量（测试用假数据）
 const headers = ['SKU Subtotal Before Discount', 'SKU Seller Discount', 'Order Amount'];
 const varRates = ['platform_commission', 'tx_fee', 'cashback', 'dispatch_fee_cny',
-                  'order_service', 'cny_to_local', 'ads', 'affiliate'];
+                  'order_service', 'cny_to_local', 'usd_to_local', 'ads', 'affiliate'];
 const rateLabels = {};
+// 引擎权威中文名（带「率」字）：公式解析器只认这套，校验必须跟它对齐
+const rateCnServer = {
+  platform_commission: '平台佣金率', tx_fee: '交易手续费率', cashback: '奖金返现率',
+  super_coupon: '超级优惠券率', growth_fee: '商家成长费率', logistics: '物流费率',
+  dispatch_fee_cny: '发单费单价', order_service: '订单服务费单价',
+  cny_to_local: '人民币汇率', usd_to_local: '美金汇率', other_fee: '其他费用率',
+};
 let rows = [
   { id: 'gmv', label: 'GMV（收入）', expr: '本行GMV', kinds: ['normal'] },
   { id: 'cost', label: '商品成本', expr: '成本单价 * 人民币汇率', kinds: ['normal'] },
@@ -59,7 +66,11 @@ const RATE_LABELS = {
   dispatch_fee_cny: '发单费', order_service: '订单服务费', cny_to_local: '人民币汇率',
   ads: '广告花费', affiliate: '达人佣金',
 };
-function rateCn(k) { return (rateLabels && rateLabels[k]) || RATE_LABELS[k] || k; }
+// 与线上一致：费率名优先用引擎权威名（带「率」），其次用户/旧名
+function rateCn(k) {
+  return (rateCnServer && rateCnServer[k]) || (rateLabels && rateLabels[k])
+    || RATE_LABELS[k] || k;
+}
 function rowsOf() { return rows; }
 
 // 桩：记录提示文字
@@ -86,7 +97,7 @@ const code = [
 
 const fn = new Function(
   'document', 'esc', 'headers', 'varRates', 'rateCn', 'rateLabels',
-  'rowsOf', 'FIELD_VARS', 'FORMULA_CN', 'fmls',
+  'rowsOf', 'FIELD_VARS', 'FORMULA_CN', 'fmls', 'RATE_LABELS', 'rateCnServer',
   code + '\nreturn {checkExpr, checkFml};'
 );
 
@@ -97,7 +108,7 @@ const constFn = new Function(constSrc + '\nreturn {FIELD_VARS, FORMULA_CN};');
 const { FIELD_VARS, FORMULA_CN } = constFn();
 
 const api = fn(document, esc, headers, varRates, rateCn, rateLabels,
-               rowsOf, FIELD_VARS, FORMULA_CN, fmls);
+               rowsOf, FIELD_VARS, FORMULA_CN, fmls, RATE_LABELS, rateCnServer);
 
 let failed = 0;
 function check(label, cond, extra) {
@@ -112,11 +123,19 @@ check('中文公式能翻译成人话',
       '提示=' + hints['3']);
 check('认出了费率项', (hints['3'] || '').includes('发单费单价'), '提示=' + hints['3']);
 
-console.log('\n【不认识的词要标出来】');
+console.log('\n【带「率」的费率名必须认得出（修复「不认识」）】');
 rows[3].expr = '本行订单数 * 发单费单价 * 人民币汇率';
 api.checkExpr(3);
+check('写「发单费单价 / 人民币汇率」不再报不认识',
+      !(hints['3'] || '').includes('不认识'), '提示=' + hints['3']);
+check('认出了中文费率项', (hints['3'] || '').includes('发单费单价'), '提示=' + hints['3']);
+check('认出了汇率名', (hints['3'] || '').includes('人民币汇率'), '提示=' + hints['3']);
+
+console.log('\n【真正写错的词仍要标出来】');
+rows[3].expr = '本行订单数 * 发单费单价 * 乱写的汇率';
+api.checkExpr(3);
 check('错词被标出', (hints['3'] || '').includes('不认识'), '提示=' + hints['3']);
-check('错词被点名', (hints['3'] || '').includes('人民币汇率'), '提示=' + hints['3']);
+check('错词被点名', (hints['3'] || '').includes('乱写的汇率'), '提示=' + hints['3']);
 rows[3].expr = '本行订单数 * 发单费单价 * 人民币汇率';
 
 console.log('\n【订单表列（多候选一行一个）】');

@@ -46,6 +46,11 @@ def read_config() -> dict:
         # 总开关：true = 整张参数表都不算 0 元样品单
         "exclude_zero_amount": bool(cfg.get("exclude_zero_amount")),
         "kinds": cfg.get("kinds") or dict(KINDS),
+        # 报表「汇总」页要展示哪些列（列键列表）、合计行放哪（top/bottom）、列标题怎么命名
+        "report_columns": cfg.get("report_columns") or [],
+        "report_total_position": str(cfg.get("report_total_position") or "bottom").strip()
+        or "bottom",
+        "report_titles": cfg.get("report_titles") or {},
         "raw_note": doc.get("_readme") or [],
         # 最近一次订单表的真实表头：界面上写标题时可以直接点选
         "headers": order_headers().get("titles") or [],
@@ -56,7 +61,10 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
                 by_country: dict | None = None,
                 order_fields: dict | None = None,
                 cost_fields: dict | None = None,
-                exclude_zero_amount: bool | None = None) -> dict:
+                exclude_zero_amount: bool | None = None,
+                report_columns: list | None = None,
+                report_total_position: str | None = None,
+                report_titles: dict | None = None) -> dict:
     """保存参数表。保留原来的 _readme 说明文字，别把它冲掉。"""
     old: dict = {}
     try:
@@ -81,11 +89,40 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
             if not isinstance(v, dict):
                 continue
             if (v.get("params") or v.get("order_fields") or v.get("cost_fields")
-                    or "exclude_zero_amount" in v):
+                    or "exclude_zero_amount" in v
+                    or (v.get("report_columns") and len(v["report_columns"]))
+                    or str(v.get("report_total_position") or "").strip() in ("top", "bottom")
+                    or (v.get("report_titles") and len(v["report_titles"]))):
                 clean[k] = v
         if clean:
             out["by_country"] = clean
     out["formulas"] = formulas or {}
+    # 报表列配置：列键列表 + 合计位置（top/bottom）+ 列标题自定义命名
+    if report_columns is not None:
+        cols = [str(x).strip() for x in report_columns if str(x).strip()]
+        if cols:
+            out["report_columns"] = cols
+        elif "report_columns" in old:
+            pass  # 清空时不写键，配置更干净
+    elif "report_columns" in old:
+        out["report_columns"] = old["report_columns"]
+    if report_total_position is not None:
+        pos = str(report_total_position).strip()
+        if pos in ("top", "bottom"):
+            out["report_total_position"] = pos
+    elif "report_total_position" in old:
+        out["report_total_position"] = old["report_total_position"]
+    if report_titles is not None:
+        # 只保留有内容的改名（空值 = 用默认标题，不写）
+        clean_titles = {str(k).strip(): str(v).strip()
+                        for k, v in report_titles.items()
+                        if str(k).strip() and str(v).strip()}
+        if clean_titles:
+            out["report_titles"] = clean_titles
+        elif "report_titles" in old:
+            pass  # 清空时不写键，配置更干净
+    elif "report_titles" in old:
+        out["report_titles"] = old["report_titles"]
 
     config_path().write_text(
         json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

@@ -89,6 +89,20 @@ def _f(c: dict, key: str, default: float = 0.0) -> float:
         return float(default)
 
 
+def _build_field_titles(order_aliases: dict) -> dict[str, list[str]]:
+    """把「字段 → 备胎标题」摊平成 {归一化标题: [归一化备胎...]}。
+
+    公式里写 [折扣前小计] 这种主标题时，compile_expr 用它去查真正的列：
+    先按主标题找，找不到就按顺序试这个字段配的其它标题。
+    """
+    out: dict[str, list[str]] = {}
+    for _key, titles in (order_aliases or {}).items():
+        cands = [formula._norm(t) for t in titles if str(t).strip()]
+        for t in cands:
+            out.setdefault(t, cands)
+    return out
+
+
 def load_rates(path: Path) -> tuple[dict[str, Params], Switches]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     out: dict[str, Params] = {}
@@ -453,6 +467,9 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
     # 这个国家生效的一套：参数表、订单表字段标题、成本表列标题、净利公式。
     cc = formula.country_config(fcfg, params.country)
     order_aliases = merged_aliases(cc["order_fields"])
+    # 把「订单表识别」里的字段 → 备胎标题 摊平成 {归一化标题: [归一化备胎...]}，
+    # 公式里写 [折扣前小计] 这类主标题时，程序据此去找真正的列。
+    field_titles = _build_field_titles(order_aliases)
 
     # 订单实付分配：按 GMV 占比时，先算出每个订单的 GMV 合计。
     # 用全量订单（不受日期过滤影响），避免跨期的订单被截断后分配比例失真。
@@ -619,6 +636,8 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
             #   aliases 该国「基础字段 → 标题候选」（gmv/实付这些派生量用）
             "titles": data.order_titles,
             "aliases": order_aliases,
+            # 公式里写 [主标题] 时，按「订单表识别」里配的备胎标题去找列
+            "field_titles": field_titles,
             # 兜底单价：某个参数 kinds 里一件都没有时，公式里的 cost_unit 不至于变 0
             "cost_unit": (m.cost_local / m.items) if m.items else ZERO,
             # 中文别名：公式里可以直接写「平台佣金」「订单数」，不用记英文

@@ -245,8 +245,9 @@ DEFAULTS: dict = {
     # 计算参数表：每一项就是一条算式，公式里直接写订单表的列标题。
     "params": [
         {"id": "gmv", "label": "GMV（收入）", "role": "gmv",
-         "expr": "[折扣前小计|SKU Subtotal Before Discount|SKU折扣前小计]"
-                 " - [卖家折扣|SKU Seller Discount|SKU卖家折扣]",
+         # 公式只写主标题；列名改了就在「计算参数 → 订单表识别」里加备胎，
+         # 程序会按顺序试备胎，公式不用改。
+         "expr": "[折扣前小计] - [卖家折扣]",
          "kinds": ["normal", "zero_amount"]},
         {"id": "cost", "label": "商品成本", "role": "cost",
          "expr": "cost_cny * params.cny_to_local",
@@ -326,6 +327,16 @@ def load_config(path: Path) -> dict:
         out["by_country"] = doc["by_country"]
     if isinstance(doc.get("formulas"), dict) and doc["formulas"]:
         out["formulas"].update(doc["formulas"])
+    # 报表「汇总」页要展示哪些列、合计行放哪、列标题怎么命名：
+    # None / 空 = 用全部列 + 合计在底部 + 默认标题
+    if isinstance(doc.get("report_columns"), list) and doc["report_columns"]:
+        out["report_columns"] = [str(x) for x in doc["report_columns"] if str(x).strip()]
+    if str(doc.get("report_total_position") or "").strip() in ("top", "bottom"):
+        out["report_total_position"] = doc["report_total_position"]
+    if isinstance(doc.get("report_titles"), dict) and doc["report_titles"]:
+        out["report_titles"] = {str(k): str(v).strip()
+                                for k, v in doc["report_titles"].items()
+                                if str(k).strip() and str(v).strip()}
     return out
 
 
@@ -341,6 +352,10 @@ def country_config(fcfg: dict, country: str) -> dict:
         "cost_fields": dict(fcfg.get("cost_fields") or {}),
         "formulas": dict(fcfg.get("formulas") or {}),
         "exclude_zero_amount": bool(fcfg.get("exclude_zero_amount")),
+        # 报表列配置：先继承顶层，某国家单独设了才覆盖（没设的国家用通用那套）
+        "report_columns": fcfg.get("report_columns"),
+        "report_total_position": fcfg.get("report_total_position", "bottom"),
+        "report_titles": fcfg.get("report_titles"),
     }
     one = (fcfg.get("by_country") or {}).get(country) or {}
     if isinstance(one.get("params"), list) and one["params"]:
@@ -352,6 +367,14 @@ def country_config(fcfg: dict, country: str) -> dict:
         base["formulas"].update(one["formulas"])
     if "exclude_zero_amount" in one:
         base["exclude_zero_amount"] = bool(one["exclude_zero_amount"])
+    if isinstance(one.get("report_columns"), list) and one["report_columns"]:
+        base["report_columns"] = [str(x) for x in one["report_columns"] if str(x).strip()]
+    if str(one.get("report_total_position") or "").strip() in ("top", "bottom"):
+        base["report_total_position"] = one["report_total_position"]
+    if isinstance(one.get("report_titles"), dict) and one["report_titles"]:
+        base["report_titles"] = {str(k): str(v).strip()
+                                 for k, v in one["report_titles"].items()
+                                 if str(k).strip() and str(v).strip()}
     if base["exclude_zero_amount"]:
         base["params"] = drop_kind(base["params"], "zero_amount")
     return base
@@ -470,7 +493,8 @@ def rate_aliases(labels: dict | None = None) -> dict[str, str]:
 
 
 def compile_expr(expr: str, titles: list[str] | None = None,
-                 aliases: dict[str, str] | None = None) -> tuple[str, dict[str, list[str]]]:
+                 aliases: dict[str, str] | None = None,
+                 field_titles: dict[str, list[str]] | None = None) -> tuple[str, dict[str, list[str]]]:
     """把公式里的标题换成安全的变量名。
 
     返回 (可求值的表达式, {变量名: [候选标题(归一化)]})。
@@ -486,11 +510,25 @@ def compile_expr(expr: str, titles: list[str] | None = None,
     中文名先替换，免得「订单数」这种词被当成订单表的列标题。
     """
     groups: dict[str, list[str]] = {}
+    field_titles = {str(k): [str(x) for x in v] for k, v in (field_titles or {}).items()}
 
     def var_for(cands: list[str]) -> str:
         var = f"__t{len(groups)}"
         groups[var] = cands
         return var
+
+    def expand(cands: list[str]) -> list[str]:
+        """命中的标题若是「订单表识别」里配的字段，把它的备胎标题也并进来。
+
+        这样公式只写主标题（如 [折扣前小计]）即可，列名改了只要改
+        「订单表识别」里的备胎，公式一个字都不用动。
+        """
+        extra: list[str] = []
+        for c in cands:
+            for x in field_titles.get(c, []):
+                if x and x not in cands and x not in extra:
+                    extra.append(x)
+        return cands + extra if extra else cands
 
     def repl(m: re.Match) -> str:
         raw = m.group(1)
@@ -502,6 +540,7 @@ def compile_expr(expr: str, titles: list[str] | None = None,
         if whole and whole not in cands:
             cands.append(whole)
         cands = [c for c in cands if c]
+        cands = expand(cands)
         return var_for(cands) if cands else "0"
 
     text = str(expr or "")
@@ -532,10 +571,11 @@ def compile_expr(expr: str, titles: list[str] | None = None,
             n = lookup.get(m.group(1).lower())
             if not n:
                 return m.group(0)
-            for var, cands in groups.items():   # 同一个标题只建一个变量
-                if cands == [n]:
+            cands = expand([n])
+            for var, c in groups.items():   # 同一个标题只建一个变量
+                if c == cands:
                     return var
-            return var_for([n])
+            return var_for(cands)
 
         text = pat.sub(sub, text)
     return text, groups
@@ -732,7 +772,8 @@ def compute_params(params_cfg: list[dict], ctx: dict) -> tuple[dict[str, float],
             _own_label = str(item.get("label") or "").strip()
             if _own_label and _own_label in aliases:
                 aliases[_own_label] = aliases.get("本行" + _own_label, aliases[_own_label])
-            py_expr, groups = compile_expr(str(expr or ""), titles, aliases)
+            py_expr, groups = compile_expr(str(expr or ""), titles, aliases,
+                                          ctx.get("field_titles"))
             local, miss = _local_ctx(by_kind, kinds, ctx, groups)
             missing.extend(miss)
             # 其它参数算出来的值放在 param.xxx 名下，显式引用才用：

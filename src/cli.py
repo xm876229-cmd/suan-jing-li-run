@@ -380,7 +380,10 @@ def main(argv: list[str] | None = None) -> int:
         extra["合并说明"] = (f"合并 {len(snap_dirs)} 份快照；"
                              f"同一订单的同一 SKU 只算一次，重叠部分以取数时间最新的为准")
     path = build_report(res, res.lines, out, switches, subtitle, extra,
-                        with_formula=bool(getattr(args, "with_formula", False)))
+                        with_formula=bool(getattr(args, "with_formula", False)),
+                        report_columns=cc.get("report_columns"),
+                        total_position=cc.get("report_total_position", "bottom"),
+                        report_titles=cc.get("report_titles"))
 
     t = res.total
 

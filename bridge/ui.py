@@ -530,7 +530,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.21.1</span></div>
+      <div class="row"><span>版本</span><span>0.21.2</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -772,6 +772,35 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <p class="muted" style="font-size:12.5px;margin:0">
             这一栏只用来判断「这行订单算不算取消/退货/未付款」「属于哪条链接」「按哪个编码对成本」。
             金额怎么算，全在参数表的公式里，不在这里。
+          </p>
+        </div>
+      </div>
+
+      <div class="card"><h2>报表列（汇总页）
+        <span class="hint">勾选要展示哪些列；想改名就在「自定义标题」里写</span></h2>
+        <div class="body">
+          <div class="row" style="gap:20px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+            <label class="switch" style="margin:0">
+              <input type="checkbox" id="rcols-all">
+              <span><b>全选展示</b><em>取消勾选 = 不展示这一列</em></span>
+            </label>
+            <div style="font-size:13px;color:var(--text-2)">
+              合计行位置：
+              <label style="margin:0 4px;cursor:pointer"><input type="radio" name="rcol-total" value="bottom" checked> 表格底部</label>
+              <label style="margin:0 4px;cursor:pointer"><input type="radio" name="rcol-total" value="top"> 表格顶部（首行）</label>
+            </div>
+          </div>
+          <div class="tbl-wrap">
+            <table class="cfg-tbl" id="rcoltbl"><thead><tr>
+              <th style="width:54px">展示</th>
+              <th style="width:160px">默认标题</th>
+              <th>自定义标题（留空=用默认，如 毛利率 → 链接毛利率）</th>
+              <th style="width:84px">类型</th>
+            </tr></thead><tbody id="rcols-body"></tbody></table>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:8px 0 0">
+            货币类列（GMV / 成本 / 毛利 / 各项费用 / 净利）会自动带上该国货币代码（如 MYR / PHP），改了名也会带。
+            每个国家都能单独配：切到上面「参数表」的国家下拉即可。
           </p>
         </div>
       </div>
@@ -1114,10 +1143,17 @@ let feeFields = [];
 let rows = [], formulas = {}, rateRows = {}, storesCache = [];
 // 费率项的中文名（费率页可改）：公式里可以直接写中文
 let rateLabels = {};
+// 引擎权威中文名（src/formula.DEFAULT_RATE_CN 合并用户自定义），
+// 公式解析器只认这套名字，变量候选和「不认识」校验必须对齐它。
+let rateCnServer = {};
 
-/** 费率项的中文名：优先用费率页起的名，没有就用内置默认名。 */
+/** 费率项的中文名：优先用费率页起的名，没有就用引擎默认名（带「率」字）。
+ *
+ *  之前这里只用 RATE_LABELS（不带率：平台佣金），而引擎认的是 DEFAULT_RATE_CN
+ *  （带率：平台佣金率），两边对不上——用户在公式里写「平台佣金率」就被判
+ *  「不认识」。现在改成跟引擎同一个权威来源，写带率或不带率都能认。 */
 function rateCn(k){
-  return (rateLabels && rateLabels[k]) || RATE_LABELS[k] || k;
+  return (rateLabels && rateLabels[k]) || (rateCnServer && rateCnServer[k]) || RATE_LABELS[k] || k;
 }
 
 function go(view){
@@ -1795,7 +1831,10 @@ async function loadParams(){
       params: normParams(j.params),
       order_fields: clone(j.order_fields || {}),
       cost_fields: clone(j.cost_fields || {}),
-      exclude_zero_amount: !!j.exclude_zero_amount
+      exclude_zero_amount: !!j.exclude_zero_amount,
+      report_columns: (j.report_columns && j.report_columns.length) ? j.report_columns : null,
+      report_titles: j.report_titles || {},
+      report_total_position: j.report_total_position || 'bottom'
     }};
     countrySet = new Set(Object.keys(j.by_country || {}));
     // 每个国家：通用那套 + 它自己的覆盖
@@ -1805,7 +1844,10 @@ async function loadParams(){
         order_fields: Object.assign(clone(scopeData[""].order_fields), v.order_fields || {}),
         cost_fields: Object.assign(clone(scopeData[""].cost_fields), v.cost_fields || {}),
         exclude_zero_amount: ('exclude_zero_amount' in v)
-          ? !!v.exclude_zero_amount : !!scopeData[""].exclude_zero_amount
+          ? !!v.exclude_zero_amount : !!scopeData[""].exclude_zero_amount,
+        report_columns: (v.report_columns && v.report_columns.length) ? v.report_columns : null,
+        report_titles: v.report_titles || {},
+        report_total_position: v.report_total_position || 'bottom'
       };
       scopeData[k] = d;
     });
@@ -1850,7 +1892,7 @@ function switchScope(next){
 
 function renderAll(){
   renderDropZero();
-  renderParams(); renderOrderFields(); renderFormulas(); renderVars();
+  renderParams(); renderOrderFields(); renderFormulas(); renderVars(); renderReportColumns();
 }
 
 /* 总开关：去除 0 元样品订单 */
@@ -2013,14 +2055,20 @@ function renderOrderFields(){
 
 /* 可用变量：订单表真实表头 + 算好的量 + 费率 + 其它参数 */
 let varRates = [];
+// 公式里能引用的费率字段：把「汇率类 / 发单费单价」也放进来，
+// 它们虽然不在费率管理表的可编辑列里（那里有专门的固定列），
+// 但公式里写 params.cny_to_local / 人民币汇率 是合法的。
+const RATE_META_FORMULA = ['currency', 'rates_verified', 'dispatch_fee_local',
+  '_dispatch_note', 'region'];
 async function loadFormulaVars(){
   try{
     const j = await (await fetch('/api/rates')).json();
     rateLabels = j.labels || {};
+    rateCnServer = j.rate_cn || {};
     const set = new Set();
     Object.values(j.countries || {}).forEach(c => {
       Object.keys(c).forEach(k => {
-        if(RATE_META.includes(k) || k.startsWith('_')) return;
+        if(RATE_META_FORMULA.includes(k) || k.startsWith('_')) return;
         if(c[k] !== null && typeof c[k] === 'object') return;
         set.add(k);
       });
@@ -2084,7 +2132,12 @@ function checkExpr(i){
     // 「本行GMV」的「GMV」也算认识（参数表里有一行就叫 GMV（收入））
     if(v.cn && v.cn.startsWith('本行')) known.set(v.cn.slice(2), v.t);
   });
-  varRates.forEach(k => known.set(rateCn(k), '费率：' + rateCn(k)));
+  varRates.forEach(k => {
+    const cn = rateCn(k);
+    known.set(cn, '费率：' + cn);
+    // 旧名（不带率，如「平台佣金」）也认，避免用户沿用旧写法被误报不认识
+    if(RATE_LABELS[k] && RATE_LABELS[k] !== cn) known.set(RATE_LABELS[k], '费率：' + RATE_LABELS[k]);
+  });
   rowsOf().filter(x => x.id).forEach(x => {
     const lb = (x.label || x.id).trim();
     known.set(lb, '参数表里「' + lb + '」那一项');
@@ -2141,6 +2194,95 @@ function checkExpr(i){
   }
   box.className = 'expr-hint';
   box.textContent = parts.join('　') || '（还没写内容）';
+}
+
+/* 汇总页可用列目录：基础列固定，费用列按参数表动态生成，费用占比只在该费用存在时出。
+   与 src/report.py 的 _summary_specs / _default_report_columns 保持一致。 */
+const REPORT_BASE = [
+  {key:'rank', header:'排名', kind:'text'},
+  {key:'style', header:'款式编码', kind:'text'},
+  {key:'product', header:'链接（商品ID）', kind:'text'},
+  {key:'name', header:'商品名称', kind:'text'},
+  {key:'gmv', header:'GMV', kind:'money'},
+  {key:'orders', header:'订单数', kind:'int'},
+  {key:'items', header:'件数', kind:'int'},
+  {key:'aov', header:'客单价', kind:'money'},
+  {key:'buyer_paid', header:'买家实付', kind:'money'},
+  {key:'cost', header:'成本', kind:'money'},
+  {key:'gross_profit', header:'毛利', kind:'money'},
+  {key:'gross_margin', header:'链接毛利率', kind:'pct'},
+];
+const REPORT_ROLE_KEYS = new Set(['gmv','cost','order_count','items','buyer_paid']);
+const REPORT_RATIOS = [
+  {key:'ratio:dispatch', header:'发单费占比', kind:'pct'},
+  {key:'ratio:ads', header:'广告费比', kind:'pct'},
+];
+const REPORT_KIND_CN = {text:'文本', int:'整数', money:'金额', pct:'百分比'};
+
+function reportColumnCatalog(){
+  const ps = (cur() && cur().params) || [];
+  const fees = [], seen = new Set();
+  for(const it of ps){
+    const id = String(it.id || '').trim();
+    if(!id || seen.has(id)) continue;
+    const role = String(it.role || '').trim();
+    if(REPORT_ROLE_KEYS.has(id) || REPORT_ROLE_KEYS.has(role)) continue;
+    seen.add(id);
+    fees.push({key:'fee:' + id, header:String(it.label || id), kind:'money'});
+  }
+  const ratios = REPORT_RATIOS.filter(r => fees.some(f => f.key === 'fee:' + r.key.split(':')[1]));
+  const tail = [
+    {key:'fee_total', header:'费用合计', kind:'money'},
+    {key:'net_rate', header:'净利率', kind:'pct'},
+    {key:'net', header:'净利', kind:'money'},
+    {key:'net_cny', header:'净利', kind:'money'},
+    {key:'alt_net', header:'净利（对比）', kind:'money'},
+    {key:'alt_diff', header:'样品差额', kind:'money'},
+  ];
+  return REPORT_BASE.concat(fees, ratios, tail);
+}
+
+/* 报表列配置卡片：勾选要展示的列 + 自定义标题 + 合计行位置 */
+function renderReportColumns(){
+  const box = $('#rcols-body');
+  if(!box) return;
+  const cat = reportColumnCatalog();
+  const c = cur();
+  const sel = (c.report_columns && c.report_columns.length) ? new Set(c.report_columns) : null;
+  const titles = c.report_titles || {};
+  const total = c.report_total_position === 'top' ? 'top' : 'bottom';
+  box.innerHTML = cat.map(col => {
+    const on = !sel || sel.has(col.key);
+    const title = titles[col.key] || '';
+    return `<tr data-rk="${esc(col.key)}">
+      <td class="kcell"><input type="checkbox" data-rcol="${esc(col.key)}" ${on ? 'checked' : ''}></td>
+      <td>${esc(col.header)}<div class="pid">${esc(col.key)}</div></td>
+      <td><input type="text" data-rtitle="${esc(col.key)}" value="${esc(title)}" placeholder="留空用默认"></td>
+      <td class="muted" style="font-size:12px">${REPORT_KIND_CN[col.kind] || col.kind}</td>
+    </tr>`;
+  }).join('');
+
+  // 合计行位置
+  document.querySelectorAll('input[name="rcol-total"]').forEach(r => {
+    r.checked = (r.value === total);
+    r.onchange = () => { c.report_total_position = r.value; };
+  });
+
+  // 全选开关
+  const allCb = $('#rcols-all');
+  allCb.checked = !sel;
+  allCb.onchange = () => {
+    box.querySelectorAll('[data-rcol]').forEach(cb => cb.checked = allCb.checked);
+    renderReportColumns();
+  };
+  box.querySelectorAll('[data-rcol]').forEach(cb => cb.onchange = () => {
+    allCb.checked = [...box.querySelectorAll('[data-rcol]')].every(x => x.checked);
+  });
+  box.querySelectorAll('[data-rtitle]').forEach(inp => inp.oninput = () => {
+    const k = inp.dataset.rtitle;
+    const v = inp.value.trim();
+    if(!v) delete titles[k]; else titles[k] = v;
+  });
 }
 
 function renderFormulas(){
@@ -2200,7 +2342,11 @@ function checkFml(i){
     if(v.cn) known.add(v.cn);
     if(v.cn && v.cn.startsWith('本行')) known.add(v.cn.slice(2));
   });
-  varRates.forEach(x => known.add(rateCn(x)));
+  varRates.forEach(x => {
+    const cn = rateCn(x);
+    known.add(cn);
+    if(RATE_LABELS[x] && RATE_LABELS[x] !== cn) known.add(RATE_LABELS[x]);
+  });
   rowsOf().filter(x => x.id).forEach(x => known.add((x.label || x.id).trim()));
   Object.keys(FORMULA_CN).forEach(x => known.add(FORMULA_CN[x]));
   ['gmv','paid','qty','orders','order_count','items','cost_cny','cost',
@@ -2247,6 +2393,10 @@ function collectByCountry(){
     const one = { params: v.params, order_fields: v.order_fields, cost_fields: v.cost_fields };
     // 开关跟通用一样就不写，省得每个国家都留一条冗余
     if(!!v.exclude_zero_amount !== rootFlag) one.exclude_zero_amount = !!v.exclude_zero_amount;
+    // 报表列配置：列勾选 / 自定义标题 / 合计位置，各国独立（和参数表一样）
+    if(v.report_columns && v.report_columns.length) one.report_columns = v.report_columns;
+    if(v.report_titles && Object.keys(v.report_titles).length) one.report_titles = v.report_titles;
+    if(v.report_total_position) one.report_total_position = v.report_total_position;
     out[k] = one;
   });
   return out;
@@ -2302,12 +2452,24 @@ $('#btn-preview').onclick = async () => {
 $('#btn-save').onclick = async () => {
   try{
     const g = scopeData[""] || {params: [], order_fields: {}, cost_fields: {}};
+    // 把「报表列」卡片当前的勾选 / 自定义标题 / 合计位置写回当前作用域
+    const rc = cur();
+    rc.report_columns = [...document.querySelectorAll('#rcols-body [data-rcol]')]
+      .filter(x => x.checked).map(x => x.dataset.rcol);
+    rc.report_titles = {};
+    document.querySelectorAll('#rcols-body [data-rtitle]').forEach(x => {
+      const v = x.value.trim(); if(v) rc.report_titles[x.dataset.rtitle] = v;
+    });
+    rc.report_total_position = (document.querySelector('input[name="rcol-total"]:checked') || {}).value || 'bottom';
     const r = await fetch('/api/config/save', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({params: g.params, by_country: collectByCountry(),
                             formulas: fmls, order_fields: g.order_fields,
                             cost_fields: g.cost_fields,
-                            exclude_zero_amount: !!g.exclude_zero_amount})});
+                            exclude_zero_amount: !!g.exclude_zero_amount,
+                            report_columns: g.report_columns || [],
+                            report_titles: g.report_titles || {},
+                            report_total_position: g.report_total_position || 'bottom'})});
     const j = await r.json();
     const n = Object.keys(collectByCountry()).length;
     if(j.ok) paramsLoaded = false;
@@ -2518,7 +2680,7 @@ function renderRates(){
     + '<th style="width:104px">1 美元<br><span class="muted" style="font-weight:400">= ? 本地</span></th>'
     + '<th style="width:104px">发单费<br><span class="muted" style="font-weight:400">人民币</span></th>'
     + '<th style="width:96px">发单费(本地)<br><span class="muted" style="font-weight:400">自动算</span></th>'
-    + feeFields.map(f => `<th style="width:92px">${RATE_LABELS[f] || f}
+    + feeFields.map(f => `<th style="width:92px">${rateCn(f)}
         <span class="muted" style="font-weight:400;cursor:pointer;color:var(--warn);margin-left:3px"
               data-delfee="${f}" title="删掉这一列">×</span>
         <div class="pid">${f}</div></th>`).join('')
@@ -2604,7 +2766,7 @@ function renderCnLabels(){
       const v = inp.value.trim();
       if(v) rateLabels[f] = v; else delete rateLabels[f];
       const row = inp.closest('tr');
-      if(row) row.querySelector('td.mono:last-child').textContent = v || RATE_LABELS[f] || f;
+      if(row) row.querySelector('td.mono:last-child').textContent = v || rateCn(f);
       renderVars();
     };
   });

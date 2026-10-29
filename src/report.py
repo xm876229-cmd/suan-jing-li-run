@@ -114,7 +114,121 @@ def fee_items(res: CalcResult) -> list[tuple[str, str]]:
     return out
 
 
-def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
+def _default_report_columns(fees, ratios, has_alt) -> list[str]:
+    """报表「汇总」页默认展示的所有列键（顺序即展示顺序）。
+
+    用户可在「计算参数 → 报表列」里勾选，只显示自己关心的列。
+    数值列标题会自动带上该国货币单位（马来=RM、菲律宾=PHP…）。
+    """
+    keys = ["rank", "style", "product", "name", "gmv", "orders", "items",
+            "aov", "buyer_paid", "cost", "gross_profit", "gross_margin"]
+    for fid, _ in fees:
+        keys.append("fee:" + fid)
+    for fid, _ in ratios:
+        keys.append("ratio:" + fid)
+    keys += ["fee_total", "net_rate", "net", "net_cny"]
+    if has_alt:
+        keys += ["alt_net", "alt_diff"]
+    return keys
+
+
+def _summary_specs(res: CalcResult, fees, ratios, has_alt, enabled,
+                   titles: dict | None = None) -> list[dict]:
+    """生成有序的列描述。每个描述：
+    key / header / kind(text|int|money|pct) / getp(p,idx) / gett() / neg(红字) / cur
+
+    titles 是「列键 → 自定义标题」：用户想给列改名（如「毛利率」→「链接毛利率」）
+    就写在这里，其余列仍用默认标题。
+    """
+    t = res.total
+    g = lambda p, k: float((p.fees or {}).get(k, 0.0))
+
+    def ratio(p, fid):
+        base = float(p.gmv or 0.0)
+        return (float((p.fees or {}).get(fid, 0.0)) / base) if base else 0.0
+
+    def tratio(fid):
+        base = float(t.gmv or 0.0)
+        return (float((t.fees or {}).get(fid, 0.0)) / base) if base else 0.0
+
+    specs: list[dict] = []
+
+    def add(key, header, kind, getp, gett, neg=False, cur="local"):
+        # 自定义标题优先：改名只改这一列的表头，算法不动
+        h = (titles or {}).get(key, header)
+        specs.append({"key": key, "header": h, "kind": kind,
+                      "getp": getp, "gett": gett, "neg": neg, "cur": cur})
+
+    if "rank" in enabled:
+        add("rank", "排名", "int", lambda p, i: i, lambda: "")
+    if "style" in enabled:
+        add("style", "款式编码", "text", lambda p, i: p.style_codes, lambda: "合计")
+    if "product" in enabled:
+        add("product", "链接（商品ID）", "text", lambda p, i: p.product_id, lambda: "")
+    if "name" in enabled:
+        add("name", "商品名称", "text", lambda p, i: p.product_name, lambda: "")
+    if "gmv" in enabled:
+        add("gmv", "GMV", "money", lambda p, i: p.gmv, lambda: t.gmv)
+    if "orders" in enabled:
+        add("orders", "订单数", "int", lambda p, i: p.orders, lambda: t.orders)
+    if "items" in enabled:
+        add("items", "件数", "int", lambda p, i: p.items, lambda: t.items)
+    if "aov" in enabled:
+        add("aov", "客单价", "money", lambda p, i: p.aov, lambda: (t.aov if t.orders else 0))
+    if "buyer_paid" in enabled:
+        add("buyer_paid", "买家实付", "money", lambda p, i: p.buyer_paid, lambda: t.buyer_paid)
+    if "cost" in enabled:
+        add("cost", "成本", "money", lambda p, i: p.cost_local, lambda: t.cost_local)
+    if "gross_profit" in enabled:
+        # 毛利 = 金额（GMV − 成本）；毛利率（占比）走 gross_margin
+        add("gross_profit", "毛利", "money",
+            lambda p, i: p.gmv - p.cost_local, lambda: t.gmv - t.cost_local)
+    if "gross_margin" in enabled:
+        # 链接毛利率 = (链接GMV − 商品成本(换成本地货币后)) / 链接GMV
+        # 关键：分子分母都用 GMV（折扣前小计 − 卖家折扣），**不是**买家实付。
+        add("gross_margin", "链接毛利率", "pct",
+            lambda p, i: ((p.gmv - p.cost_local) / p.gmv) if p.gmv else 0.0,
+            lambda: ((t.gmv - t.cost_local) / t.gmv) if t.gmv else 0.0)
+    for fid, label in fees:
+        if ("fee:" + fid) in enabled:
+            add("fee:" + fid, label, "money",
+                (lambda k: (lambda p, i: g(p, k)))(fid),
+                (lambda k: (lambda: g(t, k)))(fid))
+    for fid, name in ratios:
+        if ("ratio:" + fid) in enabled:
+            add("ratio:" + fid, name, "pct",
+                (lambda k: (lambda p, i: ratio(p, k)))(fid),
+                (lambda k: (lambda: tratio(k)))(fid))
+    if "fee_total" in enabled:
+        add("fee_total", "费用合计", "money",
+            lambda p, i: sum(g(p, fid) for fid, _ in fees),
+            lambda: sum(g(t, fid) for fid, _ in fees))
+    if "net_rate" in enabled:
+        add("net_rate", "净利率", "pct", lambda p, i: p.net_margin, lambda: t.net_margin)
+    if "net" in enabled:
+        add("net", "净利", "money", lambda p, i: p.net_local, lambda: t.net_local, neg=True)
+    if "net_cny" in enabled:
+        add("net_cny", "净利", "money",
+            lambda p, i: p.net_cny(res.params.cny_to_local),
+            lambda: t.net_cny(res.params.cny_to_local), neg=True, cur="cny")
+    if has_alt:
+        if "alt_net" in enabled:
+            add("alt_net", f"净利（{res.compare_label}）", "money",
+                (lambda p, i: (res.compare.get(p.product_id).net_local
+                               if res.compare.get(p.product_id) is not None else ZERO)),
+                lambda: (res.compare_total or ZERO), neg=True)
+        if "alt_diff" in enabled:
+            add("alt_diff", "样品差额", "money",
+                (lambda p, i: (p.net_local - (res.compare.get(p.product_id).net_local
+                                           if res.compare.get(p.product_id) is not None else ZERO))),
+                lambda: (t.net_local - (res.compare_total or ZERO)), neg=True)
+    return specs
+
+
+def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
+             report_columns: list[str] | None = None,
+             total_position: str = "bottom",
+             report_titles: dict | None = None) -> None:
     # 一条链接（商品ID）一行：同一链接下的多个 SKU 合并，
     # 不同链接即使卖家编码相同也绝不合并——卖家编码可在多条链接间复用，
     # 只有商品ID 是链接的唯一标识。
@@ -122,94 +236,80 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
     # 费用占比列：只对实际存在的费用项出列（用户把某项删了，列也没了）
     ratios = [(fid, name) for fid, name in RATIO_ITEMS
               if any(fid in (p.fees or {}) for p in res.products)]
-    headers = list(BASE_HEADERS) + [name for _, name in fees] + \
-              [name for _, name in ratios] + \
-              ["费用合计", "净利率", "净利(本地货币)", "净利(人民币)"]
-    n_fee = len(fees)
-    c_fee0 = len(BASE_HEADERS) + 1          # 第一个费用列
-    c_ratio0 = c_fee0 + n_fee               # 第一个占比列
-    c_total = c_ratio0 + len(ratios)        # 费用合计
-    c_rate = c_total + 1                    # 净利率
-    c_net = c_rate + 1                      # 净利(本地)
-    c_net_cny = c_net + 1                   # 净利(人民币)
-
-    # 另一套样品口径的净利，跟主口径并排摆。
-    # 有了这两列就不用「切开关 → 重算 → 记数字 → 切回来」来回折腾，
-    # 也不会出现记错行、把两套数混在一起的情况。
     has_alt = res.compare_total is not None
-    if has_alt:
-        headers += [f"净利（{res.compare_label}）", "样品差额"]
-        c_alt = c_net_cny + 1
-        c_diff = c_alt + 1
 
-    _title(ws, "净利润汇总（每条链接一行）", subtitle, span=12)
+    # 用户可勾选要展示的列；没配置就展示全部（含款式编码、各费用、净利等）。
+    default_keys = _default_report_columns(fees, ratios, has_alt)
+    if report_columns:
+        enabled = [k for k in report_columns if k in default_keys]
+        if not enabled:
+            enabled = default_keys
+    else:
+        enabled = default_keys
+    if "rank" not in enabled:        # 排名始终在，避免空表
+        enabled = ["rank"] + enabled
+
+    specs = _summary_specs(res, fees, ratios, has_alt, enabled, titles=report_titles)
+
+    # 货币单位：金额列标题带上国家货币代码（马来=MYR、菲律宾=PHP…），看清是哪国钱
+    cur_local = (res.params.currency or "").strip()
+    headers = []
+    for s in specs:
+        h = s["header"]
+        if s["kind"] == "money":
+            c = cur_local if s.get("cur", "local") == "local" else "CNY"
+            if c:
+                h = f"{h}（{c}）"
+        headers.append(h)
+
+    _title(ws, "净利润汇总（每条链接一行）", subtitle, span=max(8, len(headers)))
     _head(ws, headers)
 
-    money_cols = [5, 8, 9, 10, 12] + list(range(c_fee0, c_total + 1)) + [c_net, c_net_cny]
-    pct_cols = [11, c_rate]
-    if ratios:
-        pct_cols += list(range(c_ratio0, c_ratio0 + len(ratios)))
-    if has_alt:
-        money_cols += [c_alt, c_diff]
+    # 行：合计 + 每条链接。合计行位置可配（顶部/底部）。
+    t = res.total
+    total_vals = [s["gett"]() for s in specs]
+    data_vals = [[s["getp"](p, i) for s in specs]
+                 for i, p in enumerate(res.products, 1)]
+    if total_position == "top":
+        rows = [total_vals] + data_vals
+    else:
+        rows = data_vals + [total_vals]
 
-    def fee_vals(p) -> list[float]:
-        return [float((p.fees or {}).get(fid, 0.0)) for fid, _ in fees]
-
-    def ratio_vals(p) -> list[float]:
-        """费用占比：这项费用 ÷ GMV。GMV 为 0 时按 0 计。"""
-        g = float(p.gmv or 0.0)
-        return [(float((p.fees or {}).get(fid, 0.0)) / g) if g else 0.0
-                for fid, _ in ratios]
+    last_text = 0
+    for ci, s in enumerate(specs, 1):
+        if s["kind"] == "text":
+            last_text = ci
+    net_rate_ci = next((ci for ci, s in enumerate(specs, 1) if s["key"] == "net_rate"), None)
 
     row = 3
-    for i, p in enumerate(res.products, 1):
-        fv = fee_vals(p)
-        vals = [
-            i, p.style_codes, p.product_id, p.product_name,
-            p.gmv, p.orders, p.items, p.aov, p.buyer_paid,
-            p.cost_local, p.gross_profit, p.gmv - p.cost_local,
-            *fv,
-            *ratio_vals(p),
-            sum(fv), p.net_margin, p.net_local, p.net_cny(res.params.cny_to_local),
-        ]
-        if has_alt:
-            alt_p = res.compare.get(p.product_id)
-            alt_v = float(alt_p.net_local) if alt_p is not None else ZERO
-            vals += [alt_v, p.net_local - alt_v]
-        for c, v in enumerate(vals, 1):
-            cell = ws.cell(row=row, column=c, value=v)
+    for ri, vals in enumerate(rows):
+        is_total = (ri == 0 and total_position == "top") or \
+                   (total_position != "top" and ri == len(rows) - 1)
+        for ci, (s, v) in enumerate(zip(specs, vals), 1):
+            cell = ws.cell(row=row, column=ci, value=v)
             cell.border = BORDER
-        _fmt_row(ws, row, money_cols, pct_cols, [6, 7])
-        if p.net_local < 0:
-            ws.cell(row=row, column=c_net).font = NEG_FONT
-            ws.cell(row=row, column=c_net_cny).font = NEG_FONT
+            if s["kind"] == "money":
+                cell.number_format = MONEY
+            elif s["kind"] == "pct":
+                cell.number_format = PCT
+            elif s["kind"] == "int":
+                cell.number_format = INT
+            if s["neg"] and isinstance(v, (int, float)) and v < 0:
+                cell.font = NEG_FONT
+            if is_total:
+                cell.fill = TOTAL_FILL
+                cell.font = (Font(bold=True, color="C0392B")
+                             if (s["neg"] and isinstance(v, (int, float)) and v < 0)
+                             else Font(bold=True))
+        if is_total:
+            ws.cell(row=row, column=1).border = TOP_BORDER
         row += 1
-
-    t = res.total
-    tfv = fee_vals(t)
-    totals = [
-        "", "合计", "",
-        f"{res.line_count} 行 · 全部 {res.order_count} 单 · 计入 {t.orders:.1f} 单",
-        t.gmv, t.orders, t.items, t.aov if t.orders else 0, t.buyer_paid,
-        t.cost_local, t.gross_profit, t.gmv - t.cost_local,
-        *tfv,
-        *ratio_vals(t),
-        sum(tfv), t.net_margin, t.net_local, res.net_cny_total,
-    ]
-    if has_alt:
-        totals += [res.compare_total, t.net_local - res.compare_total]
-    for c, v in enumerate(totals, 1):
-        cell = ws.cell(row=row, column=c, value=v)
-        cell.fill = TOTAL_FILL
-        cell.font = Font(bold=True)
-        cell.border = TOP_BORDER
-    _fmt_row(ws, row, money_cols, pct_cols, [6, 7])
+    last = row - 1
 
     # 净利率色阶：亏损越深越红，盈利越强越绿
-    last = row - 1
-    if last >= 3:
+    if net_rate_ci:
         from openpyxl.formatting.rule import ColorScaleRule
-        col = get_column_letter(c_rate)
+        col = get_column_letter(net_rate_ci)
         ws.conditional_formatting.add(
             f"{col}3:{col}{last}",
             ColorScaleRule(start_type="num", start_value=-0.2, start_color="F4B6B6",
@@ -217,11 +317,14 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
                            end_type="num", end_value=0.25, end_color="A9D7B6"),
         )
 
-    ws.freeze_panes = "E3"
+    freeze_col = last_text + 1 if last_text else 1
+    ws.freeze_panes = f"{get_column_letter(freeze_col)}3"
     ws.auto_filter.ref = f"A2:{get_column_letter(len(headers))}{last}"
-    _widths(ws, {1: 6, 2: 20, 3: 22, 4: 30})
-    for c in range(5, len(headers) + 1):
-        ws.column_dimensions[get_column_letter(c)].width = 12
+
+    # 列宽：文本列宽一些，金额列统一 13
+    for ci, s in enumerate(specs, 1):
+        w = {"style": 20, "product": 22, "name": 30, "rank": 6}.get(s["key"], 13)
+        ws.column_dimensions[get_column_letter(ci)].width = w
 
 
 # ---------------- 样品单对比 ----------------
@@ -656,11 +759,15 @@ def build_report(res: CalcResult, lines: list[OrderLine], out_path: Path,
                  switches: Switches, subtitle: str = "",
                  extra: Optional[dict[str, str]] = None,
                  with_compare: bool = True,
-                 with_formula: bool = False) -> Path:
+                 with_formula: bool = False,
+                 report_columns: list[str] | None = None,
+                 total_position: str = "bottom",
+                 report_titles: dict | None = None) -> Path:
     wb = Workbook()
     ws = wb.active
     ws.title = "汇总"
-    _summary(ws, res, subtitle)
+    _summary(ws, res, subtitle, report_columns=report_columns,
+             total_position=total_position, report_titles=report_titles)
 
     _fee_breakdown(wb.create_sheet("费用拆解"), res, subtitle)
     _daily(wb.create_sheet("日趋势"), lines, res, subtitle)

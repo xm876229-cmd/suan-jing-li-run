@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from src import formula as _formula
 from src import paths
 
 # ---------------- 费率 ----------------
@@ -23,11 +24,20 @@ def read_rates() -> dict:
         return {"ok": False, "error": f"读取 rates.json 失败：{e}", "countries": {}}
 
     fx = doc.get("fx") or {}
+    # 费率项的中文名（引擎权威版，带「率」字：平台佣金率 / 发单费单价 / 人民币汇率…）。
+    # 公式解析器只认这套名字，前端「不认识」的校验和变量候选必须跟它对齐，
+    # 否则用户在公式里写「平台佣金率」会被判不认识。用户自定义名覆盖在后面。
+    labels = doc.get("labels") or {}
+    rate_cn = {**_formula.DEFAULT_RATE_CN, **{
+        str(k): str(v).strip() for k, v in labels.items()
+        if str(k).strip() and str(v).strip()}}
     return {
         "ok": True,
         "countries": doc.get("countries") or {},
         # 费率项的中文名：公式里可以直接写中文，不用记英文
-        "labels": doc.get("labels") or {},
+        "labels": labels,
+        # 引擎权威中文名（含用户自定义覆盖），前端校验/候选对齐用
+        "rate_cn": rate_cn,
         "fx": {"mode": fx.get("mode", "auto"), "manual": fx.get("manual") or {},
                "ttl_hours": fx.get("ttl_hours", 12)},
     }
