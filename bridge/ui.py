@@ -1141,6 +1141,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <section class="page" id="view-debug" hidden>
       <div class="head"><h1>调试</h1>
         <p>出问题时先看这里：扩展有没有在干活、桥收到了什么、数据存在哪。</p></div>
+      <div class="card"><h2>取数桥<span class="hint">接收扩展数据、触发核算的后台服务</span></h2><div class="body">
+        <div class="tools">
+          <button id="btn-bridge-stop">关闭取数桥</button>
+          <span class="muted" style="font-size:12.5px">关闭后本界面会断开；要用时双击程序文件夹里的「启动桥.bat」或重开程序</span>
+        </div>
+      </div></div>
       <div class="card"><h2>运行环境</h2><div class="body tight"><div class="kv" id="dbg-env"></div></div></div>
       <div class="card"><h2>扩展日志<span class="hint" id="dbg-log-hint"></span></h2>
         <div class="body"><pre class="log" id="dbg-log">读取中…</pre></div></div>
@@ -2765,6 +2771,20 @@ $('#btn-cost-tpl').onclick = async (e) => {
     const j = await r.json();
     toast(j.ok ? ('模板已保存到：' + j.path) : ('保存失败：' + (j.error || '')));
   }catch(err){ toast('保存失败：' + err.message); }
+};
+
+// 关闭取数桥（调试页）：窗口里调原生接口，真正把桥进程停掉
+$('#btn-bridge-stop').onclick = async () => {
+  const api = (window.pywebview && window.pywebview.api) || null;
+  if(!api || !api.stop_bridge){
+    toast('请在程序窗口里操作（浏览器里关不了桥）');
+    return;
+  }
+  if(!confirm('关闭取数桥后，本界面会断开。确定关闭？')) return;
+  try{
+    const ok = await api.stop_bridge();
+    toast(ok ? '取数桥已关闭。要用时双击「启动桥.bat」或重开程序' : '没有正在跑的桥');
+  }catch(err){ toast('关闭失败：' + err.message); }
 };
 
 $('#btn-cost-add').onclick = () => {

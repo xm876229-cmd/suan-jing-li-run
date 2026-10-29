@@ -120,6 +120,9 @@ def build_app() -> Path:
 
     pyinstaller([
         "--onedir",
+        # 无控制台：双击只出程序窗口，不再多一个黑框。
+        # 桥由 start_bridge_hidden 用 CREATE_NO_WINDOW 起，本身也不要窗口。
+        "--windowed",
         "--name", "jingli",                      # 英文名，构建更稳；发布时再改名
         # 程序图标：任务栏、快捷方式、文件管理器里都用它
         "--icon", str(ROOT / "assets" / "jingli.ico"),
@@ -193,6 +196,8 @@ def build_app() -> Path:
     _write_readme(out)
     # 启动桥入口：程序文件夹里显眼的一个 bat，双击确保桥在跑（新手友好）
     _write_bridge_bat(out)
+    # 关闭桥入口：要停掉桥时双击这个
+    _write_stop_bat(out)
 
     if not (out / EXE_NAME).exists():
         raise SystemExit(f"构建失败：缺少 {EXE_NAME}")
@@ -282,6 +287,26 @@ def _write_bridge_bat(out: Path) -> None:
         print(f"[OK] 启动桥.bat：{out / '启动桥.bat'}")
     except OSError as e:
         print(f"  ⚠ 写启动桥.bat 失败：{e}")
+
+
+def _write_stop_bat(out: Path) -> None:
+    """关闭取数桥的入口：双击就停，不会顺手再起一个。"""
+    bat = (
+        "@echo off\r\n"
+        "chcp 65001 >nul\r\n"
+        "cd /d \"%~dp0\"\r\n"
+        "title 净利助手 · 关闭取数桥\r\n"
+        "echo 正在关闭取数桥（含后台守护进程）…\r\n"
+        "\"jingli.exe\" stop-bridge\r\n"
+        "echo.\r\n"
+        "echo 已尝试关闭。要用时再双击「启动桥.bat」。\r\n"
+        "pause\r\n"
+    )
+    try:
+        (out / "停止桥.bat").write_text(bat, encoding="utf-8-sig")
+        print(f"[OK] 停止桥.bat：{out / '停止桥.bat'}")
+    except OSError as e:
+        print(f"  ⚠ 写停止桥.bat 失败：{e}")
 
 
 def make_app_zip(app_dir: Path) -> Path:

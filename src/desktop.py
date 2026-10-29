@@ -99,6 +99,14 @@ class NativeApi:
         except Exception:  # noqa: BLE001
             return ""
 
+    def stop_bridge(self) -> bool:
+        """关闭当前取数桥（含守护进程）。窗口进程本身不受影响。"""
+        try:
+            from src.app import _kill_bridge_on_port, _port
+            return bool(_kill_bridge_on_port(_port()))
+        except Exception:  # noqa: BLE001
+            return False
+
 
 def main() -> int:
     if getattr(sys, "frozen", False):

@@ -35,16 +35,23 @@ APP_TITLE = "净利助手"
 
 
 def _relax_stdout() -> None:
-    """让输出不会因为个别字符而崩。
+    """让输出不会因为个别字符或没有控制台而崩。
 
-    中文 Windows 的控制台是 GBK，程序里打印 `⚠`、`「」` 这类字符会直接抛
-    UnicodeEncodeError，整个进程退出。打包成 exe 后在别人电脑上必然复现，
-    所以统一把 stdout/stderr 设成 errors=replace —— 显示成 ? 也好过崩掉。
+    中文 Windows 的控制台是 GBK，打印 `⚠`、`「」` 这类字符会抛
+    UnicodeEncodeError；而打包成无控制台（windowed）后，stdout/stderr 直接是 None，
+    print 一调用就 AttributeError。两种都统一兜住，显示成 ? 也好过崩掉。
     """
-    for stream in (sys.stdout, sys.stderr):
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            try:
+                setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                pass
+            continue
         try:
             stream.reconfigure(errors="replace")  # type: ignore[attr-defined]
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
 
@@ -344,6 +351,17 @@ def cmd_bridge(argv: list[str]) -> int:
     else:
         print("取数桥启动失败，请用「诊断信息 / doctor」看看 8765 端口是不是被占了")
     return 0 if ok else 1
+
+
+def cmd_stop_bridge(argv: list[str]) -> int:
+    """关闭当前正在跑的取数桥（含守护进程），不再启动新的。"""
+    print("正在关闭取数桥…")
+    killed = _kill_bridge_on_port(_port())
+    if killed:
+        print("已关闭 PID：" + "、".join(killed))
+    else:
+        print("端口上没有正在跑的桥")
+    return 0
 
 
 def cmd_run(argv: list[str]) -> int:
@@ -669,6 +687,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve()
     if cmd in ("bridge", "启动桥", "重启桥"):
         return cmd_bridge(rest)
+    if cmd in ("stop-bridge", "stop_bridge", "停止桥", "关闭桥"):
+        return cmd_stop_bridge(rest)
     if cmd == "run":
         return cmd_run(rest)
     if cmd == "install":
