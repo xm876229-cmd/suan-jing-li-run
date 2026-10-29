@@ -509,7 +509,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.20.0</span></div>
+      <div class="row"><span>版本</span><span>0.20.1</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -610,6 +610,30 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="head"><h1>计算参数</h1>
         <p>每一项就是一条公式，公式里直接写订单表的列标题——写标题就是映射，不用另外配。
           标题可以写多个候选，第一个找不到就试下一个。每个国家各配一套。</p></div>
+
+      <div class="card"><h2>预设<span class="hint">一整套口径的命名快照，随时切回</span></h2>
+        <div class="body">
+          <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+            <div class="field" style="width:210px"><label>选一个预设</label>
+              <select id="ps-list" style="min-width:200px"></select></div>
+            <div class="field" style="width:190px"><label>保存到</label>
+              <select id="ps-scope"></select></div>
+            <div class="field" style="width:190px"><label>预设名</label>
+              <input type="text" id="ps-name" placeholder="如：马来标准口径"></div>
+            <button class="primary" id="ps-apply">应用</button>
+            <button class="ghost" id="ps-save" style="width:auto;padding:7px 15px;margin:0">保存为预设</button>
+            <button class="ghost" id="ps-del" style="width:auto;padding:7px 15px;margin:0">删除</button>
+          </div>
+          <label class="switch" style="margin-top:11px">
+            <input type="checkbox" id="ps-rates">
+            <span><b>连各国费率一起存</b>
+              <em>勾上：这份预设同时装下费率页的数值，应用时会一起覆盖。
+                 不勾：只存参数口径与列标题。</em></span>
+          </label>
+          <p class="muted" id="ps-desc" style="font-size:12px;margin:9px 0 0"></p>
+          <div class="note" id="ps-note"></div>
+        </div>
+      </div>
 
       <div class="card"><h2>参数表
         <select id="pscope" style="font-size:12.5px;padding:4px 9px;min-width:180px;margin-left:6px"></select>
@@ -740,6 +764,28 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <section class="page" id="view-rates" hidden>
       <div class="head"><h1>费率</h1>
         <p>每个国家的佣金、发单费、手续费都在这改。改完点保存，下次核算就用新费率。</p></div>
+      <div class="card"><h2>预设<span class="hint">和计算参数页共用同一套预设</span></h2>
+        <div class="body">
+          <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+            <div class="field" style="width:210px"><label>选一个预设</label>
+              <select id="pr-list" style="min-width:200px"></select></div>
+            <div class="field" style="width:190px"><label>保存到</label>
+              <select id="pr-scope"></select></div>
+            <div class="field" style="width:190px"><label>预设名</label>
+              <input type="text" id="pr-name" placeholder="如：马来费率"></div>
+            <button class="primary" id="pr-apply">应用</button>
+            <button class="ghost" id="pr-save" style="width:auto;padding:7px 15px;margin:0">保存为预设</button>
+            <button class="ghost" id="pr-del" style="width:auto;padding:7px 15px;margin:0">删除</button>
+          </div>
+          <label class="switch" style="margin-top:11px">
+            <input type="checkbox" id="pr-rates" checked>
+            <span><b>连各国费率一起存</b>
+              <em>费率页的这份预设默认连费率一起装；不勾就只存参数口径。</em></span>
+          </label>
+          <p class="muted" id="pr-desc" style="font-size:12px;margin:9px 0 0"></p>
+          <div class="note" id="pr-note"></div>
+        </div>
+      </div>
       <div class="card"><h2>国家费率<span class="hint" id="rate-hint"></span></h2>
         <div class="body tight"><div class="tbl-wrap">
           <table class="cfg-tbl" id="rtbl"><thead id="rhead"></thead><tbody id="rbody"></tbody></table>
@@ -831,8 +877,8 @@ function go(view){
   document.querySelectorAll('.page').forEach(p => p.hidden = p.id !== 'view-' + view);
   document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.view === view));
   if(view === 'reports') loadReports();
-  if(view === 'params') loadParams();
-  if(view === 'rates') loadRates();
+  if(view === 'params'){ loadParams(); presetScopes('ps'); loadPresets('ps'); }
+  if(view === 'rates'){ loadRates(); presetScopes('pr'); loadPresets('pr'); }
   if(view === 'costs') loadCosts();
   if(view === 'settings') loadSettings();
   if(view === 'debug') loadDebug();
@@ -1287,6 +1333,116 @@ const normParams = list => (list || []).map(p => ({
 
 function cur(){ return scopeData[scope] || scopeData[""]; }
 function rowsOf(){ return cur().params; }
+
+/* ---------------- 预设 ---------------- */
+/* 一整套口径的命名快照：参数表 + 公式 + 列标题 + （可选）各国费率。
+   两个页面（计算参数 / 费率）共用这套逻辑，只是 id 前缀不同。
+   应用前会自动备份当前配置到 config/_backup/，随时能回滚。 */
+
+let PRESET_ITEMS = [];
+
+function presetScopes(prefix){
+  const sel = document.getElementById(prefix + '-scope');
+  if(!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = '<option value="global">通用（所有店铺）</option>' +
+    storesCache.map(s => `<option value="${esc(s.id)}">只给「${esc(s.name || s.id)}」</option>`).join('');
+  if(keep) sel.value = keep;
+}
+
+async function loadPresets(prefix){
+  const P = (id) => document.getElementById(prefix + id);
+  const scopeSel = P('-scope');
+  const scope = scopeSel ? scopeSel.value : '';
+  try{
+    const j = await (await fetch('/api/presets?scope=' + encodeURIComponent(scope))).json();
+    PRESET_ITEMS = j.items || [];
+    const sel = P('-list');
+    if(!sel) return;
+    const keep = sel.value;
+    sel.innerHTML = PRESET_ITEMS.map(it => {
+      const tag = it.builtin ? '内置'
+        : (it.scope === 'global' ? '通用' : String(it.scope || '').replace(/^shop:/, ''));
+      return `<option value="${esc(it.id)}">${esc(it.name)}　[${esc(tag)}]</option>`;
+    }).join('');
+    if(keep && PRESET_ITEMS.some(x => x.id === keep)) sel.value = keep;
+    presetDesc(prefix);
+  }catch(e){}
+}
+
+function presetDesc(prefix){
+  const P = (id) => document.getElementById(prefix + id);
+  const sel = P('-list'), d = P('-desc');
+  if(!sel || !d) return;
+  const it = PRESET_ITEMS.find(x => x.id === sel.value);
+  if(!it){ d.textContent = ''; return; }
+  let extra = it.builtin
+    ? '（内置预设：只调整订单类型的勾选，公式与列标题保持原样）'
+    : '（完整快照：参数表、公式、列标题一起覆盖；应用前会自动备份当前配置）';
+  if(it.scope && it.scope !== 'global' && it.scope !== 'builtin')
+    extra += '　作用范围：只给这家店';
+  d.textContent = (it.desc || '') + extra;
+}
+
+async function presetApply(prefix){
+  const P = (id) => document.getElementById(prefix + id);
+  const sel = P('-list');
+  if(!sel || !sel.value) return;
+  const id = sel.value;
+  const r = await (await fetch('/api/presets/apply', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({preset_id:id})})).json();
+  if(!r.ok){ note(P('-note'), '应用失败：' + (r.error || ''), 'err'); return; }
+  note(P('-note'), '已应用：' + (r.applied || id) + (r.note ? '（' + r.note + '）' : ''), 'ok');
+  // 配置变了，参数表和费率表都要重新读一遍
+  paramsLoaded = false;
+  try{ await loadParams(); }catch(e){}
+  try{ await loadRates(); }catch(e){}
+  await loadPresets(prefix);
+}
+
+async function presetSave(prefix){
+  const P = (id) => document.getElementById(prefix + id);
+  const nameEl = P('-name');
+  const name = (nameEl && nameEl.value || '').trim();
+  if(!name){ note(P('-note'), '先给预设起个名字', 'err'); return; }
+  const scopeSel = P('-scope');
+  const scope = scopeSel ? scopeSel.value : 'global';
+  const includeRates = P('-rates') ? P('-rates').checked : false;
+  const r = await (await fetch('/api/presets/save', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name, scope, include_rates:includeRates})})).json();
+  if(!r.ok){ note(P('-note'), '保存失败：' + (r.error || ''), 'err'); return; }
+  note(P('-note'), '已保存预设：' + r.name, 'ok');
+  if(nameEl) nameEl.value = '';
+  await loadPresets(prefix);
+}
+
+async function presetDel(prefix){
+  const P = (id) => document.getElementById(prefix + id);
+  const sel = P('-list');
+  if(!sel || !sel.value) return;
+  const it = PRESET_ITEMS.find(x => x.id === sel.value);
+  if(!it) return;
+  if(it.builtin){ note(P('-note'), '内置预设不能删', 'err'); return; }
+  if(!confirm(`确定删除预设「${it.name}」？`)) return;
+  const r = await (await fetch('/api/presets/delete', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({preset_id:it.id})})).json();
+  if(!r.ok){ note(P('-note'), '删除失败：' + (r.error || ''), 'err'); return; }
+  note(P('-note'), '已删除：' + it.name, 'ok');
+  await loadPresets(prefix);
+}
+
+['ps','pr'].forEach(prefix => {
+  const P = (id) => document.getElementById(prefix + id);
+  const list = P('-list'), apply_ = P('-apply'), save = P('-save'), del = P('-del'), scope = P('-scope');
+  if(list) list.onchange = () => presetDesc(prefix);
+  if(apply_) apply_.onclick = () => presetApply(prefix);
+  if(save) save.onclick = () => presetSave(prefix);
+  if(del) del.onclick = () => presetDel(prefix);
+  if(scope) scope.onchange = () => loadPresets(prefix);
+});
 
 async function loadParams(){
   if(paramsLoaded){

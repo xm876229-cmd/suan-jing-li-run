@@ -63,3 +63,6 @@ build/
 data/stores/
 # 核算历史（走势图数据，本机产生）
 data/history.jsonl
+
+# 应用预设前的自动备份（临时数据，不入库）
+config/_backup/

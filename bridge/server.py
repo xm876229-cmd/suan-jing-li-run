@@ -401,6 +401,14 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import parse_qs, urlparse
             q = parse_qs(urlparse(self.path).query)
             _json(self, ui.snapshots((q.get("store") or [""])[0]))
+        elif self.path.startswith("/api/presets"):
+            from bridge import presets_api
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            if self.path.startswith("/api/presets/backups"):
+                _json(self, presets_api.list_backups())
+            else:
+                _json(self, presets_api.list_presets((q.get("scope") or [""])[0]))
         elif self.path.startswith("/api/reports"):
             from bridge import ui
             _json(self, ui.reports())
@@ -496,6 +504,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_costs(save=True)
         elif self.path.startswith("/api/data-import"):
             self._post_data_import()
+        elif self.path.startswith("/api/presets/"):
+            self._post_presets()
         elif self.path.startswith("/api/costs/import"):
             self._post_costs(save=False)
         elif self.path.startswith("/capture"):
@@ -674,6 +684,40 @@ class Handler(BaseHTTPRequestHandler):
         if _snap.get("id"):
             out["snapshot"] = _snap.get("id")
         _json(self, out)
+
+    def _post_presets(self):
+        """预设：保存 / 应用 / 删除 / 回滚。"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+
+        from bridge import presets_api
+
+        act = ""
+        p = self.path
+        for name in ("save", "apply", "delete", "update", "rollback"):
+            if p.startswith(f"/api/presets/{name}"):
+                act = name
+                break
+        if not act:
+            _json(self, {"ok": False, "error": "不认识的操作"}, 400)
+            return
+        fn = {
+            "save": presets_api.save_preset,
+            "apply": presets_api.apply_preset,
+            "delete": presets_api.delete_preset,
+            "update": presets_api.update_preset,
+            "rollback": presets_api.rollback,
+        }[act]
+        try:
+            r = fn(payload)
+        except Exception as e:  # noqa: BLE001
+            r = {"ok": False, "error": str(e)}
+        if act == "apply" and r.get("ok"):
+            _append_log(f"[preset] 已应用预设：{r.get('applied')}")
+        _json(self, r)
 
     def _post_data_import(self):
         """手动导入导出文件——自动取数挂了的时候的兜底通路。
