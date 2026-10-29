@@ -458,6 +458,13 @@ _TEMPLATE = r"""<!DOCTYPE html>
     .main{padding:22px 16px 44px}
     .stats{grid-template-columns:repeat(2,1fr)}
   }
+
+  /* 计算参数页：顶部分段标签 + 分栏。每栏只放一类内容，
+     不再把参数表/表头/报表列/公式全挤在一页。 */
+  #ptabs{gap:8px;margin-bottom:16px;position:sticky;top:0;z-index:6;
+    background:var(--bg,#f7f7f5);padding:6px 0 10px}
+  #ptabs .mini{font-size:13px;padding:7px 15px;border-radius:9px}
+  .pane[hidden]{display:none}
 </style>
 </head>
 <body>
@@ -663,6 +670,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="head"><h1>计算参数</h1>
         <p>每一项就是一条公式。公式里能写的东西，点下面的方块插进去就行——<b>不用记英文</b>。</p></div>
 
+      <div class="tools" id="ptabs" style="margin-bottom:14px"></div>
+
+      <div class="pane" data-pane="params">
       <div class="card"><h2>预设<span class="hint">一整套口径的命名快照，随时切回</span></h2>
         <div class="body">
           <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
@@ -761,7 +771,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
           </div>
           <div class="vars" id="vars"></div>
         </div></div>
+      </div>
 
+      <div class="pane" data-pane="headers" hidden>
       <div class="card"><h2>表头识别<span class="hint">每个表一套：程序靠这些列找数；标题可加多个候选，按顺序试</span></h2>
         <div class="body tight">
           <div class="tools" id="oftabs" style="margin-bottom:10px"></div>
@@ -778,7 +790,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
           </p>
         </div>
       </div>
+      </div>
 
+      <div class="pane" data-pane="reports" hidden>
       <div class="card"><h2>报表列（汇总页）
         <span class="hint">勾选要展示哪些列；想改名就在「自定义标题」里写</span></h2>
         <div class="body">
@@ -807,7 +821,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
           </p>
         </div>
       </div>
+      </div>
 
+      <div class="pane" data-pane="formula" hidden>
       <div class="card"><h2>净利怎么算<span class="hint">这一条也可以改</span></h2>
         <div class="body tight"><div class="tbl-wrap">
           <table class="cfg-tbl" id="ftbl"><thead><tr>
@@ -825,6 +841,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
             「净利」这种结果名也能直接引用。
           </p>
         </div>
+      </div>
       </div>
 
       <div class="card"><h2>操作<span class="hint">试算不会保存</span></h2><div class="body">
@@ -1899,8 +1916,33 @@ function switchScope(next){
   toast(scope ? ('已切到「' + scope + '」') : '已切回通用参数');
 }
 
+/* 计算参数页顶部分段：一屏只看一类内容，避免所有卡片挤在一页 */
+const PTABS = [
+  { key: 'params',  label: '参数表' },
+  { key: 'headers', label: '表头识别' },
+  { key: 'reports', label: '报表列' },
+  { key: 'formula', label: '净利公式' },
+];
+let pTab = 'params';
+function setPTab(k){
+  pTab = k;
+  document.querySelectorAll('#view-params .pane').forEach(p => {
+    p.hidden = p.dataset.pane !== k;
+  });
+  renderPTabs();
+  try{ window.scrollTo({top: 0, behavior: 'smooth'}); }catch(e){}
+}
+function renderPTabs(){
+  const box = $('#ptabs');
+  if(!box) return;
+  box.innerHTML = PTABS.map(t =>
+    `<button class="mini${t.key === pTab ? ' primary' : ''}" data-ptab="${t.key}">${esc(t.label)}</button>`).join('');
+  box.querySelectorAll('[data-ptab]').forEach(b => b.onclick = () => setPTab(b.dataset.ptab));
+}
+
 function renderAll(){
   renderDropZero();
+  renderPTabs();
   renderParams(); renderOrderFields(); renderFormulas(); renderVars(); renderReportColumns();
 }
 
