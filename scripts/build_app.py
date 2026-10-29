@@ -47,7 +47,7 @@ RESOURCES = ["config", "extension", "docs", "src", "scripts", "bridge"]
 CN_DIRS = {"config": "配置", "extension": "浏览器扩展", "docs": "文档"}
 # 收进 _internal/源码/ 的目录（用户基本不用碰）
 INNER_DIRS = {"src", "scripts", "bridge"}
-RESOURCE_FILES = ["README.md", "CHANGELOG.md", "jingli.py"]
+RESOURCE_FILES = ["README.md", "CHANGELOG.md"]
 
 APP_ENTRY = "jingli.py"
 INSTALLER_ENTRY = "installer/installer.py"
@@ -107,6 +107,13 @@ def build_app() -> Path:
     stage = BUILD / "app"
     RELEASE.mkdir(parents=True, exist_ok=True)
 
+    # 上一版的目录名（这一版改成中文了）先挪走，免得新旧混在一起：
+    # 用户打开安装目录看到 config 和 配置 两个目录，会懵。
+    # 只挪我们自己放的这些目录名，别的（用户自己加的文件）一律不动。
+    for old in ("config", "extension", "docs", "src", "scripts", "bridge",
+                "data", "output", "assets"):
+        _retire_dir(out / old)
+
     # 先把上次的构建目录挪走，PyInstaller 才不会在清理时触发批量删除拦截
     _retire_dir(stage / "jingli")
     _retire_dir(BUILD / "pyi-app")
@@ -143,8 +150,9 @@ def build_app() -> Path:
     if assets_src.is_dir():
         for f in assets_src.iterdir():
             if f.is_file():
-                (out / "assets").mkdir(parents=True, exist_ok=True)
-                shutil.copy2(f, out / "assets" / f.name)
+                # 素材（图标）挪进 _internal，顶层不露出来
+                (out / "_internal" / "assets").mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, out / "_internal" / "assets" / f.name)
 
     out.mkdir(parents=True, exist_ok=True)
     for f in built.rglob("*"):
@@ -172,6 +180,14 @@ def build_app() -> Path:
         src = ROOT / name
         if src.exists():
             shutil.copy2(src, out / name)
+    # 源码模式的入口脚本也收进 _internal，顶层只留 jingli.exe
+    if (ROOT / "jingli.py").exists():
+        (out / "_internal" / "源码").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "jingli.py", out / "_internal" / "源码" / "jingli.py")
+        try:
+            (out / "jingli.py").unlink()      # 上一版留在顶层的，一并清掉
+        except OSError:
+            pass
 
     # 使用说明：放在最显眼的位置，新手不用翻目录就知道从哪开始
     _write_readme(out)
