@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -47,9 +48,19 @@ MAPPING = DATA / "mapping"
 LOGS = DATA / "logs"
 
 # 多店铺：一家店一个目录，互不干扰
-#   data/stores/<shop_id>/inbox/    这家店的原始导出
+#   data/stores/<shop_id>/inbox/    这家店的原始导出（按类型分子目录）
 #   data/stores/<shop_id>/meta.json 店名、国家、最后活动时间
+#   data/stores/_unknown/<时间戳>/   认不出店铺时的落点（不混进任何已知店）
 STORES_ROOT = DATA / "stores"
+UNKNOWN_ROOT = STORES_ROOT / "_unknown"
+
+# 店里 inbox 下按数据类型分子目录：文件多起来才不乱
+KIND_DIRS = ("orders", "ads", "affiliate", "mapping")
+
+# 表头识别出来的类型名 → 目录名。两套名字要对上，
+# 否则会冒出 order/ 和 orders/ 两种目录，看起来像两批数据。
+KIND_BY_TABLE = {"order": "orders", "ads": "ads",
+                  "affiliate": "affiliate", "mapping": "mapping"}
 
 # ---- 产出 ----
 OUTPUT = Path(os.environ.get("JINGLI_OUTPUT") or (ROOT / "output")).resolve()
@@ -70,13 +81,50 @@ def store_dir(shop_id: str) -> Path:
     return STORES_ROOT / (safe or "unknown") / "inbox"
 
 
+def kind_dirname(table_kind: str) -> str:
+    """把「表头认出来的类型」换算成目录名（order → orders）。"""
+    k = (table_kind or "").strip().lower()
+    if k in KIND_BY_TABLE:
+        return KIND_BY_TABLE[k]
+    return k if k in KIND_DIRS else "orders"
+
+
+def store_kind_dir(shop_id: str, kind: str) -> Path:
+    """某家店 inbox 下的分类子目录。
+
+    分类型存放是为了「一眼看出这家店的数据齐不齐」：
+    缺哪一类，目录就是空的，不用去翻文件名猜。
+    """
+    return store_dir(shop_id) / kind_dirname(kind)
+
+
+def store_reports_dir(shop_id: str) -> Path:
+    """某家店的报表目录。"""
+    sid = (shop_id or "").strip()
+    if not sid:
+        return OUTPUT
+    safe = "".join(c for c in sid if c.isalnum() or c in "-_")
+    return STORES_ROOT / (safe or "unknown") / "reports"
+
+
+def unknown_dir(stamp: str = "") -> Path:
+    """认不出店铺时的落点：data/stores/_unknown/<时间戳>/。
+
+    单独隔出来是有原因的：以前识别失败会静默落公共目录，
+    多店铺一起跑时数据会混在一起，谁也说不清哪份数据属于哪家店。
+    """
+    s = (stamp or "").strip() or datetime.now().strftime("%Y%m%d-%H%M%S")
+    return UNKNOWN_ROOT / s
+
+
 def store_meta_file(shop_id: str) -> Path:
     return store_dir(shop_id).parent / "meta.json"
 
 
 def ensure_dirs() -> None:
     """创建所有需要的目录。打包后首次运行必须调用一次。"""
-    for d in (DATA, CAPTURE, EXPORTS, INBOX, COSTS, MAPPING, LOGS, OUTPUT, STORES_ROOT):
+    for d in (DATA, CAPTURE, EXPORTS, INBOX, COSTS, MAPPING, LOGS, OUTPUT,
+              STORES_ROOT, UNKNOWN_ROOT):
         try:
             d.mkdir(parents=True, exist_ok=True)
         except OSError:

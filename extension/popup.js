@@ -550,6 +550,50 @@ if (capAdsBtn) {
     });
 }
 
+// ---------------- 手动导数据 ----------------
+// 自动取数挂掉时的兜底：自己去店铺后台点导出。
+// 两种模式：
+//   陪同导出 —— 打开页面后顺便盯着浏览器下载，文件一下载就自动存进这家店
+//   只开页面 —— 只帮你把页面打开，导出完到桌面端「手动导入」上传
+// 为什么保留手动这条路：平台接口一改、一掉登录、弹风控，自动那条路就断，
+// 但人总还能在页面上把表导出来。
+
+const MANUAL_PAGES = {
+  orders: { url: "https://seller-my.tiktok.com/", label: "卖家后台（订单管理）" },
+  sku: { url: "https://seller-my.tiktok.com/", label: "卖家后台（商品管理）" },
+  affiliate: { url: "https://affiliate.tiktok.com/affiliate/platform/homepage", label: "达人联盟后台" },
+  ads: { url: "https://seller-my.tiktok.com/", label: "卖家后台（广告）" },
+};
+
+function updateManualHint() {
+  const h = $("mHint");
+  if (!h) return;
+  const cap = $("mCapture") && $("mCapture").checked;
+  h.textContent = cap
+    ? "点下面的按钮会打开店铺页面；你在页面上点导出，文件一下载就自动存进这家店并生成快照。"
+    : "点下面的按钮只打开店铺页面；导出后到桌面端「手动导入」上传，导入时要选国家和店铺。";
+}
+
+document.querySelectorAll("[data-manual]").forEach((b) => {
+  b.addEventListener("click", () => {
+    const kind = b.dataset.manual;
+    const cap = !!( $("mCapture") && $("mCapture").checked );
+    b.disabled = true;
+    safeSend({ type: "manualExport", kind: kind, capture: cap }, (r) => {
+      b.disabled = false;
+      if (!r) { log("后台没响应，扩展可能刚被刷新，关掉面板重开一次"); return; }
+      if (r.ok) {
+        log(`已打开${r.label || kind}${cap ? "，现在在页面上点导出，我在这儿盯着下载" : ""}`);
+      } else {
+        log("失败：" + (r.error || "未知原因"));
+      }
+    });
+  });
+});
+
+if ($("mCapture")) $("mCapture").onchange = updateManualHint;
+updateManualHint();
+
 // ---------------- 深度抓包 ----------------
 
 const deepBtn = $("deep");

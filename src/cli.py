@@ -26,7 +26,8 @@ if not getattr(sys, "frozen", False):
 
 from src import paths  # noqa: E402
 from src.calc import compute, load_rates  # noqa: E402
-from src.loader import load_from_dir, load_from_files, load_from_workbook  # noqa: E402
+from src.loader import (load_from_dir, load_from_dirs, load_from_files,  # noqa: E402
+                        load_from_workbook)
 from src.report import build_report  # noqa: E402
 
 
@@ -193,6 +194,8 @@ def build_argparser() -> argparse.ArgumentParser:
     src.add_argument("--snapshot", default="",
                     help="用哪一份取数快照（目录名，见 data/stores/<店>/snapshots）。"
                          "不填就用当前 inbox 的实时数据")
+    src.add_argument("--snapshots", default="",
+                    help="合并多份快照一起算，目录名用逗号分隔（重叠订单以最新为准）。")
     src.add_argument("--orders", type=Path, help="订单导出文件")
     src.add_argument("--ads", type=Path, help="广告花费导出文件")
     src.add_argument("--commissions", type=Path, help="联盟佣金导出文件")
@@ -275,9 +278,26 @@ def main(argv: list[str] | None = None) -> int:
     # inbox 是「实时」的，扩展每取一次就多一份文件，而核算同类只取最新一份——
     # 想重算某一批老数据，就必须能锁定那批文件，不然只会对着最新的一直算。
     snap_note = ""
-    if getattr(args, "snapshot", ""):
+    snap_dirs: list[Path] = []
+    snap_list: list[str] = []
+    _sid = str(args.store or "").strip()
+    _snap_ids = [s.strip() for s in str(getattr(args, "snapshots", "") or "").split(",") if s.strip()]
+    if _snap_ids:
         from src import snapshots
-        _sid = str(args.store or "").strip()
+        _meta = []
+        for _sid_item in _snap_ids:
+            _d = snapshots.resolve(_sid, _sid_item)
+            if _d is None:
+                print(f"找不到快照：{_sid_item}（店铺 {_sid or '未指定'}）")
+                return 2
+            snap_dirs.append(_d)
+            snap_list.append(snapshots.describe(_sid, _sid_item))
+            _meta.append(snapshots.manifest(_sid, _sid_item) or {})
+        # 合并顺序按取数时间从旧到新：重叠的订单以最新那份的状态为准
+        snap_dirs.sort(key=lambda p: str(p.name))
+        snap_note = " + ".join(snap_list)
+    elif getattr(args, "snapshot", ""):
+        from src import snapshots
         _d = snapshots.resolve(_sid, args.snapshot)
         if _d is None:
             print(f"找不到快照：{args.snapshot}（店铺 {_sid or '未指定'}）")
@@ -314,11 +334,16 @@ def main(argv: list[str] | None = None) -> int:
                                order_fields=order_fields, cost_fields=cost_fields)
         source = "、".join(data.sources.values()) or args.orders.name
     else:
-        if not args.dir.exists():
-            print(f"找不到目录：{args.dir}")
-            return 2
-        data = load_from_dir(args.dir, costs_path, params.usd_to_local, map_path,
-                             order_fields=order_fields, cost_fields=cost_fields)
+        if snap_dirs:
+            # 多份快照合并：跨目录去重后再汇总
+            data = load_from_dirs(snap_dirs, costs_path, params.usd_to_local, map_path,
+                                  order_fields=order_fields, cost_fields=cost_fields)
+        else:
+            if not args.dir.exists():
+                print(f"找不到目录：{args.dir}")
+                return 2
+            data = load_from_dir(args.dir, costs_path, params.usd_to_local, map_path,
+                                 order_fields=order_fields, cost_fields=cost_fields)
         source = snap_note or args.dir.name
 
     if not data.orders:
@@ -349,6 +374,11 @@ def main(argv: list[str] | None = None) -> int:
         "映射表": f"{map_path.name}（{map_note}）" if map_path else "未提供",
         "生成时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+    if snap_note:
+        extra["数据快照"] = snap_note
+    if len(snap_dirs) > 1:
+        extra["合并说明"] = (f"合并 {len(snap_dirs)} 份快照；"
+                             f"同一订单的同一 SKU 只算一次，重叠部分以取数时间最新的为准")
     path = build_report(res, res.lines, out, switches, subtitle, extra,
                         with_formula=bool(getattr(args, "with_formula", False)))
 

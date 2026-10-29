@@ -18,9 +18,11 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
+import time
 from collections import Counter, defaultdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -328,6 +330,32 @@ def store_list() -> dict:
     return {"ok": True, "stores": stores, "countries": countries, "default": default}
 
 
+def _make_snapshot(shop_id: str, payload: dict) -> dict:
+    """把某家店当前 inbox 里的文件存成一份快照。
+
+    上传一次就是一批数据，所以上传完顺手存一份——
+    这样「这次取的是哪批数据」永远能追回来，也随时能回到老数据重算。
+    快照失败不影响上传（数据已经落盘了），只记一条日志。
+    """
+    try:
+        from src import snapshots as snaps
+        rng = payload.get("range") or {}
+        dfrom = str(rng.get("startDate") or rng.get("from") or "")
+        dto = str(rng.get("to") or rng.get("endDateExclusive") or "")
+        if dto and dfrom:
+            # 区间是「结束日期不含」，标签上往前挪一天更符合人的直觉
+            try:
+                from datetime import datetime, timedelta
+                dto = (datetime.strptime(dto, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        name = str(payload.get("shop_name") or "")
+        return snaps.create(shop_id, snaps.pick_files(shop_id), dfrom, dto, name)
+    except Exception as e:  # noqa: BLE001
+        _append_log(f"[upload] 快照入库失败：{e}")
+        return {}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "JingLiBridge/0.1"
 
@@ -559,9 +587,12 @@ class Handler(BaseHTTPRequestHandler):
     def _post_upload(self):
         """扩展把下载到的导出文件回传到这里。
 
-        默认落进 inbox 目录；带 dir="mapping" 的落到 data/mapping/。
-        映射类文件（商品管理 SKU、链接资料）要和订单、广告、佣金分开放，
-        否则核算时会被当成交付文件一起扫。
+        落盘位置：data/stores/<店铺ID>/inbox/<类型>/，
+        类型靠**表头**判断（订单/广告/联盟/映射），不靠文件名——
+        文件名会变，认表头才靠谱。
+
+        认不出店铺时不再静默丢进公共目录（旧行为会把多家店的数据混在一起，
+        而且不报错），改落 data/stores/_unknown/<时间戳>/ 并回报一条警告。
         """
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -578,16 +609,42 @@ class Handler(BaseHTTPRequestHandler):
         kind = str(payload.get("dir") or "").lower()
         shop_id = str(payload.get("shop_id") or "").strip()
 
-        if kind == "mapping":
+        safe = re.sub(r'[\\/:*?"<>|]', "_", name)
+
+        # 先落到临时位置，认出是什么表再决定放哪个子目录。
+        # （直接按名字猜类型不行：平台导出的文件名千奇百怪，
+        #   有时同一类表名字还带不同后缀。）
+        tmp_dir = paths.EXPORTS / "_tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / f"upload-{int(time.time()*1000)}-{safe}"
+        try:
+            tmp_path.write_bytes(data)
+        except OSError as e:
+            _json(self, {"ok": False, "error": f"写文件失败：{e}"}, 500)
+            return
+
+        table_kind = ""
+        try:
+            from src.loader import classify_rows, read_table
+            table_kind = classify_rows(read_table(tmp_path)) or ""
+        except Exception:  # noqa: BLE001
+            table_kind = ""
+
+        warning = ""
+        if kind == "mapping" or table_kind == "mapping":
+            # 映射表（商品管理 SKU、链接资料）走全局累积主表：
+            # 链接改绑后老 SKU 也要能查到归属，所以不能只留最新一份。
             target_dir = MAPPING_DIR
         elif shop_id:
-            # 多店铺：一家店一个目录，数据不混
-            target_dir = paths.store_dir(shop_id)
+            target_dir = paths.store_kind_dir(shop_id, table_kind or "orders")
             remember_store(shop_id, payload)
         else:
-            target_dir = INBOX_DIR
+            # 认不出店铺：单独隔一个专区，绝不混进任何一家已知店
+            target_dir = paths.unknown_dir() / paths.kind_dirname(table_kind)
+            warning = (f"没能识别出店铺，这份「{safe}」已存到 {target_dir}，"
+                       f"不会参与核算。请在扩展里重新登录该店铺后台再取一次，"
+                       f"或在「店铺」页把文件挪到对应店铺。")
 
-        safe = re.sub(r'[\\/:*?"<>|]', "_", name)
         target_dir.mkdir(parents=True, exist_ok=True)
         path = target_dir / safe
         if path.exists():
@@ -596,11 +653,27 @@ class Handler(BaseHTTPRequestHandler):
             while path.exists():
                 path = target_dir / f"{stem} ({i}){suf}"
                 i += 1
-        path.write_bytes(data)
-        who = f"[{shop_id}] " if shop_id else ""
+        try:
+            shutil.move(str(tmp_path), str(path))
+        except OSError as e:
+            _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
+            return
+        who = f"[{shop_id}] " if shop_id else "[未识别店铺] "
         _append_log(f"{who}文件已保存：{path.name}（{len(data)/1024:.0f} KB）")
-        _json(self, {"ok": True, "path": str(path), "bytes": len(data),
-                     "shop_id": shop_id, "store_dir": str(target_dir)})
+        if warning:
+            _append_log(f"[warn] {warning}")
+        out = {"ok": True, "path": str(path), "bytes": len(data),
+               "shop_id": shop_id, "store_dir": str(target_dir),
+               "kind": table_kind or "unknown"}
+        if warning:
+            out["warning"] = warning
+        # 上传即入库：顺手存一份快照，随时能回到这批数据重算。
+        # 区间取扩展带上来的（这一轮取的是什么日期范围），
+        # 界面上「用哪次数据」列表就能显示每份快照对应哪个区间。
+        _snap = _make_snapshot(shop_id, payload)
+        if _snap.get("id"):
+            out["snapshot"] = _snap.get("id")
+        _json(self, out)
 
     def _post_data_import(self):
         """手动导入导出文件——自动取数挂了的时候的兜底通路。
@@ -643,10 +716,31 @@ class Handler(BaseHTTPRequestHandler):
 
         shop_id = str(payload.get("shop_id") or "").strip()
         country = str(payload.get("country") or "").strip()
+        if not country and shop_id:
+            # 「跟随店铺」：国家按这家店在配置里的国家来
+            for st in store_list().get("stores", []):
+                if st.get("id") == shop_id or st.get("shop_id") == shop_id:
+                    country = st.get("country") or ""
+                    break
+
+        # 按**所选国家**的列标题来认表。
+        # 各国站导出的表头不一样：马来站叫「订单金额」，菲律宾站未必这么叫。
+        # 用默认别名认表，选错国家就会「没认出来」或者认成别的类型，
+        # 而费率也会套错——数字会全错还不报错。
+        aliases = None
+        if country:
+            try:
+                from src import formula as _formula
+                from src.loader import merged_aliases
+                _fcfg = _formula.load_config(paths.CONFIG / "formulas.json")
+                _cc = _formula.country_config(_fcfg, country)
+                aliases = merged_aliases(_cc.get("order_fields"))
+            except Exception:  # noqa: BLE001
+                aliases = None
 
         # 先落到临时位置，靠表头认出这是张什么表，再决定放进哪个目录：
         #   商品映射表 → data/mapping/（跟订单、广告分开）
-        #   其余       → data/stores/<店>/inbox/
+        #   其余       → data/stores/<店>/inbox/<类型>/
         # 映射表混进 inbox 的话，核算扫目录时会把整张表当成交付文件处理一遍。
         tmp_dir = paths.DATA / "_import_tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -656,7 +750,7 @@ class Handler(BaseHTTPRequestHandler):
             tmp.write_bytes(data)
             try:
                 from src.loader import classify_rows, read_table
-                kind = classify_rows(read_table(tmp)) or ""
+                kind = classify_rows(read_table(tmp), aliases) or ""
             except Exception:
                 kind = ""
         finally:
@@ -668,9 +762,9 @@ class Handler(BaseHTTPRequestHandler):
         if kind == "mapping" or payload.get("kind") == "mapping":
             target_dir = MAPPING_DIR
         elif shop_id:
-            target_dir = paths.store_dir(shop_id)
+            target_dir = paths.store_kind_dir(shop_id, kind or "orders")
         else:
-            target_dir = INBOX_DIR
+            target_dir = paths.unknown_dir() / paths.kind_dirname(kind)
         target_dir.mkdir(parents=True, exist_ok=True)
 
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -693,8 +787,20 @@ class Handler(BaseHTTPRequestHandler):
                  "mapping": "商品映射表（SKU→商品ID）"}.get(kind, "没认出来")
         who = f"[{shop_id}] " if shop_id else ""
         _append_log(f"{who}手动导入：{path.name} → {label}")
-        _json(self, {"ok": True, "path": str(path), "name": path.name,
-                     "kind": kind, "label": label, "bytes": len(data)})
+        out = {"ok": True, "path": str(path), "name": path.name,
+               "kind": kind, "label": label, "bytes": len(data),
+               "country": country or "未指定", "store_dir": str(target_dir)}
+        if not kind:
+            out["warning"] = (f"按{country or '默认'}的列标题没认出这是什么表，"
+                              f"文件已存到 {target_dir}，但核算时可能用不上。"
+                              f"请确认国家选对了。")
+        elif kind == "order" and not shop_id:
+            out["warning"] = "没选店铺，这份订单表暂存在未识别专区，选好店铺后需要挪过去才能参与核算。"
+        # 手动导入的也算一批数据，存一份快照，随时能回到它重算
+        _snap = _make_snapshot(shop_id, {"shop_name": shop_id})
+        if _snap.get("id"):
+            out["snapshot"] = _snap.get("id")
+        _json(self, out)
 
     def _post_mapping(self):
         from bridge import settings_api
@@ -932,22 +1038,54 @@ class Handler(BaseHTTPRequestHandler):
             # 数据来源：有 shop_id 就读它自己的目录，各店数据不混
             data_dir = paths.store_dir(shop_id)
             if not data_dir.is_dir() or not any(data_dir.iterdir()):
-                # 没识别到店铺（或该店还没抓过数据）就退回公共目录
+                if shop_id:
+                    # 选了店铺却没有数据：直说，别悄悄拿别的数据算。
+                    # 旧行为是退回公共目录——多店铺时会把别家的数据算进来，
+                    # 报表却顶着这家店的名字，事后根本查不出来。
+                    _json(self, {"ok": False,
+                                 "error": f"店铺「{store_name}」还没有取到数据。"
+                                          f"先在扩展里取一次，或用「手动导入」把文件传进来。"})
+                    return
+                # 没指定店铺（全部店铺模式）：退回公共目录
                 data_dir = INBOX_DIR
+                # 公共目录空、但「未识别专区」有数据时要说清楚，
+                # 不然用户只看到一句「没识别出订单表」，根本不知道文件去哪了
+                try:
+                    _unk = ([p for p in paths.UNKNOWN_ROOT.rglob("*") if p.is_file()]
+                            if paths.UNKNOWN_ROOT.is_dir() else [])
+                except OSError:
+                    _unk = []
+                if _unk and not any(data_dir.iterdir()):
+                    _json(self, {"ok": False,
+                                 "error": f"有 {len(_unk)} 个文件没能识别出店铺，"
+                                          f"存在「未识别店铺」专区里，不会参与核算。"
+                                          f"请在扩展里重新登录店铺后台再取一次，"
+                                          f"或在核算页选好店铺后重新导入。"})
+                    return
 
             # 快照：没指定就先把当前 inbox 存成一份再算。
             # inbox 是实时的，下一次取数就把它冲掉了；存一份才能回头重算、
             # 也才能说清「这份报表到底是哪批数据算出来的」。
-            snap_id = str(payload.get("snapshot") or "").strip()
-            if snap_id:
-                from src import snapshots
-                _sd = snapshots.resolve(shop_id, snap_id)
-                if _sd is None:
-                    _json(self, {"ok": False, "error": f"找不到快照：{snap_id}"})
-                    return
-                data_dir = _sd
+            #
+            # 可以选**多份**一起算：勾哪几份就合并哪几份，
+            # 跨快照重复的订单只算一次（重叠部分以取数时间最新的为准）。
+            from src import snapshots
+            _snaps = [str(s).strip() for s in (payload.get("snapshots") or []) if str(s).strip()]
+            if not _snaps:
+                _one = str(payload.get("snapshot") or "").strip()
+                _snaps = [_one] if _one else []
+
+            snap_id = ""
+            data_dirs: list[Path] = []
+            if _snaps:
+                for _s in _snaps:
+                    _sd = snapshots.resolve(shop_id, _s)
+                    if _sd is None:
+                        _json(self, {"ok": False, "error": f"找不到快照：{_s}"})
+                        return
+                    data_dirs.append(_sd)
+                snap_id = _snaps[0] if len(_snaps) == 1 else ""
             else:
-                from src import snapshots
                 try:
                     _snap = snapshots.create(
                         shop_id, snapshots.pick_files(shop_id),
@@ -955,10 +1093,16 @@ class Handler(BaseHTTPRequestHandler):
                         note=str(payload.get("note") or ""))
                     if _snap.get("ok"):
                         snap_id = _snap.get("id") or ""
+                        _sd = snapshots.resolve(shop_id, snap_id)
+                        if _sd:
+                            data_dirs = [_sd]
                 except Exception as e:  # noqa: BLE001
                     # 快照失败不该拖垮核算：退回实时目录照算
                     _append_log(f"[run] 快照入库失败，改用实时数据：{e}")
                     snap_id = ""
+
+            if not data_dirs:
+                data_dirs = [data_dir]
 
             # 报表放到该店铺自己的子目录，文件名按设置里的模板生成
             cfg_settings.load()
@@ -985,14 +1129,16 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 base = [sys.executable, "-m", "src.cli"]
             cmd = base + [
-                "--dir", str(data_dir),
+                "--dir", str(data_dirs[0]),
                 # 有店铺就只传店铺：国家由 config/stores.json 决定，
                 # 两处都传容易打架（--country 会覆盖 --store）
                 *(["--store", store] if store else ["--country", country]),
                 "--out", str(out),
                 "--json",
             ]
-            if snap_id:
+            if len(data_dirs) > 1:
+                cmd += ["--snapshots", ",".join(d.name for d in data_dirs)]
+            elif snap_id:
                 cmd += ["--snapshot", snap_id]
             if payload.get("with_formula"):
                 cmd += ["--with-formula"]

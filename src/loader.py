@@ -882,37 +882,47 @@ TABLE_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def classify_rows(rows: list[tuple]) -> Optional[str]:
+def classify_rows(rows: list[tuple], aliases: dict | None = None) -> Optional[str]:
     """按表头特征判断这是一张什么表。
 
     不靠文件名，因为平台导出的默认文件名千奇百怪
     （"全部 笔订单-2026-10-27-16_59.csv"、"creative data for product campaigns ..."），
     而表头结构是稳定的。
+
+    aliases 可以传该国家配置的列标题候选：不同国家导出的表头不一样
+    （马来站叫「订单金额」，菲律宾站可能叫别的），
+    手动导入时按所选国家认表才准。
     """
+    amap = aliases if aliases else get_aliases()
     for kind, required in TABLE_SIGNATURES:
-        hidx, cm = find_header_row(rows, required)
+        hidx, cm = find_header_row(rows, required, aliases=amap)
         if hidx >= 0 and all(k in cm for k in required):
             return kind
     return None
 
 
-def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
-                  usd_to_local: float = 1.0,
-                  mapping_file: Optional[Path] = None,
-                  order_fields: dict | None = None,
-                  cost_fields: dict | None = None) -> RawData:
-    """从目录自动识别四类文件：逐张读表头判断类型，同名类型取最新的一张。"""
-    folder = Path(folder)
+def _scan_folder(folder: Path) -> tuple[dict, list, list]:
+    """扫一个目录（递归），把文件按类型分桶。
+
+    递归是为了支持「inbox/orders、inbox/ads…」这种分子目录。
+    类型仍然靠**表头**判断，不靠目录名——目录名只是给人看的，
+    靠名字认表早晚会认错。
+    """
     buckets: dict[str, list[tuple[Path, list[tuple]]]] = {
         "order": [], "ads": [], "affiliate": [], "mapping": []
     }
+    json_maps: list[tuple[Path, SkuIndex]] = []
     skipped: list[str] = []
-    json_maps: list[tuple[Path, SkuIndex]] = []   # 扩展直接抓的 sku_list_*.json
+    folder = Path(folder)
+    if not folder.is_dir():
+        return buckets, json_maps, skipped
 
-    for f in sorted(folder.iterdir()):
-        if not f.is_file() or f.suffix.lower() not in (".xlsx", ".xls", ".csv", ".txt", ".json"):
+    for f in sorted(folder.rglob("*")):
+        if not f.is_file():
             continue
-        if f.name.startswith("~$"):
+        if f.suffix.lower() not in (".xlsx", ".xls", ".csv", ".txt", ".json"):
+            continue
+        if f.name.startswith("~$") or f.name.startswith("."):
             continue
         if f.suffix.lower() == ".json":
             jm = parse_mapping_json(f)
@@ -931,31 +941,157 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
             buckets[kind].append((f, rows))
         else:
             skipped.append(f.name)
+    return buckets, json_maps, skipped
 
-    if not buckets["order"]:
+
+def _find_date_col(header) -> int:
+    """表头里找「像日期」的列，找不到返回 -1。
+
+    有日期列时，去重可以精确到「同一个商品同一天」；
+    没有就退化成整行内容比对——宁可少去重，也不该把两段不重叠的区间删掉。
+    """
+    for i, h in enumerate(header):
+        s = norm_header(str(h or ""))
+        if not s:
+            continue
+        if any(t in s for t in ("date", "日期", "day", "time", "时间")):
+            return i
+    return -1
+
+
+def _merge_same_kind(items: list[tuple[Path, list[tuple]]],
+                     kind: str) -> tuple[list[tuple], int, int]:
+    """把多份同类表并成一张表。
+
+    返回 (合并后的行, 去掉的重复行数, 同商品但内容不同的行数)。
+
+    去重规则：整行内容相同才算重复。这对「按天/按订单明细」的表正好等于
+    「按日期+投放去重」；而对「整个区间汇总成一行」的表，跨区间抓两次
+    内容本来就不同，不会被误删——那种表重复计入的情况会在 issues 里提醒。
+    """
+    if not items:
+        return [], 0, 0
+    header: list[tuple] | None = None
+    merged: list[tuple] = []
+    seen: set = set()
+    dropped = 0
+    same_pid_diff = 0
+    pid_seen: dict[str, set] = {}
+
+    for path, rows in items:
+        hidx, cm = find_header_row(rows, ("product_id",))
+        if hidx < 0:
+            continue
+        if header is None:
+            header = rows[hidx]
+        dcol = _find_date_col(header)
+        pid_col = cm.get("product_id", -1)
+        for r in rows[hidx + 1:]:
+            vals = tuple(to_str(x) for x in r)
+            key = (vals,)
+            if key in seen:
+                dropped += 1
+                continue
+            seen.add(key)
+            merged.append(r)
+            pid = to_str(r[pid_col]) if 0 <= pid_col < len(r) else ""
+            dv = to_str(r[dcol]) if 0 <= dcol < len(r) else ""
+            sig = (pid, dv)
+            if pid in pid_seen and sig not in pid_seen[pid]:
+                same_pid_diff += 1
+            pid_seen.setdefault(pid, set()).add(sig)
+
+    if header is None:
+        return [], 0, 0
+    return [header] + merged, dropped, same_pid_diff
+
+
+def _merge_orders(items: list[tuple[Path, list[tuple]]],
+                  order_fields: dict | None) -> tuple[list[OrderLine], int, list[str]]:
+    """多份订单表合并。
+
+    去重键：**订单号 + SKU**（同一订单里同一个 SKU 只该有一条）。
+    重叠时以**靠后的目录**为准——调用方把目录按从旧到新排好，
+                这样后取的状态（比如后来退款了）能反映进净利。
+    """
+    lines: list[OrderLine] = []
+    index: dict[tuple, tuple[int, int]] = {}   # key -> (文件序号, 行序号)
+    overlaps = 0
+    titles: list[str] = []
+    for fi, (path, rows) in enumerate(items):
+        for l in parse_orders(rows, order_fields, titles):
+            key = (l.order_id, l.sku_id or l.seller_sku or l.product_id)
+            hit = index.get(key)
+            if hit and hit[0] != fi:
+                # 跨文件撞了：同一订单的同一 SKU，后取的那份状态更新（比如后来退款了），
+                # 用它盖掉旧的。同一文件内部的重复行不动——那是表本身的样子。
+                overlaps += 1
+                lines[hit[1]] = l
+                index[key] = (fi, hit[1])
+            elif not hit:
+                index[key] = (fi, len(lines))
+                lines.append(l)
+
+    # 合并后**重算**每个订单的行数。
+    #
+    # 这一步不能省：订单金额是按「订单内 SKU 行数」分摊到每一行的
+    # （一个订单 3 行，买家实付就分成 3 份）。而行数是每份文件各自统计的——
+    # 一个订单的 3 行如果被切在两个快照里，各算各的就是 1 行和 2 行，
+    # 分摊基数错了，买家实付和交易手续费都会跟着偏。
+    # 合并成完整的一份之后重新统计，才能跟「整份数据单独算」完全一致。
+    per_order = Counter(l.order_id for l in lines)
+    for l in lines:
+        l.order_line_count = per_order.get(l.order_id, 1) or 1
+    return lines, overlaps, titles
+
+
+def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
+                   usd_to_local: float = 1.0,
+                   mapping_file: Optional[Path] = None,
+                   order_fields: dict | None = None,
+                   cost_fields: dict | None = None) -> RawData:
+    """从**多个**目录一起读数据，跨目录合并去重。
+
+    folders 按「从旧到新」排序传入。单个目录时行为和从前一样。
+    """
+    folders = [Path(f) for f in folders if Path(f) and Path(f).is_dir()]
+    if not folders:
+        raise FileNotFoundError("没有可读的数据目录")
+
+    buckets: dict[str, list[tuple[Path, list[tuple]]]] = {
+        "order": [], "ads": [], "affiliate": [], "mapping": []
+    }
+    json_maps: list[tuple[Path, SkuIndex]] = []
+    skipped: list[str] = []
+    for d in folders:
+        b, jm, sk = _scan_folder(d)
+        for k in buckets:
+            buckets[k].extend(b[k])
+        json_maps.extend(jm)
+        skipped.extend(sk)
+
+    issues: list[str] = []
+    sources: dict[str, str] = {}
+    titles: list[str] = []
+
+    # ---- 订单：多份合并去重 ----
+    orders: list[OrderLine] = []
+    if buckets["order"]:
+        orders, overlaps, titles = _merge_orders(buckets["order"], order_fields)
+        names = " + ".join(p.name for p, _ in buckets["order"])
+        sources["订单"] = names
+        if len(buckets["order"]) > 1:
+            msg = (f"订单表合并：{len(buckets['order'])} 份快照共 "
+                   f"{len(orders) + overlaps} 行，去重 {overlaps} 行（重叠部分以最新快照为准）")
+            issues.append(msg)
+    else:
         raise FileNotFoundError(
-            f"目录里没识别出订单表：{folder}\n"
+            f"目录里没识别出订单表：{folders[0]}\n"
             f"（跳过：{'、'.join(skipped) if skipped else '无'}）"
         )
 
-    def newest(kind: str):
-        items = buckets[kind]
-        if not items:
-            return None
-        return max(items, key=lambda x: x[0].stat().st_mtime)
-
-    order_f, order_rows = newest("order")
-    issues: list[str] = []
-    sources: dict[str, str] = {"订单": order_f.name}
-    titles: list[str] = []
-    orders = parse_orders(order_rows, order_fields, titles)
-
+    # ---- 映射：全部合并（主表优先），不挑一份 ----
     sku_index = SkuIndex()
-    m = newest("mapping")
-    # 映射主表优先：它是历次抓取累积合并出来的，链接改绑后老 SKU 也不会丢。
-    # 单次抓下来的那份只反映"现在"，用它会让历史订单里消失的 SKU 归入未识别。
-    # 映射来源可以有多份，全部合并（主表优先），而不是挑一份用：
-    # 主表保证链接改过后老 SKU 不丢归属，目录里的表保证本次抓取完整。
     parts: list[str] = []
     if mapping_file and Path(mapping_file).exists():
         midx = parse_mapping(read_table(Path(mapping_file)))
@@ -965,23 +1101,22 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
         else:
             issues.append(f"映射主表里没识别出 SKU ID / Product ID 列：{Path(mapping_file).name}")
 
-    m = newest("mapping")
-    if m:
-        tidx = parse_mapping(m[1])
+    for mf, mrows in buckets["mapping"]:
+        tidx = parse_mapping(mrows)
         if len(tidx):
             sku_index.merge(tidx)
-            parts.append(m[0].name)
+            parts.append(mf.name)
         else:
-            issues.append(f"映射表里没识别出 SKU ID / Product ID 列：{m[0].name}")
+            issues.append(f"映射表里没识别出 SKU ID / Product ID 列：{mf.name}")
 
-    if json_maps:
-        for jf, jidx in sorted(json_maps, key=lambda x: x[0].stat().st_mtime):
-            sku_index.merge(jidx)
-            parts.append(jf.name)
+    for jf, jidx in sorted(json_maps, key=lambda x: x[0].stat().st_mtime):
+        sku_index.merge(jidx)
+        parts.append(jf.name)
 
     if parts:
         sources["映射"] = " + ".join(parts)
 
+    # ---- 成本 ----
     costs: dict[str, float] = {}
     if costs_file and Path(costs_file).exists():
         cpath = Path(costs_file)
@@ -1003,19 +1138,27 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
     elif costs_file:
         issues.append(f"成本文件不存在：{costs_file}")
 
+    # ---- 广告 / 联盟：多份合并去重后汇总 ----
     ads: dict[str, float] = {}
-    a = newest("ads")
-    if a:
-        ads, ad_issues = parse_ads(a[1], usd_to_local)
+    if buckets["ads"]:
+        mrows, dropped, diff = _merge_same_kind(buckets["ads"], "ads")
+        ads, ad_issues = parse_ads(mrows, usd_to_local)
         issues += ad_issues
-        sources["广告"] = a[0].name
+        sources["广告"] = " + ".join(p.name for p, _ in buckets["ads"])
+        if len(buckets["ads"]) > 1:
+            issues.append(f"广告表合并：{len(buckets['ads'])} 份快照，去重 {dropped} 行")
+            if diff:
+                issues.append(f"广告表有 {diff} 行「同商品+同日期但金额不同」，"
+                              f"若该表是按区间汇总而非按天明细，请核对是否重复计入")
 
     commissions: dict[str, float] = {}
-    c = newest("affiliate")
-    if c:
-        commissions, com_issues = parse_commissions(c[1])
+    if buckets["affiliate"]:
+        mrows, dropped, diff = _merge_same_kind(buckets["affiliate"], "affiliate")
+        commissions, com_issues = parse_commissions(mrows)
         issues += com_issues
-        sources["联盟佣金"] = c[0].name
+        sources["联盟佣金"] = " + ".join(p.name for p, _ in buckets["affiliate"])
+        if len(buckets["affiliate"]) > 1:
+            issues.append(f"联盟佣金表合并：{len(buckets['affiliate'])} 份快照，去重 {dropped} 行")
 
     for kind, label in (("ads", "广告表"), ("affiliate", "联盟佣金表"), ("mapping", "商品映射表")):
         if not buckets[kind]:
@@ -1027,6 +1170,16 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
     return RawData(orders=orders, costs=costs, sku_index=sku_index, ads=ads,
                    commissions=commissions, issues=issues, sources=sources,
                    order_titles=titles)
+
+
+def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
+                  usd_to_local: float = 1.0,
+                  mapping_file: Optional[Path] = None,
+                  order_fields: dict | None = None,
+                  cost_fields: dict | None = None) -> RawData:
+    """从目录自动识别四类文件（单个目录的快捷方式）。"""
+    return load_from_dirs([Path(folder)], costs_file, usd_to_local, mapping_file,
+                          order_fields, cost_fields)
 
 
 def load_from_workbook(path: Path, usd_to_local: float = 1.0,

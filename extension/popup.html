@@ -48,6 +48,14 @@
                                  font-size: 12px; color: #1F3B4D; }
   .srow input.num { width: 42px; }
   .hint2 { color: #8A99A8; font-size: 11px; }
+  .manual { margin-top: 9px; padding: 9px 10px; border: 1px solid #E4E9EF;
+            border-radius: 8px; background: #FAFBFC; }
+  .manual-head { display: flex; align-items: center; gap: 10px; }
+  .manual-head b { font-size: 12.5px; }
+  .manual .mode { display: flex; align-items: center; gap: 4px; font-size: 11px;
+                  color: #6B7B8C; cursor: pointer; }
+  .manual .mode input { width: 13px; height: 13px; accent-color: #2E7D6B; }
+  .manual p { margin: 5px 0 0; line-height: 1.5; }
   .result { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: #F1F8F3;
             border: 1px solid #CFE6D6; font-size: 12px; line-height: 1.7; }
   .result.bad { background: #FCF3F2; border-color: #F0D2CE; }
@@ -98,6 +106,21 @@
     <button class="ghost" data-task="affiliate">联盟佣金</button>
     <button class="ghost" data-task="ads">广告（下载已完成的）</button>
     <button class="ghost" id="capAds" style="grid-column:1 / -1">① 先点我，再去广告页点一次「导出」</button>
+  </div>
+
+  <div class="manual">
+    <div class="manual-head">
+      <b>手动导数据</b>
+      <label class="mode"><input type="checkbox" id="mCapture" checked />
+        <span>陪同导出（自动接住下载）</span></label>
+    </div>
+    <p class="hint2" id="mHint"></p>
+    <div class="grid">
+      <button class="ghost" data-manual="orders">订单页</button>
+      <button class="ghost" data-manual="sku">商品管理</button>
+      <button class="ghost" data-manual="affiliate">联盟后台</button>
+      <button class="ghost" data-manual="ads">广告页</button>
+    </div>
   </div>
   <hr />
   <div class="sched">

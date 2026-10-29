@@ -52,14 +52,25 @@ def _ago(stamp: str) -> str:
     return f"{int(d // 86400)} 天前"
 
 
-def _files(dir_: Path) -> list[dict]:
+def _files(dir_: Path, recursive: bool = True) -> list[dict]:
+    """列目录下的文件。默认递归——店里按类型分了子目录（orders/ads/…）。"""
     out: list[dict] = []
     try:
-        for p in dir_.iterdir():
+        it = dir_.rglob("*") if recursive else dir_.iterdir()
+        for p in it:
             if p.is_file() and not p.name.startswith("_"):
                 st = p.stat()
-                out.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime})
-    except OSError:
+                # 用 parts 取子目录名：Windows 上分隔符是反斜杠，
+                # 用 split("/") 会切不开，分类就全变成 other
+                try:
+                    rel = p.relative_to(dir_)
+                    top = rel.parts[0] if len(rel.parts) > 1 else ""
+                except ValueError:
+                    top = ""
+                out.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime,
+                            "rel": str(rel) if recursive else p.name,
+                            "kind": top or "other"})
+    except (OSError, ValueError):
         pass
     out.sort(key=lambda x: -x["mtime"])
     return out
@@ -120,26 +131,50 @@ def reports() -> dict:
 
 
 def data_files() -> dict:
-    """按店铺分开列，哪家店有数据、哪家没有，一眼看得出来。"""
+    """按店铺分开列，哪家店有数据、缺哪类，一眼看得出来。"""
     from bridge.server import discovered_stores
 
     groups: list[dict] = []
     for d in discovered_stores():
-        files = _files(paths.store_dir(d["shop_id"]))
+        root = paths.store_dir(d["shop_id"])
+        files = _files(root)
+        # 按类型统计：缺哪类一目了然，不用去翻文件名猜
+        kinds: dict[str, int] = {}
+        for f in files:
+            k = f.get("kind") or "other"
+            kinds[k] = kinds.get(k, 0) + 1
         groups.append({
             "shop_id": d["shop_id"],
             "name": d["shop_name"] or d["shop_id"],
             "country": d["country"],
+            "kinds": kinds,
             "items": [
                 {"name": f["name"], "size_kb": round(f["size"] / 1024),
-                 "at": datetime.fromtimestamp(f["mtime"]).strftime("%m-%d %H:%M")}
+                 "at": datetime.fromtimestamp(f["mtime"]).strftime("%m-%d %H:%M"),
+                 "kind": f.get("kind") or "other"}
                 for f in files
             ],
         })
+
+    # 认不出店铺的数据：单独一个分组，标红提示，绝不混进任何一家店
+    unknown: list[dict] = []
+    try:
+        if paths.UNKNOWN_ROOT.is_dir():
+            for d in sorted(paths.UNKNOWN_ROOT.iterdir(), reverse=True):
+                if not d.is_dir():
+                    continue
+                for f in _files(d):
+                    unknown.append({"name": f["name"], "size_kb": round(f["size"] / 1024),
+                                    "at": datetime.fromtimestamp(f["mtime"]).strftime("%m-%d %H:%M"),
+                                    "batch": d.name})
+    except OSError:
+        pass
+
     legacy = _files(paths.INBOX)
     return {
         "ok": True,
         "groups": groups,
+        "unknown": unknown,
         "legacy": [
             {"name": f["name"], "size_kb": round(f["size"] / 1024),
              "at": datetime.fromtimestamp(f["mtime"]).strftime("%m-%d %H:%M")}
@@ -170,6 +205,7 @@ def snapshots(store: str = "") -> dict:
             "to": r.get("to") or "",
             "files": [f.get("name") for f in (doc.get("files") or [])],
             "file_count": len(doc.get("files") or []),
+            "kinds": doc.get("kinds") or {},
         })
     return {"ok": True, "store": sid, "items": items,
             "root": str(snaps.root(sid))}
@@ -312,6 +348,17 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .cfg-tbl td{padding:8px 12px}
   .cfg-tbl input[type=text],.cfg-tbl input[type=number]{min-width:0;width:100%;padding:6px 8px;font-size:12.5px}
   .cfg-tbl tr.off td{opacity:.42}
+  /* 快照多选清单 */
+  .snap-list{border:1px solid var(--line);border-radius:10px;background:#fff;
+    max-height:186px;overflow-y:auto;padding:4px 0}
+  .snap-list .empty{padding:22px}
+  .snap-item{display:flex;gap:9px;align-items:flex-start;padding:8px 14px;cursor:pointer}
+  .snap-item:hover{background:#fcfcfa}
+  .snap-item input{width:15px;height:15px;margin-top:2px;flex:0 0 15px;accent-color:var(--accent);cursor:pointer}
+  .snap-item b{display:block;font-size:12.5px;font-weight:600}
+  .snap-item em{display:block;font-style:normal;font-size:11.5px;color:var(--text-2);margin-top:1px}
+  .chips.tight{margin:8px 0 0}
+  .chips.tight button{padding:4px 11px;font-size:11.5px}
   /* 总开关：去除 0 元样品订单 */
   .switch{display:flex;gap:10px;align-items:flex-start;padding:13px 15px;
     border:1px solid var(--line);border-radius:10px;background:var(--line-soft);cursor:pointer}
@@ -462,7 +509,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.19.0</span></div>
+      <div class="row"><span>版本</span><span>0.20.0</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -492,8 +539,14 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <button data-k="d7">最近 7 天</button><button data-k="d30">最近 30 天</button>
           <button data-k="all" class="on">全部数据</button></div>
         <div class="row">
-          <div class="field"><label>用哪次数据</label>
-            <select id="snap" style="min-width:230px"><option value="">最新数据（当前 inbox）</option></select></div>
+          <div class="field" style="flex:1;min-width:340px"><label>用哪次数据（可多选合并）</label>
+            <div class="snap-list" id="snap-list"><div class="empty">读取中…</div></div>
+            <div class="chips tight" id="snap-chips">
+              <button data-sel="latest">仅最新</button>
+              <button data-sel="all">全部</button>
+              <button data-sel="last3">近 3 次</button>
+              <button data-sel="none">不指定</button></div>
+          </div>
           <div class="field"><label>店铺</label>
             <select id="store" style="min-width:200px"><option value="">全部店铺（逐个核算）</option></select></div>
           <div class="field"><label>开始日期</label><input type="date" id="dfrom"></div>
@@ -525,6 +578,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <p class="muted" style="font-size:12px;margin:8px 0 0">
             自动取数失败时用它兜底：自己在 TikTok 后台导出订单 / 广告 / 联盟佣金 / 商品表，
             在这里传上来就行，之后的计算跟自动取到的数据完全一样。
+            <b>国家一定要选对</b>：费率按国家分，订单表的列名也按国家/语言分，
+            选错了列认不出来、费率也套错，数字会全错还不报错。
             传上去后会自动认一下是张什么表，认不出来会告诉你。
           </p>
           <div class="note" id="imp-note"></div>
@@ -873,22 +928,36 @@ async function loadRunFiles(){
     const j = await (await fetch('/api/data-files')).json();
     const groups = (j.groups || []).filter(g => g.items.length);
     const legacy = j.legacy || [];
-    if(!groups.length && !legacy.length){
+    const unknown = j.unknown || [];
+    if(!groups.length && !legacy.length && !unknown.length){
       $('#run-files-hint').textContent = '';
       $('#run-files').innerHTML = '<div class="empty"><b>还没有数据文件</b>在战斧浏览器里打开店铺页面，点扩展面板的「立即运行」</div>';
       return;
     }
-    let n = legacy.length; groups.forEach(g => n += g.items.length);
+    let n = legacy.length + unknown.length;
+    groups.forEach(g => n += g.items.length);
     $('#run-files-hint').textContent = n + ' 个文件';
     let html = '';
+    const KIND_CN = {orders:'订单', ads:'广告', affiliate:'联盟', mapping:'映射', other:'其他'};
     groups.forEach(g => {
+      const k = g.kinds || {};
+      const kbits = Object.keys(k).filter(x => x !== 'other')
+        .map(x => KIND_CN[x] + ' ' + k[x]).join(' · ');
       html += `<div style="padding:13px 20px 6px;font-size:12.5px;color:var(--text-2);background:#fcfcfa;
         border-bottom:1px solid var(--line-soft)">${esc(g.name)}
-        <span class="tag gray">${esc(g.country || '')}</span></div>`;
+        <span class="tag gray">${esc(g.country || '')}</span>
+        ${kbits ? '<span class="tag">' + esc(kbits) + '</span>' : ''}</div>`;
       html += '<table><tbody>' + g.items.map(f => `<tr>
         <td style="width:58%">${esc(f.name)}</td><td class="muted" style="width:16%">${f.size_kb} KB</td>
         <td class="muted" style="width:26%">${f.at}</td></tr>`).join('') + '</tbody></table>';
     });
+    if(unknown.length){
+      html += `<div style="padding:13px 20px 6px;font-size:12.5px;color:var(--warn);background:#fdf6f5;
+        border-bottom:1px solid var(--line-soft)">⚠ 未识别店铺的数据（${unknown.length} 个）——不会参与核算</div>`;
+      html += '<table><tbody>' + unknown.map(f => `<tr>
+        <td style="width:58%">${esc(f.name)}</td><td class="muted" style="width:16%">${f.size_kb} KB</td>
+        <td class="muted" style="width:26%">${f.at}</td></tr>`).join('') + '</tbody></table>';
+    }
     if(legacy.length){
       html += `<div style="padding:13px 20px 6px;font-size:12.5px;color:var(--text-2);background:#fcfcfa;
         border-bottom:1px solid var(--line-soft)">未归到店铺的旧数据</div>`;
@@ -935,6 +1004,16 @@ async function loadImportOptions(){
   }catch(e){}
 }
 
+/** 选店铺时把国家自动带上：各国费率、列名都不同，选错就全错。 */
+if($('#imp-store')) $('#imp-store').onchange = () => {
+  const sid = $('#imp-store').value;
+  const s = storesCache.find(x => x.id === sid);
+  const cs = $('#imp-country');
+  if(s && cs && s.country){
+    cs.value = s.country;
+  }
+};
+
 /** 读取文件为 base64，分块拼避免一次申请超大字符串。 */
 async function fileToB64(f){
   const buf = new Uint8Array(await f.arrayBuffer());
@@ -963,8 +1042,10 @@ async function importFiles(files){
         }),
       });
       const j = await r.json();
+      const warn = j.warning ? ` <span style="color:#B45309">⚠ ${esc(j.warning)}</span>` : '';
       lines.push(j.ok
         ? `${esc(j.name)} → <b>${esc(j.label)}</b>`
+          + `<span class="muted">（按${esc(j.country || '默认')}的列标题识别）</span>${warn}`
         : `${esc(f.name)} → <span style="color:#C0392B">失败：${esc(j.error || '')}</span>`);
     }catch(err){
       lines.push(`${esc(f.name)} → <span style="color:#C0392B">失败：${esc(err.message || String(err))}</span>`);
@@ -986,40 +1067,80 @@ if($('#imp-store')) $('#imp-store').onchange = () => {
   if(s && s.country) $('#imp-country').value = s.country;
 };
 
-/** 列出这家店已有的取数快照，供「用哪次数据」下拉使用。 */
+/** 列出这家店已有的取数快照，供「用哪次数据」多选使用。
+ *  可勾选多份一起算——跨快照重复的订单只算一次（重叠以最新为准）。 */
+let snapStore = '';
 async function loadSnapshots(){
   try{
     const store = $('#store') ? $('#store').value : '';
     const j = await (await fetch('/api/snapshots?store=' + encodeURIComponent(store))).json();
-    const sel = $('#snap');
-    if(!sel) return;
-    const keep = sel.value;
+    const box = $('#snap-list');
+    if(!box) return;
     const items = j.items || [];
-    sel.innerHTML = '<option value="">最新数据（当前 inbox）</option>' + items.map(it =>
-      `<option value="${esc(it.id)}">${esc(it.at)}｜${esc(it.range)}｜${it.file_count} 个文件</option>`
-    ).join('');
-    // 换店铺后原来的选择对不上了，就退回「最新数据」
-    if(keep && items.some(it => it.id === keep)) sel.value = keep;
-    else sel.value = '';
+    // 换店铺就换一批快照，之前的勾选不再保留（保留也是对不上号的 id）
+    const prev = (store === snapStore) ? selectedSnaps() : [];
+    snapStore = store;
+    if(!items.length){
+      box.innerHTML = '<div class="empty">还没有快照，取一次数就会自动存一份</div>';
+      const hint = $('#run-files-hint');
+      if(hint) hint.textContent = '取一次数就会自动存一份快照';
+      return;
+    }
+    box.innerHTML = items.map(it => {
+      const kinds = it.kinds || {};
+      const bits = [];
+      if(kinds.orders) bits.push('订单 ' + kinds.orders + ' 行');
+      if(kinds.ads) bits.push('广告 ' + kinds.ads + ' 行');
+      if(kinds.affiliate) bits.push('联盟 ' + kinds.affiliate + ' 行');
+      if(!bits.length) bits.push(it.file_count + ' 个文件');
+      const on = prev.length ? prev.includes(it.id) : it.id === items[0].id;
+      return `<label class="snap-item"><input type="checkbox" value="${esc(it.id)}" ${on?'checked':''}>
+        <span><b>${esc(it.range)}</b><em>${esc(it.at)} · ${esc(bits.join(' / '))}</em></span></label>`;
+    }).join('');
     const hint = $('#run-files-hint');
-    if(hint && !items.length) hint.textContent = '还没有快照，取一次数就会自动存一份';
+    if(hint) hint.textContent = items.length + ' 份快照，勾选多份可合并计算';
   }catch(e){}
 }
+
+/** 当前勾选的快照 id 列表 */
+function selectedSnaps(){
+  const box = $('#snap-list');
+  if(!box) return [];
+  return Array.from(box.querySelectorAll('input[type=checkbox]:checked')).map(x => x.value);
+}
+
+/** 快照快捷选择：仅最新 / 全部 / 近 3 次 / 不指定 */
+function pickSnaps(mode){
+  const box = $('#snap-list');
+  if(!box) return;
+  const boxes = Array.from(box.querySelectorAll('input[type=checkbox]'));
+  boxes.forEach((b, i) => {
+    if(mode === 'latest') b.checked = (i === 0);
+    else if(mode === 'all') b.checked = true;
+    else if(mode === 'last3') b.checked = (i < 3);
+    else b.checked = false;
+  });
+}
+
+document.querySelectorAll('#snap-chips button').forEach(b => {
+  b.onclick = () => pickSnaps(b.dataset.sel);
+});
 
 $('#btn-run').onclick = async () => {
   const btn = $('#btn-run'), n = $('#run-note');
   const store = $('#store').value;
-  const snap = $('#snap') ? $('#snap').value : '';
+  const snaps = selectedSnaps();
   const ids = store ? [store] : storesCache.map(s => s.id).filter(Boolean);
   if(!ids.length){ note(n, '没有可核算的店铺，先去「店铺」页看看识别到没有', 'err'); return; }
   btn.disabled = true;
   const results = [];
   for(let i = 0; i < ids.length; i++){
-    note(n, snap ? '按选定快照核算（' + (i+1) + '/' + ids.length + '）…' : '核算中（' + (i+1) + '/' + ids.length + '）…', 'ok');
+    const how = snaps.length > 1 ? ('合并 ' + snaps.length + ' 份快照核算') : (snaps.length ? '按选定快照核算' : '按实时数据核算');
+    note(n, how + '（' + (i+1) + '/' + ids.length + '）…', 'ok');
     try{
       const r = await fetch('/run', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({store: ids[i], from: $('#dfrom').value || null, to: $('#dto').value || null,
-                             snapshot: snap || null,
+                             snapshots: snaps.length ? snaps : null,
                              with_formula: !!( $('#with-formula') && $('#with-formula').checked )})})
       results.push(await r.json());
     }catch(e){ results.push({ok:false, error:e.message, store: ids[i]}); }

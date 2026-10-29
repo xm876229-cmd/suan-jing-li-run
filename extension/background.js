@@ -481,6 +481,10 @@ function skSet(obj) {
 // 不猜、不解析 DOM，直接问接口。
 let CURRENT_SHOP = { shop_id: "", shop_name: "", shop_code: "", region: "" };
 
+// 当前这一轮取数的区间。上传文件时带给桥，桥拿它给快照打标签，
+// 这样界面上「用哪次数据」列表能显示每份快照对应哪个区间。
+let CURRENT_RANGE = null;
+
 async function identifyShop(host, log) {
   if (CURRENT_SHOP.shop_id) return CURRENT_SHOP;
   try {
@@ -545,10 +549,17 @@ async function uploadToBridge(name, arrayBuffer, dir) {
       // 其余文件按 shop_id 落到这家店自己的目录
       shop_id: CURRENT_SHOP.shop_id || "",
       shop_name: CURRENT_SHOP.shop_name || "",
+      // 本次取数的区间：服务端拿它给快照打标签，
+      // 界面上「用哪次数据」列表就能显示每份快照是哪个区间的
+      range: CURRENT_RANGE || null,
     }),
   });
   const j = await resp.json();
   if (!j.ok) throw new Error(j.error || "上传失败");
+  if (j.warning) {
+    // 认不出店铺之类的提醒：不能让文件悄悄躺在那儿，用户还以为已经入库了
+    appendTaskLog(`[上传] ${j.warning}`);
+  }
   return j;
 }
 
@@ -1786,6 +1797,79 @@ try {
 }
 
 
+// ---------------- 手动导数据（自动取数挂掉时的兜底） ----------------
+//
+// 场景：平台接口改了、登录态掉了、弹风控——自动那条路断了，
+// 但人在后台页面上照样能把表导出来。这个模块负责：
+//   1. 打开对应的店铺页面（用你现有的登录态）
+//   2. 「陪同导出」模式下盯着浏览器下载，文件一下载就抓回来入库
+//
+// 抓下载的思路：监听 chrome.downloads.onChanged，下载完成时拿到
+// download.url，再从后台 fetch 回来（后台里的 fetch 带 cookie，
+// 平台的 CDN 文件就是这么下的）。
+
+const MANUAL_PAGES = {
+  orders: { url: "https://seller-my.tiktok.com/", label: "卖家后台（订单管理）" },
+  sku: { url: "https://seller-my.tiktok.com/", label: "卖家后台（商品管理）" },
+  affiliate: { url: "https://affiliate.tiktok.com/affiliate/platform/homepage", label: "达人联盟后台" },
+  ads: { url: "https://seller-my.tiktok.com/", label: "卖家后台（广告）" },
+};
+
+const MANUAL_CAPTURE = { active: false, until: 0, seen: new Set() };
+
+/** 打开店铺后台页面；capture=true 时顺便开始盯着下载。 */
+async function openBackoffice(kind, capture, log) {
+  const page = MANUAL_PAGES[kind] || MANUAL_PAGES.orders;
+  if (capture) {
+    MANUAL_CAPTURE.active = true;
+    MANUAL_CAPTURE.until = Date.now() + 15 * 60 * 1000;
+    MANUAL_CAPTURE.seen = new Set();
+    log("开始盯着下载（15 分钟内有效）");
+  }
+  await chrome.tabs.create({ url: page.url, active: true });
+  return { url: page.url, label: page.label, capture: !!capture };
+}
+
+/** 下载完成 → 抓回来入库。 */
+async function onDownloadComplete(delta) {
+  if (!MANUAL_CAPTURE.active || Date.now() > MANUAL_CAPTURE.until) return;
+  if (!delta || !delta.state || delta.state.current !== "complete") return;
+  if (MANUAL_CAPTURE.seen.has(delta.id)) return;
+  MANUAL_CAPTURE.seen.add(delta.id);
+
+  const log = (m) => appendTaskLog(`[manual] ${m}`);
+  let item = null;
+  try {
+    const list = await chrome.downloads.search({ id: delta.id });
+    item = (list && list[0]) || null;
+  } catch (e) { /* 查不到就放弃 */ }
+  if (!item || !item.url) return;
+
+  const fname = String(item.filename || "").split(/[\\/]/).pop() || "导出文件";
+  if (!/\.(csv|xlsx|xls|txt|json)$/i.test(fname)) {
+    log(`跳过「${fname}」：不是表格文件`);
+    return;
+  }
+  try {
+    const resp = await fetch(item.url, { credentials: "include" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const buf = await resp.arrayBuffer();
+    if (!buf || buf.byteLength < 64) throw new Error("文件太小，可能还没生成好");
+    const saved = await uploadToBridge(fname, buf);
+    log(`已接住「${fname}」→ ${saved.path}`);
+  } catch (e) {
+    log(`接不住「${fname}」（${e.message}）：请改用「只开页面」模式，`
+      + `导出后到桌面端「手动导入」上传`);
+  }
+}
+
+if (chrome.downloads && chrome.downloads.onChanged) {
+  chrome.downloads.onChanged.addListener((delta) => {
+    onDownloadComplete(delta).catch(() => {});
+  });
+}
+
+
 // ---------------- 深度抓包（调试协议） ----------------
 // 有些请求既不走页面 fetch/XHR，也不在 webRequest 视野里（由签名 SDK 在 worker 里发）。
 // chrome.debugger 直接挂在标签页的网络层，能看到该页发出的全部请求。
@@ -1921,7 +2005,10 @@ async function calcNow(range, log, opts = {}) {
     resp = await fetch(`${BRIDGE}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ country, from, to, store }),
+      body: JSON.stringify({ country, from, to, store,
+        // 带上 shop_id：数据按店铺分目录存放，核算时才知道该读哪一家。
+        // 只传 store（配置里的别名）有时候对不上真实目录。
+        shop_id: CURRENT_SHOP.shop_id || "" }),
     });
   } catch (e) {
     throw new Error(`连不上本地桥（${e.message}），请确认 scripts\\start_bridge.bat 在跑`);
@@ -1942,6 +2029,7 @@ async function calcNow(range, log, opts = {}) {
 async function executeTask(task, range, log, opts = {}) {
   try {
     startKeepAlive();
+    CURRENT_RANGE = range || null;
     await skSet({ running: { task, at: Date.now() } });
     log(`开始（${range?.startDate} ~ ${range?.to || range?.endDateExclusive}）`);
     const withCalc = opts.withCalc !== false && task !== "ads";
@@ -2145,6 +2233,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         appendTaskLog(`[ads-cap] 失败：${e.message}`);
         sendResponse({ ok: false, error: String(e.message || e) });
       });
+    return true;
+  }
+
+  if (msg.type === "manualExport") {
+    // 手动导数据：打开店铺页面（可选盯着浏览器下载自动接住）
+    const kind = String(msg.kind || "orders");
+    const capture = !!msg.capture;
+    const log = (m) => appendTaskLog(`[manual:${kind}] ${m}`);
+    openBackoffice(kind, capture, log)
+      .then((r) => sendResponse({ ok: true, result: r }))
+      .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
     return true;
   }
 

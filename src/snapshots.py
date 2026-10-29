@@ -80,6 +80,51 @@ def signature(files: list[Path]) -> str:
     return hashlib.sha1(sig.encode("utf-8")).hexdigest()[:12]
 
 
+def _quick_stats(f: Path) -> dict:
+    """轻量统计一个文件：行数与类型。
+
+    行数用 csv.reader 数「真正的记录条数」——直接数物理行会把
+    字段里带换行的记录算成两行，界面上显示的行数就会虚高。
+    """
+    out: dict = {"bytes": 0, "rows": 0}
+    try:
+        out["bytes"] = f.stat().st_size
+    except OSError:
+        return out
+    suffix = f.suffix.lower()
+    try:
+        if suffix in (".csv", ".txt"):
+            import csv as _csv
+            n = 0
+            with f.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+                for _ in _csv.reader(fh):
+                    n += 1
+            out["rows"] = max(0, n - 1)      # 去掉表头
+        elif suffix in (".xlsx", ".xls"):
+            import openpyxl
+            wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
+            ws = wb[wb.sheetnames[0]]
+            out["rows"] = max(0, (ws.max_row or 1) - 1)
+            wb.close()
+    except Exception:
+        pass
+    return out
+
+
+def _kind_of_file(name: str) -> str:
+    """按扩展名猜个类型（只是给人看的分类，认表还是靠表头）。"""
+    n = name.lower()
+    if "订单" in n or "order" in n:
+        return "orders"
+    if "ads" in n or "广告" in n:
+        return "ads"
+    if "affiliate" in n or "联盟" in n or "commission" in n:
+        return "affiliate"
+    if "sku" in n or "mapping" in n or "链接" in n:
+        return "mapping"
+    return "other"
+
+
 def _manifest_path(snap_dir: Path) -> Path:
     return snap_dir / "manifest.json"
 
@@ -129,10 +174,18 @@ def create(shop_id: str, files: list[Path], dfrom: str = "", dto: str = "",
         try:
             shutil.copy2(f, dst)
             st = f.stat()
+            info = _quick_stats(f)
             kept.append({"name": f.name, "bytes": st.st_size,
+                         "rows": info.get("rows", 0),
+                         "kind": _kind_of_file(f.name),
                          "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")})
         except OSError:
             continue
+
+    # 各类文件的行数汇总，界面上要显示「订单 1896 行」这类信息
+    kinds: dict[str, int] = {}
+    for k in kept:
+        kinds[k["kind"]] = kinds.get(k["kind"], 0) + int(k.get("rows") or 0)
 
     manifest = {
         "id": snap_id,
@@ -142,6 +195,7 @@ def create(shop_id: str, files: list[Path], dfrom: str = "", dto: str = "",
         "store_name": store_name or "",
         "range": {"from": dfrom or "", "to": dto or ""},
         "files": kept,
+        "kinds": kinds,
         "signature": sig,
         "note": note or "",
     }
@@ -223,22 +277,35 @@ def _enforce_limit(shop_id: str) -> None:
 
 
 def pick_files(shop_id: str) -> list[Path]:
-    """这家店当前所有「核算会用得上」的文件：inbox 里的 + 映射表。
+    """这家店当前所有「核算会用得上」的文件：inbox 里的（递归）。
 
-    用来算签名、建快照。只读，不动任何东西。
+    只取**这家店自己**的文件。映射表（data/mapping/）是全局累积主表，
+    不进快照：一是它跟店铺无关，每份快照都存一份纯属浪费；
+    二是核算时本来就会把它和快照里的映射合并，重复存没有意义。
+
+    只读，不动任何东西。
     """
     out: list[Path] = []
     d = paths.store_dir(shop_id)
     if d.is_dir():
-        out += [f for f in d.iterdir()
+        out += [f for f in d.rglob("*")
                 if f.is_file() and f.suffix.lower() in KEEP_SUFFIX
-                and not f.name.startswith("~$")]
-    m = paths.MAPPING
-    if m.is_dir():
-        out += [f for f in m.iterdir()
-                if f.is_file() and f.suffix.lower() in KEEP_SUFFIX
-                and not f.name.startswith("~$")]
+                and not f.name.startswith("~$") and not f.name.startswith(".")]
     return sorted(out, key=lambda f: f.name.lower())
+
+
+def manifest(shop_id: str, snap_id: str) -> dict | None:
+    """读某份快照的清单（区间、时间、各文件行数）。"""
+    sid = (snap_id or "").strip()
+    if not sid:
+        return None
+    mf = _manifest_path(root(shop_id) / sid)
+    if not mf.exists():
+        return None
+    try:
+        return json.loads(mf.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def describe(shop_id: str, snap_id: str) -> str:
