@@ -1201,7 +1201,20 @@ class Handler(BaseHTTPRequestHandler):
             results = payload.get("results") or []
             rng = payload.get("range") or {}
             store = str(payload.get("store") or "")
-            r = fetcher.process_results(task, results, rng, store)
+
+            # 产出落到哪很关键：广告/佣金必须进「这家店的 inbox/ads」，
+            # 核算才读得到。以前一律写进 data/exports/_inbox，
+            # 结果文件生成了、报表里广告花费却一直是 0。
+            out_dir = None
+            if task in ("ads", "affiliate"):
+                if store:
+                    out_dir = paths.store_kind_dir(store, task)
+            elif task in ("sku", "link"):
+                out_dir = paths.MAPPING_DIR
+            if out_dir is not None:
+                out_dir.mkdir(parents=True, exist_ok=True)
+
+            r = fetcher.process_results(task, results, rng, store, out_dir=out_dir)
             _json(self, {"ok": r["ok"], "files": r.get("files") or [],
                          "issues": r.get("issues") or []})
         except Exception as e:  # noqa: BLE001

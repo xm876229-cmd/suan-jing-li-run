@@ -87,7 +87,7 @@
             ]
           },
           "take": "data.table_v2",
-          "layout": "columnar",
+          "layout": "cells",
           "fields": {
             "product_id": [
               "product_id",
@@ -131,6 +131,9 @@
               "currency",
               "name"
             ]
+          },
+          "set": {
+            "currency": "LOCAL"
           }
         }
       ]

@@ -785,7 +785,9 @@ def parse_ads(rows: list[tuple], usd_to_local: float = 1.0,
         currencies[cur or "未标注"] += 1
         if cur in ("", "USD", "US$", "$"):
             out[pid] += cost * usd_to_local
-        elif cur in ("MYR", "RM"):
+        elif cur in ("MYR", "RM", "LOCAL"):
+            # LOCAL 是程序自己补的标记：接口不返回币种时，说明给的已经是本地货币，
+            # 不能再乘一次美金汇率（会凭空翻 4 倍）。
             out[pid] += cost          # 已是本地货币
         else:
             unknown += cost

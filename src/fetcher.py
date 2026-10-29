@@ -198,10 +198,26 @@ def normalize_rows(raw: Any, layout: str = "objects") -> list[dict]:
     """把响应里的行统一成「每行一个 dict」。
 
     columnar：[[列名…], [行…], …] —— 第一行是列名
-    objects  ：[{列名: 值}, …]
+    objects ：[{列名: 值}, …]
+    cells   ：[[{data, name}, …], …] —— 每个格子自带字段名，而且**每行列顺序随机**，
+              只能按 name 认，不能按位置认。广告接口 post_product_list_v2 就是这种。
     """
     if not isinstance(raw, list) or not raw:
         return []
+
+    if layout == "cells":
+        out = []
+        for r in raw:
+            if not isinstance(r, (list, tuple)):
+                continue
+            row: dict[str, Any] = {}
+            for cell in r:
+                if isinstance(cell, dict) and "name" in cell:
+                    row[str(cell["name"])] = cell.get("data")
+            if row:
+                out.append(row)
+        return out
+
     if layout == "columnar" or isinstance(raw[0], (list, tuple)):
         head = [str(h) for h in raw[0]]
         out = []
@@ -384,6 +400,9 @@ def process_results(task: str, results: list[dict], range_: dict | None = None,
         resp = hit.get("response")
         raw = take_path(resp, step.get("take") or "")
         if raw is None:
+            # 取不到路径时也留样本——多半是平台把结构改了，
+            # 没样本只能靠猜，有样本一眼就能看出该取哪。
+            _dump_resp(task, idx, resp)
             issues.append(
                 f"步骤「{step.get('name') or path}」响应里找不到 {step.get('take')}"
                 f"（顶层键：{list(resp.keys()) if isinstance(resp, dict) else type(resp).__name__}）"
@@ -396,6 +415,14 @@ def process_results(task: str, results: list[dict], range_: dict | None = None,
             issues.append(f"步骤「{step.get('name') or path}」取到 0 行")
             continue
         objs = map_fields(rows, step.get("fields") or {})
+        # 规格里可以补固定列：广告接口不返回币种，但它给的就是本地货币，
+        # 不补这一列的话下游会按「空=美元」再乘一次汇率，金额直接翻几倍。
+        const_cols = step.get("set") or {}
+        if const_cols:
+            for o in objs:
+                for k, v in const_cols.items():
+                    if not o.get(k):
+                        o[k] = v
         agg = aggregate(objs, step.get("group_by"), step.get("sum"))
         # 广告/佣金这两步的接口经常改，解析结果可疑时留一份原始响应，
         # 下次排查不用再让用户重跑一遍（覆盖写，不会越积越多）。
