@@ -2739,11 +2739,25 @@ $('#btn-cost-next').onclick = () => {
 // 「下载导入模板」：浏览器里正常下载；窗口（WebView2）里不弹下载框，
 // 改成直接存到报表目录，并告诉用户文件在哪。
 $('#btn-cost-tpl').onclick = async (e) => {
-  if(!window.pywebview) return;          // 浏览器：走 <a download>
+  const api = (window.pywebview && window.pywebview.api) || null;
+  // 窗口里：弹系统「另存为」对话框，选哪存哪——比手填路径省事
+  if(api && api.save_template){
+    e.preventDefault();
+    const dir = ($('#cost-tpl-dir') ? $('#cost-tpl-dir').value.trim() : '');
+    try{
+      const p = await api.save_template(dir);
+      if(p){
+        if($('#cost-tpl-dir')) $('#cost-tpl-dir').value = String(p).replace(/[\\/][^\\/]*$/, '');
+        toast('模板已保存到：' + p);
+      }
+    }catch(err){ toast('保存失败：' + err.message); }
+    return;
+  }
+  // 兜底（老窗口 / 浏览器）：浏览器走 <a download>；窗口里交给后端存盘
+  if(!window.pywebview) return;
   e.preventDefault();
   const dir = ($('#cost-tpl-dir') ? $('#cost-tpl-dir').value.trim() : '');
   try{
-    // 记住这次填的目录，下次不用再填
     await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({report:{template_dir: dir}})});
     const url = '/api/costs/template/save' + (dir ? ('?dir=' + encodeURIComponent(dir)) : '');

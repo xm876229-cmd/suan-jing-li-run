@@ -61,6 +61,45 @@ def _fatal(message: str) -> int:
     return 1
 
 
+class NativeApi:
+    """窗口内 JS 可调的原生能力（目前只有「另存为模板」）。
+
+    为什么要它：WebView2 不处理网页里的下载链接，所以「下载导入模板」在窗口里点了
+    没反应。这里直接弹系统「另存为」对话框，选完就把模板写到那个位置。
+    """
+
+    def save_template(self, default_dir: str = "") -> str:
+        try:
+            import webview
+            from pathlib import Path
+
+            w = webview.windows[0] if webview.windows else None
+            if w is None:
+                return ""
+            fd = getattr(webview, "FileDialog", None)
+            kind = getattr(fd, "SAVE", None) if fd is not None else None
+            if kind is None:
+                kind = getattr(webview, "SAVE_DIALOG", 30)
+
+            kw: dict = {"save_filename": "成本表导入模板.xlsx"}
+            if default_dir:
+                kw["directory"] = default_dir
+            try:
+                res = w.create_file_dialog(kind, file_types=("Excel 文件 (*.xlsx)",), **kw)
+            except TypeError:
+                res = w.create_file_dialog(kind, **kw)
+            if not res:
+                return ""
+            path = res if isinstance(res, str) else (res[0] if res else "")
+            if not path:
+                return ""
+            from bridge import costs_api
+            Path(path).write_bytes(costs_api.make_template())
+            return str(path)
+        except Exception:  # noqa: BLE001
+            return ""
+
+
 def main() -> int:
     if getattr(sys, "frozen", False):
         import multiprocessing
@@ -89,6 +128,7 @@ def main() -> int:
         min_size=(MIN_W, MIN_H),
         text_select=True,
         confirm_close=False,
+        js_api=NativeApi(),
     )
     # 关窗口就退出界面进程；桥是独立子进程，会继续在后台跑
     webview.start()
