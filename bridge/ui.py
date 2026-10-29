@@ -871,6 +871,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <button class="mini" id="btn-cost-add">＋ 新增编码</button>
           <button class="primary" id="btn-cost-save">保存成本表</button>
         </div>
+        <div class="row" style="gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+          <span style="font-size:12.5px;color:var(--text-2)">模板导出到</span>
+          <input type="text" id="cost-tpl-dir" placeholder="留空 = 程序「报表」目录；也可填 D:\净利模板"
+                 style="width:320px;font-size:12.5px;padding:6px 9px">
+          <span class="muted" style="font-size:12px">点「下载导入模板」时就存到这里（自动记住）</span>
+        </div>
         <div class="note" id="cost-note"></div>
         <div id="cost-check"></div>
         <p class="muted" style="font-size:12.5px;margin:14px 0 0">
@@ -2680,10 +2686,15 @@ $('#btn-cost-next').onclick = () => {
 $('#btn-cost-tpl').onclick = async (e) => {
   if(!window.pywebview) return;          // 浏览器：走 <a download>
   e.preventDefault();
+  const dir = ($('#cost-tpl-dir') ? $('#cost-tpl-dir').value.trim() : '');
   try{
-    const r = await fetch('/api/costs/template/save');
+    // 记住这次填的目录，下次不用再填
+    await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({report:{template_dir: dir}})});
+    const url = '/api/costs/template/save' + (dir ? ('?dir=' + encodeURIComponent(dir)) : '');
+    const r = await fetch(url);
     const j = await r.json();
-    toast(j.ok ? ('模板已保存到报表目录：' + j.path) : ('保存失败：' + (j.error || '')));
+    toast(j.ok ? ('模板已保存到：' + j.path) : ('保存失败：' + (j.error || '')));
   }catch(err){ toast('保存失败：' + err.message); }
 };
 
@@ -2975,6 +2986,7 @@ async function loadSettings(){
     $('#set-template').value = s.name_template || '{店铺}_{区间}';
     $('#set-dir').value = s.download_dir || '';
     if($('#set-tpl-dir')) $('#set-tpl-dir').value = s.template_dir || '';
+    if($('#cost-tpl-dir')) $('#cost-tpl-dir').value = s.template_dir || '';
     $('#set-fx').value = (all.fx || {}).mode || 'auto';
     if($('#set-formula')) $('#set-formula').checked = !!s.with_formula;
 
