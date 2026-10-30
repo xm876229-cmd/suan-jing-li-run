@@ -1659,14 +1659,30 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
   const tz = tzOffset ?? -new Date().getTimezoneOffset() * 60;
 
   log("取联盟商品维度明细…");
-  const rows = await pagePullAffiliateProducts(host, startSec, endSec, tz, log);
+  let rows = [];
+  try {
+    rows = await pagePullAffiliateProducts(host, startSec, endSec, tz, log);
+  } catch (e) {
+    log(`   接口取数失败：${(e && e.message) || e}`);
+  }
 
-  const csv = affiliateRowsToCsv(rows);
-  const bytes = new TextEncoder().encode(csv);
-  const name = `Transaction_Analysis_Product_List_${startDate}_${endDateExclusive}.csv`;
-  const saved = await uploadToBridge(name, bytes.buffer);
-  log(`已保存：${saved.path}（${rows.length} 个商品）`);
-  return { saved: saved.path, products: rows.length };
+  if (rows.length) {
+    const csv = affiliateRowsToCsv(rows);
+    const bytes = new TextEncoder().encode(csv);
+    const name = `Transaction_Analysis_Product_List_${startDate}_${endDateExclusive}.csv`;
+    const saved = await uploadToBridge(name, bytes.buffer);
+    log(`已保存：${saved.path}（${rows.length} 个商品）`);
+    return { saved: saved.path, products: rows.length };
+  }
+
+  // 接口不行就自己去页面点导出——这是用户要的方式：不靠人操作
+  log("   改用「页面导出」取联盟佣金表…");
+  const got = await exportByButton("affiliate", host, log);
+  if (!got || got.error) {
+    throw new Error((got && got.error) || "联盟导出失败");
+  }
+  log(`   已接住导出表：${got.path}`);
+  return { saved: got.path, products: 0, byExport: true };
 }
 
 // ---------------- 任务：广告（只拉已完成的任务） ----------------
@@ -2495,92 +2511,166 @@ function extractSkuList(respObj) {
  * 做法：后台开一个商品分析页 → 切「按 SKU」→ 点「导出数据」
  *      → 有确认弹窗就点掉 → 等浏览器下载完成 → 扩展接住文件回传。
  */
-async function exportSkuByButton(host, preferPath, log) {
-  const kw = preferPath ? preferPath.split("?")[0] : "compass/product-analysis";
+/** 四张表的「导出」配置：页面路径 + 要点的按钮文案。
+ *
+ * 依据是抓包实测（每个导出在哪个页面、点哪个按钮）：
+ *   · 订单      seller-my/order                      「导出」
+ *   · 广告      seller-my/ads-creation/dashboard      「导出数据」
+ *   · 联盟佣金  affiliate/insights/transaction-analysis 「导出」
+ *   · 商品SKU   seller-my/compass/product-analysis     「按 SKU」→「导出数据」
+ *
+ * 按钮文案可能随语言/版本变，所以找不到按钮时会把页面上所有含「导出」的
+ * 按钮文案打进日志，下次照着改就行，不用猜。
+ */
+const EXPORT_FLOWS = {
+  orders: {
+    label: "订单表",
+    // 订单后台的导出分两步：先点「导出」，弹窗里再点一次「导出」
+    page: "order",
+    steps: [["导出"], ["导出", "确定", "确认"]],
+  },
+  ads: {
+    label: "广告表",
+    page: "ads-creation/dashboard",
+    steps: [["导出数据", "导出"], ["导出", "确定", "确认"]],
+  },
+  affiliate: {
+    label: "联盟佣金表",
+    host: "affiliate.tiktok.com",
+    page: "insights/transaction-analysis",
+    steps: [["导出数据", "导出"], ["导出", "确定", "确认", "下载"]],
+  },
+  sku: {
+    label: "商品SKU表",
+    page: "compass/product-analysis",
+    steps: [["按SKU", "按 SKU"], ["导出数据", "导出"], ["导出", "确定", "确认"]],
+  },
+};
+
+/** 在页面里按文案点按钮（取最内层、可见的那个）。 */
+async function clickByTextIn(tabId, want) {
+  try {
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId }, world: "MAIN",
+      func: (texts) => {
+        const norm = (x) => (x || "").replace(/\s+/g, "").trim();
+        const cands = Array.from(
+          document.querySelectorAll("button,span,div,a,li,label,td,[role=button]"));
+        const hit = cands.find((e) => {
+          const t = norm(e.textContent);
+          if (!texts.includes(t)) return false;
+          if (e.offsetParent === null) return false;
+          const kids = e.querySelectorAll("button,span,a,li,label,td");
+          return ![...kids].some((k) => texts.includes(norm(k.textContent)));
+        });
+        if (!hit) return false;
+        hit.click();
+        return true;
+      },
+      args: [want],
+    });
+    return !!(r && r.result);
+  } catch (e) {
+    return false;
+  }
+}
+
+/** 扫页面上所有含「导出」的按钮文案——按钮找不到时用来诊断。 */
+async function scanExportButtons(tabId) {
+  try {
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const out = [];
+        const seen = new Set();
+        for (const el of document.querySelectorAll("button,[role=button],a,span,div")) {
+          const t = (el.innerText || "").trim().replace(/\s+/g, " ");
+          if (!t || t.length > 16 || seen.has(t)) continue;
+          if (!/导出|Export|Eksport|Xuất|ส่งออก/i.test(t)) continue;
+          const b = el.getBoundingClientRect();
+          if (b.width < 10 || b.height < 8) continue;
+          seen.add(t);
+          out.push(t);
+        }
+        return out.slice(0, 12);
+      },
+    });
+    return (r && r.result) || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/** 通用导出：开页 → 按配置逐步点按钮 → 等下载 → 接住文件。
+ *
+ * 返回 { ok, name, path, bytes } 或 { error }。
+ */
+async function exportByButton(kind, host, log) {
+  const cfg = EXPORT_FLOWS[kind];
+  if (!cfg) return { error: `没有配置「${kind}」的导出流程` };
+  const realHost = cfg.host || host;
   let tabId = 0;
   try {
-    const nt = await chrome.tabs.create({
-      url: `https://${host}/${kw}`, active: false,
-    });
+    const url = `https://${realHost}/${cfg.page}`;
+    const nt = await chrome.tabs.create({ url, active: false });
     tabId = nt.id;
-    if (log) log("   已后台新开商品分析页，准备点「导出数据」…");
-    // 等加载完
-    for (let i = 0; i < 25; i++) {
+    if (log) log(`   开「${cfg.label}」页面准备导出…`);
+
+    for (let i = 0; i < 30; i++) {
       await sleep(1000);
       try {
         const t = await chrome.tabs.get(tabId);
         if (!t || t.status === "complete") break;
       } catch (e) { break; }
     }
-    await sleep(2500);   // 表格渲染 + 首屏数据
+    await sleep(3000);   // 等表格首屏渲染
 
-    // ① 切「按 SKU」
-    const clickByText = async (texts) => {
-      try {
-        const [r] = await chrome.scripting.executeScript({
-          target: { tabId }, world: "MAIN",
-          func: (want) => {
-            const norm = (x) => (x || "").replace(/\s+/g, "").trim();
-            const cands = Array.from(
-              document.querySelectorAll("button,span,div,a,li,label,td,[role=button]"));
-            const hit = cands.find((e) => {
-              const t = norm(e.textContent);
-              if (!want.includes(t)) return false;
-              if (e.offsetParent === null) return false;
-              const kids = e.querySelectorAll("button,span,a,li,label,td");
-              // 取最内层，别点到外层容器
-              return ![...kids].some((k) => want.includes(norm(k.textContent)));
-            });
-            if (!hit) return false;
-            hit.click();
-            return true;
-          },
-          args: [texts],
-        });
-        return !!(r && r.result);
-      } catch (e) { return false; }
-    };
-
-    const skuTab = await clickByText(["按SKU", "按 SKU"]);
-    if (log) log(`   切「按 SKU」：${skuTab}`);
-    await sleep(3500);
-
-    // ② 点「导出数据」
-    const exp = await clickByText(["导出数据", "导出"]);
-    if (log) log(`   点「导出数据」：${exp}`);
-    if (!exp) return { error: "页面上没找到「导出数据」按钮" };
-
-    // ③ 可能弹确认框：点掉它
-    await sleep(2500);
-    for (const t of (["导出", "确定", "确认", "下载", "OK"])) {
-      if (await clickByText([t])) { if (log) log(`   点了弹窗里的「${t}」`); break; }
+    for (let si = 0; si < cfg.steps.length; si++) {
+      const texts = cfg.steps[si];
+      let clicked = false;
+      // 第一步必须点到（切维度/主按钮）；后续（弹窗确认）点不到就跳过
+      for (let attempt = 0; attempt < 3; attempt++) {
+        clicked = await clickByTextIn(tabId, texts);
+        if (clicked) break;
+        await sleep(1500);
+      }
+      if (log) log(`   第 ${si + 1} 步点「${texts[0]}」：${clicked}`);
+      if (!clicked) {
+        if (si === 0) {
+          const names = await scanExportButtons(tabId);
+          return {
+            error: names.length
+              ? `没找到「${texts[0]}」，页面上含「导出」的按钮有：${names.join(" / ")}`
+              : "页面上没找到「导出」类按钮",
+          };
+        }
+      }
+      await sleep(2500);
     }
 
-    // ④ 等下载完成（平台生成文件要一两分钟，期间每 20 秒报一次进度）
-    const LIMIT = 110000;
+    // 等下载（平台生成文件要一两分钟，每 20 秒报进度）
+    const LIMIT = 120000;
     const got = await new Promise((resolve) => {
       let left = Math.round(LIMIT / 1000);
       const tick = setInterval(() => {
         left -= 20;
-        if (left > 0 && log) log(`   还在等导出文件…（剩 ${left} 秒）`);
+        if (left > 0 && log) log(`   还在等「${cfg.label}」导出文件…（剩 ${left} 秒）`);
       }, 20000);
       const timer = setTimeout(() => {
-        clearInterval(tick);
-        EXPORT_WAIT = null;
-        resolve(null);
+        clearInterval(tick); EXPORT_WAIT = null; resolve(null);
       }, LIMIT);
-      EXPORT_WAIT = (v) => {
-        clearInterval(tick);
-        clearTimeout(timer);
-        resolve(v);
-      };
+      EXPORT_WAIT = (v) => { clearInterval(tick); clearTimeout(timer); resolve(v); };
     });
-
-    if (!got) return { error: "没等到导出文件（可能平台还在生成，到「导出记录」里能看到）" };
-    return got;
+    if (!got) return { error: `没等到「${cfg.label}」的导出文件` };
+    return { ok: true, ...got };
   } finally {
     if (tabId) { try { await chrome.tabs.remove(tabId); } catch (e) { /* 忽略 */ } }
   }
+}
+
+/** 商品SKU表：走通用导出（保留原函数名，调用处不用改）。 */
+async function exportSkuByButton(host, preferPath, log) {
+  return exportByButton("sku", host, log);
 }
 
 async function deepCaptureSku(host, preferPath, log) {

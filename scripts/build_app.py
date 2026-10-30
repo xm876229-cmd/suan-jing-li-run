@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,40 @@ def _copy_missing_tree(src: Path, dst: Path) -> None:
         elif not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, target)
+
+
+def _stamp_ext_version(ext_dir: Path) -> None:
+    """把程序版本号写进扩展的 manifest。
+
+    原先 manifest 里的 version 是建项目时写死的 0.20.0，从此没动过——
+    结果用户在 chrome://extensions 里永远看到 0.20.0，
+    误以为「重新加载了还是旧版」。现在每次打包都写成真实版本。
+    """
+    mf = ext_dir / "manifest.json"
+    if not mf.is_file():
+        return
+    try:
+        data = json.loads(mf.read_text(encoding="utf-8"))
+        ver = _app_version()
+        if not ver:
+            return
+        data["version"] = ver
+        mf.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                      encoding="utf-8")
+        print(f"[OK] 扩展版本号写入 {ver}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[!] 扩展版本号写入失败：{e}")
+
+
+def _app_version() -> str:
+    """从 bridge/ui.py 里读当前版本（那是唯一的版本出处）。"""
+    try:
+        txt = (ROOT / "bridge" / "ui.py").read_text(encoding="utf-8")
+        import re as _re
+        m = _re.search(r"<span>版本</span><span>([0-9.]+)</span>", txt)
+        return m.group(1) if m else ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _retire_dir(path: Path) -> None:
@@ -194,6 +229,8 @@ def build_app() -> Path:
         elif name in CN_DIRS:
             # 顶层用中文名：浏览器扩展 / 文档（程序文件，随版本更新覆盖）
             shutil.copytree(src, out / CN_DIRS[name], dirs_exist_ok=True)
+            if name == "extension":
+                _stamp_ext_version(out / CN_DIRS[name])
         elif name in INNER_DIRS:
             # 代码副本收进 _internal/源码/，顶层清爽点
             shutil.copytree(src, out / "_internal" / "源码" / name, dirs_exist_ok=True)
