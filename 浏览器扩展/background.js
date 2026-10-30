@@ -902,10 +902,10 @@ async function pagePullSkuFromProductList(host, log) {
   return out.skus;
 }
 
-async function pagePullSkuByExport(host, start, endExclusive) {
+async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, waitMs = 1500) {
   const exportUrl = await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list/export");
 
-  const r = await runInPage(host, async (expUrl, s, e) => {
+  const r = await runInPage(host, async (expUrl, s, e, tries, gap) => {
     const body = {
       request: {
         time_descriptor: { start: s, end: e },
@@ -936,9 +936,11 @@ async function pagePullSkuByExport(host, start, endExclusive) {
 
     const fileUrl = file.startsWith("http") ? file : `${location.origin}${file}`;
 
-    // 文件是异步生成的，轮询到能取到二进制为止
-    for (let i = 0; i < 40; i++) {
-      await new Promise((r2) => setTimeout(r2, 2000));
+    // 文件是异步生成的，轮询到能取到二进制为止。
+    // 次数由调用方决定：商品管理接口已经失败时，这条路大概率也走不通，
+    // 就别在这儿干等两分钟（实测一次能白等 4 分钟）。
+    for (let i = 0; i < tries; i++) {
+      await new Promise((r2) => setTimeout(r2, gap));
       try {
         const fr = await fetch(fileUrl, { credentials: "include" });
         const ct = fr.headers.get("content-type") || "";
@@ -956,8 +958,8 @@ async function pagePullSkuByExport(host, start, endExclusive) {
         }
       } catch (err) { /* 还没生成好，继续等 */ }
     }
-    return { error: "等了两分多钟仍取不到导出文件" };
-  }, [exportUrl, start, endExclusive]);
+    return { error: `等了约 ${Math.round(tries * (gap + 3500) / 1000)} 秒仍取不到导出文件` };
+  }, [exportUrl, start, endExclusive, maxTries, waitMs]);
 
   if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
   if (r.error) throw new Error(r.error);
@@ -1051,9 +1053,18 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
 
   // ② 区间内 SKU：只补①里没有的 SKU（例如已删除、但区间内仍有订单的链接）。
   //    归属冲突时以①为准——①是 SKU ID 全量表，属于主来源。
+  //
+  //    等多久要看①的结果：①要是整个接口都不通（账号被风控、返回 validating），
+  //    ② 这条同源的路几乎不可能通，这时候还按 40 次轮询就是纯浪费——
+  //    实测一次白等了 249 秒，占了整轮时间的九成。
+  const listOk = done.length > 0;
   try {
     log("② 取区间内 SKU（归属按所选区间）…");
-    const saved = await pagePullSkuByExport(host, startDate, endDateExclusive);
+    const saved = await pagePullSkuByExport(
+      host, startDate, endDateExclusive,
+      listOk ? 40 : 6,
+      listOk ? 1500 : 1200,
+    );
     log(`   已保存：${saved.path}（${Math.round((saved.bytes || 0) / 1024)} KB）`);
     done.push("区间导出");
   } catch (e) {
