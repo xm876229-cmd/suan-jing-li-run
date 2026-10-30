@@ -212,52 +212,49 @@ function runTasks(task, btn) {
   // 用户看到的是「没有响应」——那不是任务失败，是回执方式错了。
   saveStore();
 
-  // 双通道：先把任务写进扩展存储（后台每分钟会来领），再发消息抢先执行。
-  // 消息这条偶尔会断——断的时候存储那条兜住，任务照样跑。
+  // 以前这里一次点击会做三件事：投桥队列、写扩展存储队列、再直接发消息启动。
+  // 直接启动先把任务跑完了，可队列里还留着两份 —— 后台每分钟来领一次，
+  // 于是同一份任务又跑两遍（实测一轮 41 秒，会被连跑三轮）。
+  // 现在只走「先直接启动，失败才入队兜底」这一条路。
   const force = task === "sku";
   const store = currentStore();
   const countryNow = ($("country").value || "").trim();
 
-  // 第三条通道：直接投到本地桥。它走普通 HTTP，不依赖扩展的消息机制，
-  // 后台每 1 分钟来取一次。
-  try {
-    fetch("http://127.0.0.1:8765/pending", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ task, range, force, store, country: countryNow, withCalc: true, at: Date.now() }),
-    }).catch(() => {});
-  } catch (e) { /* 桥没开就算了 */ }
+  const enqueue = (why) => {
+    // 兜底通道一：投到本地桥，后台每分钟来取一次（走普通 HTTP，不依赖消息机制）
+    try {
+      fetch("http://127.0.0.1:8765/pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task, range, force, store, country: countryNow,
+                               withCalc: true, at: Date.now() }),
+      }).catch(() => {});
+    } catch (e) { /* 桥没开就算了 */ }
 
-  // 队列入队：追加到队尾，不覆盖已有任务。
-  //
-  // 原来这里是个单槽位（pendingTask 只存一个任务），自动取数和手动取数
-  // 会互相顶掉——你在面板点一次手动取数，正好排队等着的自动任务就没了，
-  // 而且没有任何提示，只会事后发现「今天怎么没自动跑」。
-  // 改成数组后先来先跑，谁也不会挤掉谁；全自动开着也能随时插队手动取数。
+    // 兜底通道二：写进扩展存储，后台每分钟来领（桥没开时也能生效）
+    try {
+      chrome.storage.local.get({ pendingQueue: [] }, (s0) => {
+        const prev = Array.isArray(s0 && s0.pendingQueue) ? s0.pendingQueue : [];
+        const job = { task, range, force, store, country: countryNow, at: Date.now() };
+        chrome.storage.local.set({ pendingQueue: prev.concat([job]) });
+      });
+    } catch (e) { onContextLost(); }
+
+    if (btn) btn.disabled = false;
+    log(`⚠ ${why}，任务已入队，1 分钟内会自动开始`);
+  };
+
   try {
-    chrome.storage.local.get({ pendingQueue: [] }, (s0) => {
-      const prev = Array.isArray(s0 && s0.pendingQueue) ? s0.pendingQueue : [];
-      const job = { task, range, force, store, country: countryNow, at: Date.now() };
-      chrome.storage.local.set({ pendingQueue: prev.concat([job]) }, () => {
-        safeSend({ type: "ping" }, (pr) => {
-          if (!pr || !pr.ok) {
-            if (btn) btn.disabled = false;
-            log(`⚠ 后台没响应消息，但任务已入队（第 ${prev.length + 1} 位），1 分钟内会自动开始`);
-            return;
-          }
-          log(`后台在线 v${pr.version}，提交任务…`);
-          safeSend({ type: "runTask", task, range, force, store, country: countryNow }, (resp) => {
-            if (btn) btn.disabled = false;
-            let lasterr = null;
-            try { lasterr = chrome.runtime.lastError; } catch (e) { /* 上下文已失效 */ }
-            if (lasterr) {
-              log(`消息通道断了，任务已入队，1 分钟内自动开始（${lasterr.message}）`);
-              return;
-            }
-            if (resp && resp.started) log(`已启动：${label}，进度看下方日志`);
-            else log("已入队，1 分钟内自动开始");
-          });
-        });
+    safeSend({ type: "ping" }, (pr) => {
+      if (!pr || !pr.ok) { enqueue("后台没响应消息"); return; }
+      log(`后台在线 v${pr.version}，提交任务…`);
+      safeSend({ type: "runTask", task, range, force, store, country: countryNow }, (resp) => {
+        if (btn) btn.disabled = false;
+        let lasterr = null;
+        try { lasterr = chrome.runtime.lastError; } catch (e) { /* 上下文已失效 */ }
+        if (lasterr) { enqueue("消息通道断了"); return; }
+        if (resp && resp.started) log(`已启动：${label}，进度看下方日志`);
+        else enqueue("后台没有接手");
       });
     });
   } catch (e) {

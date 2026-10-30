@@ -902,7 +902,7 @@ async function pagePullSkuFromProductList(host, log) {
   return out.skus;
 }
 
-async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, waitMs = 1500) {
+async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, waitMs = 1500, log = () => {}) {
   const exportUrl = await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list/export");
 
   const r = await runInPage(host, async (expUrl, s, e, tries, gap) => {
@@ -916,6 +916,9 @@ async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, wai
         list_control: { rules: [{ direction: 2, field: "sku_gmv" }], pagination: { size: 10000, page: 0 } },
       },
     };
+    // 诊断信息：这条导出路径一直不明不白地失败，把平台的真实回应带回去，
+    // 否则只能靠猜（已验证：猜错过三次）。
+    const diag = { create: "", poll: "" };
 
     let j;
     try {
@@ -925,14 +928,19 @@ async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, wai
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      j = JSON.parse(await resp.text());
+      const text = await resp.text();
+      j = JSON.parse(text);
     } catch (err) {
       return { error: `创建导出失败：${(err && err.message) || err}` };
     }
-    if (!j || j.code !== 0) return { error: `创建导出 code=${j && j.code} ${(j && j.message) || ""}`.trim() };
+    if (!j || j.code !== 0) {
+      diag.create = `code=${j && j.code} msg=${String((j && j.message) || "")}`;
+      return { error: `创建导出 code=${j && j.code} ${(j && j.message) || ""}`.trim(), diag };
+    }
 
     const file = j.data && j.data.file;
-    if (!file) return { error: "创建成功但没返回文件路径" };
+    diag.create = `code=0 file=${String(file || "(无)").slice(0, 100)}`;
+    if (!file) return { error: "创建成功但没返回文件路径", diag };
 
     const fileUrl = file.startsWith("http") ? file : `${location.origin}${file}`;
 
@@ -944,6 +952,7 @@ async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, wai
       try {
         const fr = await fetch(fileUrl, { credentials: "include" });
         const ct = fr.headers.get("content-type") || "";
+        if (i === 0) diag.poll = `status=${fr.status} ct=${ct.slice(0, 40)}`;
         if (fr.ok && !ct.includes("json")) {
           const buf = await fr.arrayBuffer();
           if (buf.byteLength > 512) {
@@ -953,15 +962,23 @@ async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, wai
             for (let k = 0; k < bytes.length; k += CH) {
               bin += String.fromCharCode.apply(null, bytes.subarray(k, k + CH));
             }
-            return { b64: btoa(bin), bytes: buf.byteLength };
+            return { b64: btoa(bin), bytes: buf.byteLength, diag };
           }
+          if (i === 0) diag.poll += ` bytes=${buf.byteLength}(太小)`;
+        } else if (i === 0 && fr.ok) {
+          // 返回了 JSON：多半是「任务还没好」的状态，把前 160 字带回去看看
+          try { diag.poll += ` body=${(await fr.text()).slice(0, 160)}`; } catch (e2) { /* 忽略 */ }
         }
       } catch (err) { /* 还没生成好，继续等 */ }
     }
-    return { error: `等了约 ${Math.round(tries * (gap + 3500) / 1000)} 秒仍取不到导出文件` };
+    return { error: `等了约 ${Math.round(tries * (gap + 3500) / 1000)} 秒仍取不到导出文件`, diag };
   }, [exportUrl, start, endExclusive, maxTries, waitMs]);
 
   if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
+  const out0 = r.result || {};
+  if (out0.diag && (out0.diag.create || out0.diag.poll)) {
+    log(`   导出诊断：${out0.diag.create}${out0.diag.poll ? " ｜ 轮询 " + out0.diag.poll : ""}`);
+  }
   if (r.error) throw new Error(r.error);
   const out = r.result || {};
   if (out.error) throw new Error(out.error);
@@ -1064,6 +1081,7 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
       host, startDate, endDateExclusive,
       listOk ? 40 : 6,
       listOk ? 1500 : 1200,
+      log,
     );
     log(`   已保存：${saved.path}（${Math.round((saved.bytes || 0) / 1024)} KB）`);
     done.push("区间导出");
