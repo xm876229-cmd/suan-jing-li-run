@@ -340,6 +340,32 @@ def _write_stop_bat(out: Path) -> None:
         print(f"  ⚠ 写停止桥.bat 失败：{e}")
 
 
+def _skip_in_pack(rel: Path) -> bool:
+    """打包时哪些文件要跳过。
+
+    数据根现在就在程序目录里，于是「每台机器各自的数据」也躺在发布目录中：
+    抓到的订单/广告/佣金（stores）、抓包记录、生成的报表。
+    这些**不能进安装包和压缩包**——既体积大（几百 MB），
+    又是这一台机器的私人物品，拷给别人的电脑毫无意义。
+
+    只保留两种「通用」数据：
+      · 数据/costs/master.csv    成本主表（开箱即用的种子）
+      · 数据/mapping/master.csv  映射主表（同上）
+    """
+    parts = rel.parts
+    if not parts:
+        return False
+    if parts[0] == "数据" and len(parts) >= 2 and parts[1] in (
+            "stores", "capture", "exports", "logs",
+    ):
+        return True
+    if parts[0] == "数据" and len(parts) == 2 and parts[1] in ("history.jsonl", "fx_cache.json"):
+        return True
+    if parts[0] == "报表":
+        return True
+    return False
+
+
 def make_app_zip(app_dir: Path) -> Path:
     BUILD.mkdir(parents=True, exist_ok=True)
     zpath = BUILD / "app.zip"
@@ -348,7 +374,10 @@ def make_app_zip(app_dir: Path) -> Path:
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for f in sorted(app_dir.rglob("*")):
             if f.is_file():
-                z.write(f, f.relative_to(app_dir))
+                rel = f.relative_to(app_dir)
+                if _skip_in_pack(rel):
+                    continue
+                z.write(f, rel)
     print(f"[OK] app.zip：{zpath.stat().st_size / 1024 / 1024:.1f} MB")
     return zpath
 
@@ -381,7 +410,10 @@ def make_portable_zip(app_dir: Path) -> Path:
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for f in sorted(app_dir.rglob("*")):
             if f.is_file():
-                z.write(f, app_dir.name / f.relative_to(app_dir))
+                rel = f.relative_to(app_dir)
+                if _skip_in_pack(rel):
+                    continue
+                z.write(f, app_dir.name / rel)
     print(f"[OK] 免安装压缩包：{zpath}（{zpath.stat().st_size / 1024 / 1024:.1f} MB）")
     return zpath
 
