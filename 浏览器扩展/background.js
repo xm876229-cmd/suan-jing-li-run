@@ -724,10 +724,24 @@ async function runInPage(host, func, args) {
   }
   if (!tab) return { missingTab: true };
   try {
-    const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func, args });
+    // world: "MAIN" 是关键，别去掉。
+    // 扩展默认跑在隔离环境（ISOLATED），页面的 webmssdk 看不见、也不会给我们的
+    // fetch 加签。TikTok 的接口（尤其 affiliate 的 compass 系列）要求 URL 上带
+    // X-Bogus / X-Gnarly / msToken 这些动态签名，缺了就只回一个 {"code":10000}，
+    // 看不出原因。放到页面主世界执行，等于页面自己发的请求，签名才会自动补上。
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id }, func, args, world: "MAIN",
+    });
     return { result: res && res.result };
   } catch (e) {
-    return { error: String(e && e.message || e) };
+    const msg = String((e && e.message) || e);
+    // 这句英文原文很难懂，翻成能照着做的提示
+    if (/Cannot access contents/i.test(msg)) {
+      return { error:
+        "扩展没有这个页面的访问权限：到 chrome://extensions → 净利助手 → 详情 → " +
+        "「网站访问权限」改成「在所有网站上」，然后重新点运行" };
+    }
+    return { error: msg };
   }
 }
 

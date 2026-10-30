@@ -4,6 +4,34 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.21.12] - 2026-10-30
+
+### 联盟佣金 `code=10000` 的真正原因：缺平台签名
+
+对比抓包里页面自己发的请求，URL 上带了一串动态参数：
+
+```
+X-Bogus=…&X-Gnarly=…&msToken=…&fp=…&device_id=…&aid=4331&app_name=i18n_ecom_alliance…
+```
+
+其中 `X-Bogus` / `X-Gnarly` / `msToken` 是 TikTok 的**动态签名**，由页面里的
+webmssdk 在请求发出前算出来。我们之前是在扩展的隔离环境（ISOLATED world）里 `fetch`，
+页面的 SDK 看不见这次调用，自然也就不会补签——所以平台只回一个光秃秃的 `{"code":10000}`，
+连 `msg` 都不给。
+
+现在 `runInPage` 改用 `world: "MAIN"`，把请求放进页面主世界执行，等同于页面自己发的请求，
+SDK 才会自动加签。这同时也解释了商品 SKU 接口为什么回 `validating...`（同样是风控）。
+
+### 权限报错翻译成人话
+
+`Cannot access contents of the page. Extension manifest must request permission…`
+这种报错新手完全看不懂。现在会直接告诉你：
+
+> 扩展没有这个页面的访问权限：到 chrome://extensions → 净利助手 → 详情 →
+> 「网站访问权限」改成「在所有网站上」，然后重新点运行
+
+---
+
 ## [v0.21.11] - 2026-10-29
 
 ### 广告花费终于能算进报表了
