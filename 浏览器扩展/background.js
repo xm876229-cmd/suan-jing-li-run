@@ -1331,8 +1331,12 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   //       含全部 SKU（不受分页 10 条限制）。
   if (!done.length) {
     try {
-      log("①-a 点页面「导出数据」，接住平台导出的商品SKU表…");
-      const got = await exportSkuByButton(host, await skuPageHint(), log);
+      log("①-a 程序自动导出商品SKU表（不弹保存框）…");
+      let got = await exportViaApi("sku", host, log);
+      if (!got || !got.path) {
+        log(`   接口级导出没成：${(got && got.error) || "未知原因"}；改试浏览器下载…`);
+        got = await exportSkuByButton(host, await skuPageHint(), log);
+      }
       if (got && got.path) {
         log(`   已接住导出表：${got.path}（${Math.round((got.bytes || 0) / 1024)} KB）`);
         done.push(`导出表 ${got.name || ""}`);
@@ -2396,6 +2400,17 @@ async function onDownloadComplete(delta) {
   }
 }
 
+// 走「接口级导出」时，浏览器仍可能弹「另存为」——直接取消掉，
+// 免得用户被一个对话框拦住（文件我们已经从接口取回来了）。
+let SUPPRESS_DL = false;
+
+if (chrome.downloads && chrome.downloads.onCreated) {
+  chrome.downloads.onCreated.addListener((item) => {
+    if (!SUPPRESS_DL || !item || !item.id) return;
+    try { chrome.downloads.cancel(item.id); } catch (e) { /* 忽略 */ }
+  });
+}
+
 if (chrome.downloads && chrome.downloads.onChanged) {
   chrome.downloads.onChanged.addListener((delta) => {
     onDownloadComplete(delta).catch(() => {});
@@ -2671,6 +2686,149 @@ async function exportByButton(kind, host, log) {
 /** 商品SKU表：走通用导出（保留原函数名，调用处不用改）。 */
 async function exportSkuByButton(host, preferPath, log) {
   return exportByButton("sku", host, log);
+}
+
+/** 导出并直接落库：不经过浏览器下载（避开「另存为」对话框）。
+ *
+ * 为什么要这样：
+ *   点「导出数据」后，浏览器会弹「另存为」让用户选路径——
+ *   自动化就断在这一步。但平台其实已经生成了文件，
+ *   文件地址就在**导出接口的响应**里。
+ *
+ * 做法：挂调试器 → 点按钮 → 读导出接口的响应 → 拿到文件地址 →
+ *      后台带 cookie 把文件取回来 → 直接回传落盘。
+ */
+async function exportViaApi(kind, host, log) {
+  const cfg = EXPORT_FLOWS[kind];
+  if (!cfg) return { error: `没有配置「${kind}」的导出流程` };
+  const realHost = cfg.host || host;
+
+  let tabId = 0;
+  let attached = false;
+  const fileUrls = [];      // 候补文件地址
+  const reqIds = new Map();
+  const FILE_RE = /(https?:)?\/\/[^"'\\s]+\.(xlsx|xls|csv)(\?[^"'\\s]*)?|\/api\/[^"'\\s]*\/(export|download)[^"'\\s]*/gi;
+
+  const onEvent = async (source, method, params) => {
+    if (source.tabId !== tabId) return;
+    try {
+      if (method === "Network.requestWillBeSent") {
+        const u = String((params.request || {}).url || "");
+        if (/export|download_task|export_task/i.test(u)) {
+          reqIds.set(params.requestId, { url: u });
+        }
+        return;
+      }
+      if (method === "Network.loadingFinished") {
+        if (!reqIds.has(params.requestId)) return;
+        let body = "";
+        try {
+          const b = await chrome.debugger.sendCommand(
+            { tabId }, "Network.getResponseBody", { requestId: params.requestId });
+          body = (b && b.body) || "";
+          if (b && b.base64Encoded) body = atob(body);
+        } catch (e) { return; }
+        if (!body) return;
+        // 从响应里挖出 .xlsx/.csv 地址
+        const m = body.match(FILE_RE);
+        if (m) {
+          for (const one of m) {
+            const u2 = one.startsWith("http") ? one : `https://${realHost}${one}`;
+            if (!fileUrls.includes(u2)) fileUrls.push(u2);
+          }
+          if (log) log(`   响应里找到 ${m.length} 个候选文件地址`);
+        }
+        // 顺便记一下业务码，失败时能看出原因
+        try {
+          const j = JSON.parse(body);
+          if (j && j.code !== undefined && Number(j.code) !== 0 && log) {
+            log(`   导出接口回 code=${j.code} ${j.message || ""}`);
+          }
+        } catch (e) { /* 不是 JSON 就算了 */ }
+      }
+    } catch (e) { /* 忽略 */ }
+  };
+
+  chrome.debugger.onEvent.addListener(onEvent);
+  SUPPRESS_DL = true;      // 这个流程里不需要浏览器下载
+  try {
+    const nt = await chrome.tabs.create({
+      url: `https://${realHost}/${cfg.page}`, active: false,
+    });
+    tabId = nt.id;
+    try {
+      await chrome.debugger.attach({ tabId }, "1.3");
+      await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
+      attached = true;
+    } catch (e) {
+      if (log) log(`   调试器挂不上：${(e && e.message) || e}`);
+    }
+    if (log) log(`   开「${cfg.label}」页面准备导出…`);
+
+    for (let i = 0; i < 30; i++) {
+      await sleep(1000);
+      try {
+        const t = await chrome.tabs.get(tabId);
+        if (!t || t.status === "complete") break;
+      } catch (e) { break; }
+    }
+    await sleep(3000);
+
+    for (let si = 0; si < cfg.steps.length; si++) {
+      const texts = cfg.steps[si];
+      let clicked = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        clicked = await clickByTextIn(tabId, texts);
+        if (clicked) break;
+        await sleep(1500);
+      }
+      if (log) log(`   第 ${si + 1} 步点「${texts[0]}」：${clicked}`);
+      if (!clicked && si === 0) {
+        const names = await scanExportButtons(tabId);
+        return {
+          error: names.length
+            ? `没找到「${texts[0]}」，页面上含「导出」的按钮有：${names.join(" / ")}`
+            : "页面上没找到「导出」类按钮",
+        };
+      }
+      await sleep(2500);
+    }
+
+    // 等文件地址出现（最多 60 秒）
+    for (let i = 0; i < 30 && !fileUrls.length; i++) await sleep(2000);
+    if (!fileUrls.length) {
+      return { error: "没在导出接口的响应里找到文件地址" };
+    }
+    if (log) log(`   拿到文件地址，开始下载…`);
+
+    // 逐个试：取第一个能下到有效内容的
+    for (const u of fileUrls.slice(0, 6)) {
+      for (let attempt = 0; attempt < 12; attempt++) {
+        try {
+          const r = await fetch(u, { credentials: "include" });
+          if (r.ok) {
+            const ct = r.headers.get("content-type") || "";
+            if (!ct.includes("json")) {
+              const buf = await r.arrayBuffer();
+              if (buf && buf.byteLength > 1024) {
+                const name = decodeURIComponent(
+                  (u.split("?")[0].split("/").pop() || `${kind}.xlsx`));
+                const saved = await uploadToBridge(name, buf, kind === "sku" ? "mapping" : "");
+                return { ok: true, name, path: saved.path, bytes: buf.byteLength };
+              }
+            }
+          }
+        } catch (e) { /* 还没生成好，等一会儿再试 */ }
+        await sleep(4000);
+      }
+    }
+    return { error: "文件地址拿到了但下不到内容（平台可能还在生成）" };
+  } finally {
+    SUPPRESS_DL = false;
+    try { chrome.debugger.onEvent.removeListener(onEvent); } catch (e) { /* 忽略 */ }
+    if (attached) { try { await chrome.debugger.detach({ tabId }); } catch (e) { /* 忽略 */ } }
+    if (tabId) { try { await chrome.tabs.remove(tabId); } catch (e) { /* 忽略 */ } }
+  }
 }
 
 async function deepCaptureSku(host, preferPath, log) {
