@@ -1685,10 +1685,17 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
     return { saved: saved.path, products: rows.length };
   }
 
-  // 接口不行就自己去页面点导出——这是用户要的方式：不靠人操作
+  // 接口不行就自己去页面点导出——不靠人操作。
+  // 优先用「拦截下载」这条（不弹保存框），不行才退回老的下载方式。
   log("   改用「页面导出」取联盟佣金表…");
-  const got = await exportByButton("affiliate", host, log);
-  if (!got || got.error) {
+  let got = await exportViaApi("affiliate", host, log, {
+    range: { start: startDate, end: shiftDate(endDateExclusive, -1) },
+  });
+  if (!got || !got.path) {
+    log(`   拦截式导出没成：${(got && got.error) || "未知原因"}；改试浏览器下载…`);
+    got = await exportByButton("affiliate", host, log);
+  }
+  if (!got || got.error || !got.path) {
     throw new Error((got && got.error) || "联盟导出失败");
   }
   log(`   已接住导出表：${got.path}`);
@@ -2102,6 +2109,23 @@ async function runAds(range, log, opts = {}) {
       log(`接口直取失败：${(e && e.message) || e}`);
       if (quick) return { skipped: true, reason: String((e && e.message) || e) };
     }
+    }
+  }
+
+  // 接口不通时，程序自己去广告页点「导出数据」（不弹保存框那条路）
+  if (!quick && !opts.noDirect) {
+    const startDate = range && range.startDate;
+    const endDate = range && (range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : range.to);
+    if (startDate && endDate) {
+      log("接口不通，改由程序自己去广告页点导出…");
+      const got = await exportViaApi("ads", host, log, {
+        range: { start: startDate, end: endDate },
+      });
+      if (got && got.path) {
+        log(`已接住广告导出表：${got.path}`);
+        return { via: "页面导出", saved: got.path };
+      }
+      log(`   页面导出没成：${(got && got.error) || "未知原因"}；改查导出任务`);
     }
   }
 
