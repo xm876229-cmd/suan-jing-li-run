@@ -1323,6 +1323,58 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     log(`   商品管理接口失败：${(e && e.message) || e}`);
   }
 
+  // ①-b 深度抓取：直接读页面自己成功的那次 sku/list 响应。
+  //
+  //   为什么必须走这条：平台对这条接口的校验极严，我们自己发请求一律被判
+  //   98001021（哪怕 URL 参数、请求体、请求头、页面上下文全部对齐）。
+  //   但页面自己发的请求是成功的——既然拿不到「正确的请求长什么样」，
+  //   就直接拿「页面已经拿到的答案」：用 chrome.debugger 挂在商品分析页上，
+  //   等页面发一次请求，用 Network.getResponseBody 把响应体读出来。
+  //
+  //   这就是用户手动导出的那份「商品数据分析 → 按 SKU」的数据本身。
+  if (!done.length) {
+    try {
+      log("①-b 深度抓取页面自己的商品SKU响应…");
+      const cap = await deepCaptureSku(host, await skuPageHint(), log);
+      if (cap.error) {
+        log(`   深度抓取失败：${cap.error}`);
+      } else {
+        let obj = null;
+        if (cap.base64) {
+          const bin = atob(cap.bodyText);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          obj = JSON.parse(new TextDecoder().decode(bytes));
+        } else {
+          obj = JSON.parse(cap.bodyText);
+        }
+        // 平台用业务码表示失败，HTTP 200 也不代表成功
+        if (obj && obj.code !== undefined && Number(obj.code) !== 0) {
+          log(`   页面这次请求也失败了：code=${obj.code} ${obj.message || ""}`);
+        } else {
+          const skus = extractSkuList(obj);
+          if (skus.length) {
+            const bytes2 = new TextEncoder().encode(JSON.stringify({ skus }));
+            const saved = await uploadToBridge(
+              `sku_list_商品数据分析_${today}.json`, bytes2.buffer, "mapping");
+            log(`   已保存：${saved.path}（${skus.length} 个 SKU）`);
+            done.push(`商品数据分析 ${skus.length} 条`);
+            try {
+              const linkSaved = await saveLinkInfoCsv(skus, today, log);
+              if (linkSaved) done.push(`链接资料 ${linkSaved.sku_count} 条`);
+            } catch (e) {
+              log(`   链接资料导出失败（不影响其余取数）：${(e && e.message) || e}`);
+            }
+          } else {
+            log("   响应里没找到 SKU 列表（结构未知）");
+          }
+        }
+      }
+    } catch (e) {
+      log(`   深度抓取出错：${(e && e.message) || e}`);
+    }
+  }
+
   // ② 区间导出：这是「数据分析 → 商品数据分析 → 按 SKU → 导出数据」同一条路，
   //    也是链接归属的权威来源——已删除的 SKU 只有这份表里才有，
   //    累积主表只是临时兜底，所以这条路必须走通。
@@ -2314,6 +2366,284 @@ if (chrome.downloads && chrome.downloads.onChanged) {
   });
 }
 
+
+// ---------------- SKU 深度抓取（读页面自己成功的响应） ----------------
+//
+// 为什么走这条路：
+//   平台对这条接口的校验极严——我们自己发请求会被判 98001021，
+//   哪怕 URL 参数、请求体结构、请求头、页面上下文全都对得上。
+//   而**页面自己发的请求是成功的**，只是我们的抓包方式拿不到它的请求体
+//   （webRequest 的 requestBody 对页面那些请求是 undefined）。
+//
+//   所以换个思路：不去猜「正确的请求长什么样」，而是**直接拿页面已经拿到的答案**。
+//   用 chrome.debugger 挂在商品分析页上，等页面自己发一次 sku/list，
+//   然后用 Network.getResponseBody 把响应体读出来——那就是全量 SKU 数据。
+//   页面维度切到「按 SKU」时一次就会返回全部（含当期没销量的链接）。
+//
+/** 从页面 sku/list 响应里挖出 SKU 列表。
+
+ * 平台这个接口的返回结构我们没拿到过样本（页面请求的响应体读不到，
+ * 自己的请求又被拒），所以这里把见过的几种形态都兼容一遍：
+ *   ① {code:0, data:{list:[{meta:{sku_id,...}}]}}   ← 商品数据分析（字段在 meta 下）
+ *   ② {code:0, data:{list:[{sku_id,...}]}}
+ *   ③ {code:0, data:{items:[...]}} / rows / records / sku_list
+ *   ④ {code:0, data:[...]}
+ * 逐层往下找第一个「像 SKU 列表」的数组，认字段名时大小写/下划线都容错。
+ */
+function extractSkuList(respObj) {
+  if (!respObj || typeof respObj !== "object") return [];
+
+  const SKEYS = ["sku_id", "skuId", "skuID", "sku"];
+  const PKEYS = ["product_id", "productId", "productID"];
+  const NAME_KEYS = ["product_title", "productTitle", "product_name", "productName", "title"];
+  const SKU_NAME_KEYS = ["seller_sku", "sellerSku", "sku_name", "skuName"];
+
+  const pick = (obj, keys) => {
+    for (const k of keys) {
+      const v = obj[k];
+      if (v !== undefined && v !== null && v !== "") return String(v);
+    }
+    return "";
+  };
+
+  const looksLikeSku = (o) => o && typeof o === "object" && !Array.isArray(o)
+    && (SKEYS.some((k) => o[k] !== undefined) || PKEYS.some((k) => o[k] !== undefined));
+
+  const toRows = (arr) => {
+    const out = [];
+    for (const it of arr || []) {
+      if (!it || typeof it !== "object") continue;
+      const src = (it.meta && typeof it.meta === "object") ? it.meta : it;
+      const sid = pick(src, SKEYS);
+      const pid = pick(src, PKEYS);
+      if (!sid && !pid) continue;
+      const skuName = pick(src, SKU_NAME_KEYS);
+      out.push({
+        sku_id: sid,
+        product_id: pid,
+        seller_sku: skuName,
+        product_name: pick(src, NAME_KEYS),
+        style_code: deriveStyleCode(skuName),
+      });
+    }
+    return out;
+  };
+
+  // 广度优先找第一个可用的数组
+  const seen = new Set();
+  const queue = [respObj];
+  while (queue.length) {
+    const cur = queue.shift();
+    if (!cur || typeof cur !== "object" || seen.has(cur)) continue;
+    seen.add(cur);
+    if (Array.isArray(cur)) {
+      if (cur.length && looksLikeSku(cur[0])) return toRows(cur);
+      // 数组里每个元素可能再包一层
+      for (const it of cur) {
+        if (it && typeof it === "object" && !Array.isArray(it)) queue.push(it);
+      }
+      continue;
+    }
+    // 优先看常见的列表字段名
+    const prefer = ["list", "items", "rows", "records", "sku_list", "skuList",
+                    "data_list", "dataList", "result"];
+    for (const k of prefer) {
+      if (Array.isArray(cur[k])) {
+        const r = toRows(cur[k]);
+        if (r.length) return r;
+        queue.push(cur[k]);
+      }
+    }
+    for (const k of Object.keys(cur)) {
+      const v = cur[k];
+      if (v && typeof v === "object") queue.push(v);
+    }
+  }
+  return [];
+}
+
+async function deepCaptureSku(host, preferPath, log) {
+  const SKU_PATH = "/api/v2/insights/seller/ttp/product/sku/list";
+  const tabs = await chrome.tabs.query({ url: [`*://${host}/*`] });
+  const kw = preferPath ? preferPath.split("?")[0] : "";
+  const usable = (t) => t && t.id && !/^chrome-error:|^about:/.test(String(t.url || ""));
+  let target = null;
+  try {
+    target = tabs.find((t) => usable(t) && kw && String(t.url || "").includes(kw));
+  } catch (e) { /* 忽略 */ }
+  if (!target) {
+    try {
+      target = tabs.find((t) => usable(t) && t.active) || tabs.find(usable) || null;
+    } catch (e) { /* 忽略 */ }
+  }
+  if (!target) throw new Error(`没有找到 ${host} 的标签页`);
+
+  let tabId = target.id;
+  let ownTab = false;
+  const reqIds = new Map();   // requestId → 抓到的信息
+  let resolveHit = null;
+  let got = null;
+  const done = new Promise((resolve) => { resolveHit = resolve; });
+
+  // 注意：调试器是挂在「后台新开」的那个标签页上的，
+  // 所以这里比对的是运行时才知道的 tabId（下面 attachTo 之后才定下来）。
+  const onEvent = async (source, method, params) => {
+    if (source.tabId !== tabId) return;
+    if (method === "Network.requestWillBeSent") {
+      const req = params.request || {};
+      if (!String(req.url || "").includes(SKU_PATH)) return;
+      reqIds.set(params.requestId, {
+        url: req.url,
+        postData: req.postData || "",
+      });
+      return;
+    }
+    if (method === "Network.responseReceived") {
+      const rid = params.requestId;
+      const info = reqIds.get(rid);
+      if (!info) return;
+      const resp = params.response || {};
+      info.status = resp.status;
+      info.mimeType = resp.mimeType || "";
+      // 平台返回业务错误码时不算成功
+      if (resp.status && resp.status >= 400) return;
+      try {
+        const body = await chrome.debugger.sendCommand(
+          { tabId }, "Network.getResponseBody", { requestId: rid });
+        info.bodyText = body && body.body ? body.body : "";
+        info.base64 = !!(body && body.base64Encoded);
+      } catch (e) {
+        // 响应体可能还没到（要等 loadingFinished），下次再试
+        info.pending = true;
+      }
+      return;
+    }
+    if (method === "Network.loadingFinished") {
+      const info = reqIds.get(params.requestId);
+      if (!info || info.bodyText) return;
+      try {
+        const body = await chrome.debugger.sendCommand(
+          { tabId }, "Network.getResponseBody", { requestId: params.requestId });
+        info.bodyText = body && body.body ? body.body : "";
+        info.base64 = !!(body && body.base64Encoded);
+      } catch (e) { /* 拿不到就算了 */ }
+      if (info.bodyText) {
+        got = info;
+        if (resolveHit) resolveHit(info);
+      }
+    }
+  };
+
+  chrome.debugger.onEvent.addListener(onEvent);
+  let attached = false;
+
+  const attachTo = async (tid) => {
+    await chrome.debugger.attach({ tabId: tid }, "1.3");
+    await chrome.debugger.sendCommand({ tabId: tid }, "Network.enable", {});
+    attached = true;
+  };
+
+  // 先开新页（在后台），再把调试器挂上去——
+  // 反过来的话，新页加载时发出的请求就漏掉了。
+  try {
+    const url = `https://${host}/${kw || "compass/product-analysis"}`;
+    const nt = await chrome.tabs.create({ url, active: false });
+    ownTab = true;
+    tabId = nt.id;
+    await attachTo(tabId);
+    if (log) log("   已后台新开商品分析页并挂上调试器…");
+  } catch (e) {
+    if (log) log(`   新开页面失败，改用原标签页：${(e && e.message) || e}`);
+  }
+  if (!attached) {
+    try {
+      await attachTo(tabId);
+    } catch (e) {
+      chrome.debugger.onEvent.removeListener(onEvent);
+      throw new Error(`挂不上调试器：${(e && e.message) || e}（可能这个标签页已有其它调试会话）`);
+    }
+  }
+
+  // 让页面带着「按 SKU」维度发一次请求。
+  // 这一步不能省：页面已经停在「按 SKU」时，切维度不会触发新请求，
+  // 我们就会干等 40 秒。
+  try {
+    // 等新页加载完
+    for (let i = 0; i < 20; i++) {
+      await sleep(1000);
+      try {
+        const t = await chrome.tabs.get(tabId);
+        if (!t || t.status === "complete") break;
+      } catch (e) { break; }
+    }
+    // 新开的页默认是「按商品」维度，切到「按 SKU」它才会发 sku/list
+    try {
+      const [r2] = await chrome.scripting.executeScript({
+        target: { tabId }, world: "MAIN",
+        func: () => {
+          const cands = Array.from(
+            document.querySelectorAll("span,div,button,a,li,label,td"));
+          const hit = cands.find((e) => {
+            const t = (e.textContent || "").replace(/\s+/g, "").trim();
+            if (t !== "按SKU" && t !== "按 SKU") return false;
+            if (e.offsetParent === null) return false;
+            const kids = e.querySelectorAll("span,div,a,button,li,label");
+            return ![...kids].some(
+              (k) => (k.textContent || "").replace(/\s+/g, "").trim() === "按SKU");
+          });
+          if (!hit) return false;
+          hit.click();
+          return true;
+        },
+      });
+      if (log) log(`   新页已切到「按 SKU」维度：${!!(r2 && r2.result)}`);
+    } catch (e) {
+      if (log) log(`   新页切维度失败：${(e && e.message) || e}`);
+    }
+    await sleep(4000);
+  } catch (e) {
+    if (log) log(`   新开页面失败，改用原标签页：${(e && e.message) || e}`);
+  }
+
+  // 等页面发请求并拿到响应（最多 40 秒）
+  let hit = await Promise.race([
+    done, new Promise((resolve) => setTimeout(() => resolve(null), 25000)),
+  ]);
+
+  // 还没等到 → 刷新一次页面，让它重新拉（页面停在「按 SKU」时切维度不触发新请求）
+  if (!hit) {
+    try {
+      await chrome.tabs.reload(tabId);
+      if (log) log("   还没等到请求，刷新页面再试…");
+      await sleep(4000);
+      hit = await Promise.race([
+        done, new Promise((resolve) => setTimeout(() => resolve(null), 20000)),
+      ]);
+    } catch (e) {
+      if (log) log(`   刷新失败：${(e && e.message) || e}`);
+    }
+  }
+
+  try { chrome.debugger.onEvent.removeListener(onEvent); } catch (e) { /* 忽略 */ }
+  if (attached) {
+    try { await chrome.debugger.detach({ tabId }); } catch (e) { /* 忽略 */ }
+  }
+  // 自己开的标签页用完就关掉，不给用户留一堆后台标签
+  if (ownTab) {
+    try { await chrome.tabs.remove(tabId); } catch (e) { /* 忽略 */ }
+  }
+
+  if (!hit || !hit.bodyText) {
+    return { error: "40 秒内没拿到页面自己的 sku/list 响应" };
+  }
+  return {
+    bodyText: hit.bodyText,
+    base64: hit.base64,
+    status: hit.status,
+    url: hit.url,
+    postData: hit.postData,
+  };
+}
 
 // ---------------- 深度抓包（调试协议） ----------------
 // 有些请求既不走页面 fetch/XHR，也不在 webRequest 视野里（由签名 SDK 在 worker 里发）。
