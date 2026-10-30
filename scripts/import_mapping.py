@@ -142,10 +142,23 @@ def merge_file(path: Path, master: dict[str, dict], events: list[dict], now: str
             master[sid] = row
             rebound += 1
         else:
-            # 同商品，只更新描述字段
-            changed = any(old[k] != row[k] for k in ("seller_sku", "product_name", "style_code"))
-            if changed:
-                master[sid] = row
+            # 同商品，只更新描述字段。
+            #
+            # 关键：**空值绝不覆盖已有值**。
+            # 商品数据分析接口返回的行没有「卖家SKU」（seller_sku 为空），
+            # 如果按「有新值就整行替换」，它会把老数据里辛苦攒下的
+            # seller_sku / style_code 全冲成空——报表的款式编码列就废了。
+            desc = ("seller_sku", "product_name", "style_code")
+            merged = dict(old)
+            touched = False
+            for k in desc:
+                nv = (row.get(k) or "").strip()
+                if nv and nv != (old.get(k) or ""):
+                    merged[k] = row[k]
+                    touched = True
+            if touched:
+                merged["updated_at"] = now
+                master[sid] = merged
             same += 1
     return added, rebound, same
 

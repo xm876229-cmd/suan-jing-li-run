@@ -1323,6 +1323,27 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     log(`   商品管理接口失败：${(e && e.message) || e}`);
   }
 
+  // ①-a 直接点页面的「导出数据」，接住平台导出的那张表。
+  //
+  //   为什么优先这条：
+  //     · 接口返回的数据里**没有「卖家SKU」**，而报表的款式编码列靠它算；
+  //     · 导出的表才是后台「商品数据分析 → 按 SKU → 导出」的完整结果，
+  //       含全部 SKU（不受分页 10 条限制）。
+  if (!done.length) {
+    try {
+      log("①-a 点页面「导出数据」，接住平台导出的商品SKU表…");
+      const got = await exportSkuByButton(host, await skuPageHint(), log);
+      if (got && got.path) {
+        log(`   已接住导出表：${got.path}（${Math.round((got.bytes || 0) / 1024)} KB）`);
+        done.push(`导出表 ${got.name || ""}`);
+      } else {
+        log(`   导出没成功：${(got && got.error) || "未知原因"}`);
+      }
+    } catch (e) {
+      log(`   导出出错：${(e && e.message) || e}`);
+    }
+  }
+
   // ①-b 深度抓取：直接读页面自己成功的那次 sku/list 响应。
   //
   //   为什么必须走这条：平台对这条接口的校验极严，我们自己发请求一律被判
@@ -2317,6 +2338,9 @@ async function openBackoffice(kind, capture, log) {
   return { url: page.url, label: page.label, capture: !!capture };
 }
 
+// 正在等「页面导出」结果的地方（点导出按钮后，文件下载完就通知它）
+let EXPORT_WAIT = null;
+
 /** 下载完成 → 抓回来入库。 */
 async function onDownloadComplete(delta) {
   if (!MANUAL_CAPTURE.active || Date.now() > MANUAL_CAPTURE.until) return;
@@ -2342,8 +2366,14 @@ async function onDownloadComplete(delta) {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const buf = await resp.arrayBuffer();
     if (!buf || buf.byteLength < 64) throw new Error("文件太小，可能还没生成好");
-    const saved = await uploadToBridge(fname, buf);
+    // 等导出结果的那一刻说明这是「商品SKU表」，直接进 mapping 目录，
+    // 核算前会自动合并进映射主表
+    const saved = await uploadToBridge(fname, buf, EXPORT_WAIT ? "mapping" : "");
     log(`已接住「${fname}」→ ${saved.path}`);
+    if (EXPORT_WAIT) {
+      const w = EXPORT_WAIT; EXPORT_WAIT = null;
+      w({ name: fname, path: saved.path, bytes: buf.byteLength });
+    }
   } catch (e) {
     log(`接不住「${fname}」（${e.message}）：请改用「只开页面」模式，`
       + `导出后到桌面端「手动导入」上传`);
@@ -2452,6 +2482,105 @@ function extractSkuList(respObj) {
     }
   }
   return [];
+}
+
+/** 点页面的「导出数据」，把平台导出的那张表接回来。
+
+ * 为什么要走这条路（而不是自己发接口）：
+ *   1. 平台对 sku/list 接口校验极严，我们自己发一律被判 98001021；
+ *   2. 更关键的是——那个接口返回的数据里**没有「卖家SKU」**，
+ *      而报表的款式编码列（V27-White → V27）就是靠它算的。
+ *      只有「导出数据」这张表才带卖家SKU。
+ *
+ * 做法：后台开一个商品分析页 → 切「按 SKU」→ 点「导出数据」
+ *      → 有确认弹窗就点掉 → 等浏览器下载完成 → 扩展接住文件回传。
+ */
+async function exportSkuByButton(host, preferPath, log) {
+  const kw = preferPath ? preferPath.split("?")[0] : "compass/product-analysis";
+  let tabId = 0;
+  try {
+    const nt = await chrome.tabs.create({
+      url: `https://${host}/${kw}`, active: false,
+    });
+    tabId = nt.id;
+    if (log) log("   已后台新开商品分析页，准备点「导出数据」…");
+    // 等加载完
+    for (let i = 0; i < 25; i++) {
+      await sleep(1000);
+      try {
+        const t = await chrome.tabs.get(tabId);
+        if (!t || t.status === "complete") break;
+      } catch (e) { break; }
+    }
+    await sleep(2500);   // 表格渲染 + 首屏数据
+
+    // ① 切「按 SKU」
+    const clickByText = async (texts) => {
+      try {
+        const [r] = await chrome.scripting.executeScript({
+          target: { tabId }, world: "MAIN",
+          func: (want) => {
+            const norm = (x) => (x || "").replace(/\s+/g, "").trim();
+            const cands = Array.from(
+              document.querySelectorAll("button,span,div,a,li,label,td,[role=button]"));
+            const hit = cands.find((e) => {
+              const t = norm(e.textContent);
+              if (!want.includes(t)) return false;
+              if (e.offsetParent === null) return false;
+              const kids = e.querySelectorAll("button,span,a,li,label,td");
+              // 取最内层，别点到外层容器
+              return ![...kids].some((k) => want.includes(norm(k.textContent)));
+            });
+            if (!hit) return false;
+            hit.click();
+            return true;
+          },
+          args: [texts],
+        });
+        return !!(r && r.result);
+      } catch (e) { return false; }
+    };
+
+    const skuTab = await clickByText(["按SKU", "按 SKU"]);
+    if (log) log(`   切「按 SKU」：${skuTab}`);
+    await sleep(3500);
+
+    // ② 点「导出数据」
+    const exp = await clickByText(["导出数据", "导出"]);
+    if (log) log(`   点「导出数据」：${exp}`);
+    if (!exp) return { error: "页面上没找到「导出数据」按钮" };
+
+    // ③ 可能弹确认框：点掉它
+    await sleep(2500);
+    for (const t of (["导出", "确定", "确认", "下载", "OK"])) {
+      if (await clickByText([t])) { if (log) log(`   点了弹窗里的「${t}」`); break; }
+    }
+
+    // ④ 等下载完成（平台生成文件要一两分钟，期间每 20 秒报一次进度）
+    const LIMIT = 110000;
+    const got = await new Promise((resolve) => {
+      let left = Math.round(LIMIT / 1000);
+      const tick = setInterval(() => {
+        left -= 20;
+        if (left > 0 && log) log(`   还在等导出文件…（剩 ${left} 秒）`);
+      }, 20000);
+      const timer = setTimeout(() => {
+        clearInterval(tick);
+        EXPORT_WAIT = null;
+        resolve(null);
+      }, LIMIT);
+      EXPORT_WAIT = (v) => {
+        clearInterval(tick);
+        clearTimeout(timer);
+        resolve(v);
+      };
+    });
+
+    if (!got) return { error: "没等到导出文件（可能平台还在生成，到「导出记录」里能看到）" };
+    return got;
+  } finally {
+    if (tabId) { try { await chrome.tabs.remove(tabId); } catch (e) { /* 忽略 */ } }
+  }
 }
 
 async function deepCaptureSku(host, preferPath, log) {
