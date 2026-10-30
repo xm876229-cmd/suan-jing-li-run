@@ -32,7 +32,12 @@ from src import paths  # noqa: E402
 
 ROOT = paths.ROOT
 
-from src.loader import parse_mapping, parse_mapping_json, read_table  # noqa: E402
+from src.loader import (  # noqa: E402
+    derive_style_code, parse_mapping, parse_mapping_json, read_table,
+)
+
+# 订单表里提取的 sku_id → 卖家SKU（main 里初始化）
+ORDER_SKU: dict[str, str] = {}
 
 MAPPING_DIR = paths.MAPPING
 MASTER = MAPPING_DIR / "master.csv"
@@ -99,6 +104,66 @@ def is_primary(path: Path) -> bool:
     return any(h in path.name for h in PRIMARY_HINTS)
 
 
+def load_seller_sku_from_orders(limit_files: int = 10) -> dict[str, str]:
+    """从订单表里提取 sku_id → 卖家SKU。
+
+    为什么从这里取：订单表每行都带「SKU ID」和「Seller SKU」，
+    而款式编码（V27-White → V27）就藏在卖家SKU里。
+    有了它就不用再单独导一张「链接资料 / 批量编辑商品」表了。
+
+    只读最近 N 份订单表（每轮取数都会新增一份，全读会越来越慢）。
+    """
+    out: dict[str, str] = {}
+    try:
+        store_dirs = list(paths.STORES_ROOT.iterdir())
+    except OSError:
+        return out
+
+    files: list[Path] = []
+    for d in store_dirs:
+        if not d.is_dir():
+            continue
+        for sub in ("订单表", "orders"):
+            p = d / "inbox" / sub
+            if not p.is_dir():
+                continue
+            for f in p.iterdir():
+                if f.is_file() and f.suffix.lower() in (".csv", ".xlsx", ".xls"):
+                    files.append(f)
+    if not files:
+        return out
+    files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+
+    for f in files[:limit_files]:
+        try:
+            rows = read_table(f)
+        except Exception:  # noqa: BLE001
+            continue
+        if not rows:
+            continue
+        # 找表头里「SKU ID」「Seller SKU」两列
+        hidx = -1
+        c_sid = c_sku = -1
+        for i, r in enumerate(rows[:6]):
+            low = [str(x or "").strip().lower().replace(" ", "") for x in r]
+            a = next((j for j, h in enumerate(low) if h in ("skuid", "sku_id")), -1)
+            b = next((j for j, h in enumerate(low)
+                      if h in ("sellersku", "seller_sku", "卖家sku", "卖家 SKU".lower())), -1)
+            if a >= 0 and b >= 0:
+                hidx, c_sid, c_sku = i, a, b
+                break
+        if hidx < 0:
+            continue
+        for r in rows[hidx + 1:]:
+            if len(r) <= max(c_sid, c_sku):
+                continue
+            sid = str(r[c_sid] or "").strip()
+            sku = str(r[c_sku] or "").strip()
+            if sid and sku and sid not in out:
+                out[sid] = sku
+    return out
+
+
 def merge_file(path: Path, master: dict[str, dict], events: list[dict], now: str,
                overwrite: bool = True) -> tuple[int, int, int]:
     if path.suffix.lower() in (".xlsx", ".xls", ".csv"):
@@ -121,6 +186,14 @@ def merge_file(path: Path, master: dict[str, dict], events: list[dict], now: str
             if any(b is item for b in bucket):
                 row["seller_sku"] = sku
                 break
+        # 表里没有卖家SKU（比如「商品数据分析」导出的表）→ 用订单表里的补上，
+        # 再据此推出款式编码。这样就不用额外导「链接资料」那张表了。
+        if not row["seller_sku"]:
+            from_orders = ORDER_SKU.get(sid)
+            if from_orders:
+                row["seller_sku"] = from_orders
+        if not row["style_code"] and row["seller_sku"]:
+            row["style_code"] = derive_style_code(row["seller_sku"])
 
         old = master.get(sid)
         if old is None:
@@ -172,6 +245,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     master = load_master()
+    # 从订单表补卖家SKU（用来推款式编码），免得再导一张链接资料
+    global ORDER_SKU
+    ORDER_SKU = load_seller_sku_from_orders()
+    if ORDER_SKU:
+        print(f"从订单表读到 {len(ORDER_SKU)} 个 SKU 的卖家编码（用于推款式编码）")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     events: list[dict] = []
     total = [0, 0, 0]
