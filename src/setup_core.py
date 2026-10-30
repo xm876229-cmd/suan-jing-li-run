@@ -234,7 +234,7 @@ def write_uninstall_entry(dest: Path) -> None:
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
             winreg.SetValueEx(k, "DisplayName", 0, winreg.REG_SZ, APP_NAME)
-            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.21.36")
+            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.21.37")
             winreg.SetValueEx(k, "Publisher", 0, winreg.REG_SZ, "净利助手")
             winreg.SetValueEx(k, "InstallLocation", 0, winreg.REG_SZ, str(dest))
             winreg.SetValueEx(k, "DisplayIcon", 0, winreg.REG_SZ, str(exe))

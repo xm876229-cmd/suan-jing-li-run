@@ -2688,66 +2688,13 @@ async function scanExportButtons(tabId) {
  * 返回 { ok, name, path, bytes } 或 { error }。
  */
 async function exportByButton(kind, host, log) {
-  const cfg = EXPORT_FLOWS[kind];
-  if (!cfg) return { error: `没有配置「${kind}」的导出流程` };
-  const realHost = cfg.host || host;
-  let tabId = 0;
-  try {
-    const url = `https://${realHost}/${cfg.page}`;
-    const nt = await chrome.tabs.create({ url, active: false });
-    tabId = nt.id;
-    if (log) log(`   开「${cfg.label}」页面准备导出…`);
-
-    for (let i = 0; i < 30; i++) {
-      await sleep(1000);
-      try {
-        const t = await chrome.tabs.get(tabId);
-        if (!t || t.status === "complete") break;
-      } catch (e) { break; }
-    }
-    await sleep(3000);   // 等表格首屏渲染
-
-    for (let si = 0; si < cfg.steps.length; si++) {
-      const texts = cfg.steps[si];
-      let clicked = false;
-      // 第一步必须点到（切维度/主按钮）；后续（弹窗确认）点不到就跳过
-      for (let attempt = 0; attempt < 3; attempt++) {
-        clicked = await clickByTextIn(tabId, texts);
-        if (clicked) break;
-        await sleep(1500);
-      }
-      if (log) log(`   第 ${si + 1} 步点「${texts[0]}」：${clicked || "没找到"}`);
-      if (!clicked) {
-        if (si === 0) {
-          const names = await scanExportButtons(tabId);
-          return {
-            error: names.length
-              ? `没找到「${texts[0]}」，页面上含「导出」的按钮有：${names.join(" / ")}`
-              : "页面上没找到「导出」类按钮",
-          };
-        }
-      }
-      await sleep(2500);
-    }
-
-    // 等下载（平台生成文件要一两分钟，每 20 秒报进度）
-    const LIMIT = 120000;
-    const got = await new Promise((resolve) => {
-      let left = Math.round(LIMIT / 1000);
-      const tick = setInterval(() => {
-        left -= 20;
-        if (left > 0 && log) log(`   还在等「${cfg.label}」导出文件…（剩 ${left} 秒）`);
-      }, 20000);
-      const timer = setTimeout(() => {
-        clearInterval(tick); EXPORT_WAIT = null; resolve(null);
-      }, LIMIT);
-      EXPORT_WAIT = (v) => { clearInterval(tick); clearTimeout(timer); resolve(v); };
-    });
-    if (!got) return { error: `没等到「${cfg.label}」的导出文件` };
-    return { ok: true, ...got };
-  } finally {
-    if (tabId) { try { await chrome.tabs.remove(tabId); } catch (e) { /* 忽略 */ } }
-  }
+  // 统一走「拦截式导出」：页面想下载时我们拦下来，浏览器不发起下载，
+  // 所以**永远不会弹「另存为」**。
+  //
+  // 原来的实现是真的让浏览器下载、再用 chrome.downloads 去接，
+  // 一旦浏览器设置了「下载前询问保存位置」，就会弹框卡住自动化
+  // （广告、联盟、SKU 都会遇到）。这里直接改成拦截式，彻底断掉这条路。
+  return exportViaApi(kind, host, log);
 }
 
 /** 商品SKU表：走通用导出（保留原函数名，调用处不用改）。 */
