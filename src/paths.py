@@ -275,6 +275,63 @@ def store_meta_file(shop_id: str) -> Path:
     return store_root(shop_id) / "meta.json"
 
 
+def _bundle_dir() -> Path:
+    """随包携带的「默认配置 / 默认数据」目录。
+
+    打包后放在 `_internal/默认配置`、`_internal/默认数据`；
+    源码运行时退回项目根的 `配置`、`数据`，方便调试。
+    """
+    root = app_root()
+    for cand in (root / "_internal", root):
+        if (cand / "默认配置").is_dir() or (cand / "默认数据").is_dir():
+            return cand
+    return root
+
+
+def restore_defaults() -> list[str]:
+    """把「缺了的」默认配置 / 成本表补回来。
+
+    为什么需要：用户升级、清理目录、或误删时，配置（各国佣金、费率、
+    计算公式）和商品成本表会一起没了，程序还照跑，算出来的净利全是错的
+    ——比直接报错更危险。所以在每次启动时做一次自愈：
+      · `配置/*.json`                 ← `_internal/默认配置/*.json`
+      · `数据/costs/master.csv`       ← `_internal/默认数据/costs/master.csv`
+    只补「不存在」的，已存在的一律不动（用户改过的费率/成本不能被覆盖）。
+    """
+    fixed: list[str] = []
+    bundle = _bundle_dir()
+
+    cfg_src = bundle / "默认配置"
+    if cfg_src.is_dir():
+        CONFIG.mkdir(parents=True, exist_ok=True)
+        for f in cfg_src.iterdir():
+            if not f.is_file():
+                continue
+            dst = CONFIG / f.name
+            if dst.exists():
+                continue
+            try:
+                shutil.copy2(f, dst)
+                fixed.append(f"配置/{f.name}")
+            except OSError:
+                pass
+
+    data_src = bundle / "默认数据"
+    if data_src.is_dir():
+        for rel in ("costs/master.csv",):
+            src = data_src / rel
+            dst = DATA / rel
+            if not src.is_file() or dst.exists():
+                continue
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                fixed.append(f"数据/{rel}")
+            except OSError:
+                pass
+    return fixed
+
+
 def ensure_dirs() -> None:
     """创建所有需要的目录。打包后首次运行必须调用一次。
 
@@ -289,6 +346,12 @@ def ensure_dirs() -> None:
             # 只读目录（比如装在 Program Files 又没权限）不该让整个程序崩掉，
             # 后续写入失败时会给出更具体的错误
             pass
+    # 配置/成本表缺了就补回来（升级或误删后不影响算钱）
+    try:
+        restore_defaults()
+    except Exception:  # noqa: BLE001
+        pass
+
     for sid in list(_load_store_names()):
         try:
             store_root(sid).mkdir(parents=True, exist_ok=True)

@@ -130,6 +130,19 @@ def copy_app_files(dest: Path, source: Path, log=print) -> None:
             shutil.copy2(src, dst)
         log(f"  {name}")
 
+    # 成本表 / 映射表随包带一份：全新安装时如果没有就补上；
+    # 已有的话绝不动（用户可能已经导入了自己的成本）。
+    for rel in ("数据/costs/master.csv", "数据/mapping/master.csv"):
+        src = source / rel
+        dst = dest / rel
+        if src.is_file() and not dst.exists():
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                log(f"  {rel}（首次安装补充）")
+            except OSError:
+                pass
+
 
 def ensure_layout(dest: Path) -> None:
     """建好所有数据目录，并放一份说明文件。"""
@@ -257,7 +270,7 @@ def write_uninstall_entry(dest: Path) -> None:
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
             winreg.SetValueEx(k, "DisplayName", 0, winreg.REG_SZ, APP_NAME)
-            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.21.43")
+            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.21.44")
             winreg.SetValueEx(k, "Publisher", 0, winreg.REG_SZ, "净利助手")
             winreg.SetValueEx(k, "InstallLocation", 0, winreg.REG_SZ, str(dest))
             winreg.SetValueEx(k, "DisplayIcon", 0, winreg.REG_SZ, str(exe))

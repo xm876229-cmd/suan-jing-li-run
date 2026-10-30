@@ -241,6 +241,25 @@ def build_app() -> Path:
         if src.exists():
             shutil.copy2(src, out / name)
 
+    # 随包带一份「默认配置 / 默认成本」：用户升级或误删后，
+    # 程序启动会自动从这里补回（只补缺失的，不覆盖用户改过的）。
+    try:
+        cfg_src = _real.get("config") or (ROOT / "配置")
+        if cfg_src.is_dir():
+            dst = out / "_internal" / "默认配置"
+            if dst.exists():
+                shutil.rmtree(dst, ignore_errors=True)
+            shutil.copytree(cfg_src, dst, dirs_exist_ok=True)
+            print(f"[OK] 默认配置随包：{len(list(dst.iterdir()))} 个文件")
+        costs = _paths.DATA / "costs" / "master.csv"
+        if costs.is_file():
+            dst2 = out / "_internal" / "默认数据" / "costs" / "master.csv"
+            dst2.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(costs, dst2)
+            print(f"[OK] 默认成本表随包：{costs.stat().st_size / 1024:.0f} KB")
+    except Exception as e:  # noqa: BLE001
+        print(f"[!] 默认配置/成本随包失败：{e}")
+
     # 成本主表 / 映射主表也带进发布包：首次安装开箱就有最新成本。
     # 但数据根现在是程序目录，这两份在发布目录里就是用户的数据——
     # 已经存在就绝不能覆盖，否则他在程序里导的新成本会被开发机的旧版冲掉。
