@@ -18,7 +18,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -127,7 +129,7 @@ LOGS = DATA / "logs"
 #   data/stores/<shop_id>/meta.json 店名、国家、最后活动时间
 #   data/stores/_unknown/<时间戳>/   认不出店铺时的落点（不混进任何已知店）
 STORES_ROOT = DATA / "stores"
-UNKNOWN_ROOT = STORES_ROOT / "_unknown"
+UNKNOWN_ROOT = STORES_ROOT / "未识别店铺"
 
 # 店里 inbox 下按数据类型分子目录：文件多起来才不乱
 KIND_DIRS = ("orders", "ads", "affiliate", "mapping")
@@ -147,21 +149,94 @@ RATES_FILE = CONFIG / "rates.json"
 STORES_FILE = CONFIG / "stores.json"
 
 
+def _safe_folder(name: str, fallback: str) -> str:
+    """把名字整理成能当文件夹名的。
+
+    文件系统不允许 \\ / : * ? " < > | 这些字符，中文没问题。
+    """
+    s = re.sub(r'[\\/:*?"<>|]', "_", (name or "").strip()).strip(" .")
+    return s or fallback
+
+
+_STORE_NAMES: dict[str, str] = {}
+
+
+def _load_store_names() -> dict[str, str]:
+    """店 id → 店名。
+
+    目录用**店名**而不是一串数字：使用者打开文件夹就能看懂是哪家店。
+    店名可以在界面上改，所以同时以 meta.json 里的 shop_id 为准做一次核对——
+    改了名也不会认错家（旧目录靠 meta.json 找回）。
+    """
+    global _STORE_NAMES
+    if _STORE_NAMES:
+        return _STORE_NAMES
+    try:
+        if STORES_FILE.is_file():
+            data = json.loads(STORES_FILE.read_text(encoding="utf-8"))
+            for s in (data.get("stores") or []):
+                sid = str(s.get("id") or s.get("shop_id") or "")
+                if sid:
+                    _STORE_NAMES[sid] = str(s.get("name") or sid)
+    except Exception:  # noqa: BLE001
+        pass
+    return _STORE_NAMES
+
+
+def store_root(shop_id: str) -> Path:
+    """某家店的根目录（里面有 inbox 订单表 等分类目录）。
+
+    优先按 meta.json 里的 shop_id 找已有目录——目录用店名命名，
+    而店名会被改；meta 里的 id 才是稳定身份，改名也不怕认错家。
+    """
+    sid = (shop_id or "").strip()
+    if not sid:
+        return UNKNOWN_ROOT
+    try:
+        if STORES_ROOT.is_dir():
+            for d in STORES_ROOT.iterdir():
+                if not d.is_dir():
+                    continue
+                meta = d / "meta.json"
+                if not meta.is_file():
+                    continue
+                try:
+                    m = json.loads(meta.read_text(encoding="utf-8"))
+                except Exception:  # noqa: BLE001
+                    continue
+                if str(m.get("shop_id") or "") == sid:
+                    return d
+    except OSError:
+        pass
+    name = _load_store_names().get(sid, sid)
+    return STORES_ROOT / _safe_folder(name, "未识别店铺")
+
+
 def store_dir(shop_id: str) -> Path:
-    """某家店的数据目录。shop_id 为空时退回旧的公共目录。"""
+    """某家店的数据目录（inbox）。shop_id 为空时退回公共目录。"""
     sid = (shop_id or "").strip()
     if not sid:
         return INBOX
-    safe = "".join(c for c in sid if c.isalnum() or c in "-_")
-    return STORES_ROOT / (safe or "unknown") / "inbox"
+    return store_root(sid) / "inbox"
+
+
+# 分类子目录用中文：使用者打开文件夹一眼就知道哪张表是什么
+KIND_DIR_CN = {
+    "orders": "订单表",
+    "ads": "广告表",
+    "affiliate": "联盟佣金表",
+    "mapping": "商品映射",
+}
 
 
 def kind_dirname(table_kind: str) -> str:
-    """把「表头认出来的类型」换算成目录名（order → orders）。"""
+    """把「表头认出来的类型」换算成目录名（order → 订单表）。"""
     k = (table_kind or "").strip().lower()
     if k in KIND_BY_TABLE:
-        return KIND_BY_TABLE[k]
-    return k if k in KIND_DIRS else "orders"
+        k = KIND_BY_TABLE[k]
+    else:
+        k = k if k in KIND_DIRS else "orders"
+    return KIND_DIR_CN.get(k, k)
 
 
 def store_kind_dir(shop_id: str, kind: str) -> Path:
@@ -174,30 +249,38 @@ def store_kind_dir(shop_id: str, kind: str) -> Path:
 
 
 def store_reports_dir(shop_id: str) -> Path:
-    """某家店的报表目录。"""
+    """某家店的报表目录：报表根下按店名分。
+
+    不放在店数据目录里——报表是给人看的结果，数据是给程序用的原料，
+    混在一起的话「数据」文件夹里就会塞满 xlsx。
+    """
     sid = (shop_id or "").strip()
     if not sid:
         return OUTPUT
-    safe = "".join(c for c in sid if c.isalnum() or c in "-_")
-    return STORES_ROOT / (safe or "unknown") / "reports"
+    name = _load_store_names().get(sid, sid)
+    return OUTPUT / _safe_folder(name, "未识别店铺")
 
 
 def unknown_dir(stamp: str = "") -> Path:
-    """认不出店铺时的落点：data/stores/_unknown/<时间戳>/。
+    """认不出店铺时的落点：数据/stores/未识别店铺/<时间戳>/。
 
     单独隔出来是有原因的：以前识别失败会静默落公共目录，
     多店铺一起跑时数据会混在一起，谁也说不清哪份数据属于哪家店。
     """
     s = (stamp or "").strip() or datetime.now().strftime("%Y%m%d-%H%M%S")
-    return UNKNOWN_ROOT / s
+    return store_root("") / s
 
 
 def store_meta_file(shop_id: str) -> Path:
-    return store_dir(shop_id).parent / "meta.json"
+    return store_root(shop_id) / "meta.json"
 
 
 def ensure_dirs() -> None:
-    """创建所有需要的目录。打包后首次运行必须调用一次。"""
+    """创建所有需要的目录。打包后首次运行必须调用一次。
+
+    每家店的目录（含分类子目录）也一并建出来——使用者把整个文件夹
+    删了也不怕，下次启动会重新建好。
+    """
     for d in (DATA, CAPTURE, EXPORTS, INBOX, COSTS, MAPPING, LOGS, OUTPUT,
               STORES_ROOT, UNKNOWN_ROOT):
         try:
@@ -205,6 +288,15 @@ def ensure_dirs() -> None:
         except OSError:
             # 只读目录（比如装在 Program Files 又没权限）不该让整个程序崩掉，
             # 后续写入失败时会给出更具体的错误
+            pass
+    for sid in list(_load_store_names()):
+        try:
+            store_root(sid).mkdir(parents=True, exist_ok=True)
+            store_dir(sid).mkdir(parents=True, exist_ok=True)
+            for cn in KIND_DIR_CN.values():
+                (store_dir(sid) / cn).mkdir(parents=True, exist_ok=True)
+            (store_root(sid) / "快照").mkdir(parents=True, exist_ok=True)
+        except OSError:
             pass
 
 

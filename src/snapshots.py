@@ -58,8 +58,57 @@ def root(shop_id: str) -> Path:
     sid = (shop_id or "").strip()
     if not sid:
         return paths.EXPORTS / "_snapshots"
-    safe = "".join(c for c in sid if c.isalnum() or c in "-_") or "unknown"
-    return paths.STORES_ROOT / safe / "snapshots"
+    # 跟着店目录走（店目录用店名命名），快照子目录也用中文
+    return paths.store_root(sid) / "快照"
+
+
+def restore_inbox(shop_id: str) -> int:
+    """inbox 里的表被删了，从最新一份快照补回来。
+
+    快照是程序自己维护的副本，文件夹里那些表只是「给人看的」。
+    使用者随手删了不该丢数据——下次核算前自动补回。
+    返回补回的文件数。
+    """
+    sid = (shop_id or "").strip()
+    if not sid:
+        return 0
+    base = paths.store_root(sid)
+    snap_root = base / "快照"
+    if not snap_root.is_dir():
+        return 0
+    snaps = sorted((p for p in snap_root.iterdir() if p.is_dir()), reverse=True)
+    if not snaps:
+        return 0
+    snap = snaps[0]
+    inbox = paths.store_dir(sid)
+
+    # manifest 里有每个文件属于哪一类，决定补到哪个子目录
+    kinds: dict[str, str] = {}
+    mf = snap / "manifest.json"
+    if mf.is_file():
+        try:
+            data = json.loads(mf.read_text(encoding="utf-8"))
+            for f in (data.get("files") or []):
+                kinds[str(f.get("name") or "")] = str(f.get("kind") or "orders")
+        except Exception:  # noqa: BLE001
+            pass
+
+    n = 0
+    for f in snap.iterdir():
+        if not f.is_file() or f.name == "manifest.json":
+            continue
+        kind = kinds.get(f.name, "orders")
+        sub = paths.KIND_DIR_CN.get(kind, "订单表")
+        d = inbox / sub
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            dst = d / f.name
+            if not dst.exists():
+                shutil.copy2(f, dst)
+                n += 1
+        except OSError:
+            continue
+    return n
 
 
 def _stat_sig(f: Path) -> str:

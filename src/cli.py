@@ -313,12 +313,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"成本表：{costs_path.name}（{costs_note}）")
     else:
         print(f"⚠ {costs_note}，成本将按 0 计，净利会偏高")
-
     map_path, map_note = pick_mapping(args.mapping)
     if map_path:
         print(f"映射表：{map_path.name}（{map_note}）")
     else:
         print(f"⚠ {map_note}")
+
+    # 文件夹里的数据源被删了也不怕：程序自己留着快照，缺了就补回来。
+    # （快照是权威副本，文件夹里那些只是给人看的）
+    if _sid and not getattr(args, "snapshot", "") and not args.workbook:
+        try:
+            from src import snapshots
+            _restored = snapshots.restore_inbox(_sid)
+            if _restored:
+                print(f"已从最新快照补回 {_restored} 个数据文件")
+        except Exception:  # noqa: BLE001
+            pass
 
     # 读数据
     if args.workbook:
