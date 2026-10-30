@@ -341,13 +341,23 @@ async function learnParams(url) {
   await chrome.storage.local.set({ params });
 }
 
-async function buildUrl(host, path, extra = {}) {
+async function buildUrl(host, path, extra = {}, drop = []) {
   const { params = {} } = await chrome.storage.local.get({ params: {} });
-  // 有这个路径专属的参数就用它（页面自己发这条接口时带的那一套），
-  // 没有才退回 host 级汇总——那份是各页面混在一起的，不一定对。
-  const p = params[`full:${host}|${path}`]
-    || params[`${host}|${path}`]
-    || params[host] || {};
+  // 三档取值，从准到糊：
+  //   ① full:  页面发这条接口时的完整 query（原样复刻，最准）
+  //   ② 路径级：按接口路径单独学的那套
+  //   ③ host 级：各页面混在一起的（最糊）——此时按 drop 剔掉已知多余的键
+  const full = params[`full:${host}|${path}`];
+  const byPath = params[`${host}|${path}`];
+  let p;
+  if (full) {
+    p = full;
+  } else if (byPath) {
+    p = byPath;
+  } else {
+    p = { ...(params[host] || {}) };
+    for (const k of drop) delete p[k];
+  }
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(p)) {
     if (k.startsWith("_")) continue;
@@ -748,12 +758,45 @@ async function waitTabReady(tabId, ms = 20000) {
   return false;
 }
 
+/** 在「商品数据分析」页里切到「按 SKU」维度。
+
+ * 页面自己发那条请求时，扩展才能学到它带的完整参数（含签名）。
+ * 页面默认停在「按商品」，不发 sku/list，学不到就白搭。
+ * 只对扩展自己开的标签页做，不动用户自己开着的那个。
+ */
+async function clickSkuTab(tabId) {
+  try {
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId }, world: "MAIN",
+      func: () => {
+        const cands = Array.from(
+          document.querySelectorAll("span,div,button,a,li,label"));
+        const hit = cands.find((e) => {
+          const t = (e.textContent || "").replace(/\s+/g, "").trim();
+          if (t !== "按SKU") return false;
+          if (e.offsetParent === null) return false;      // 只点看得见的
+          const kids = e.querySelectorAll("span,div,a,button");
+          // 取最内层的那个，避免点到外层容器
+          return ![...kids].some((k) => (k.textContent || "").replace(/\s+/g, "").trim() === "按SKU");
+        });
+        if (!hit) return false;
+        hit.click();
+        return true;
+      },
+    });
+    return !!(r && r.result);
+  } catch (e) {
+    return false;
+  }
+}
+
 /** 在页面里跑一段函数，拿到 JSON。页面没开时返回 null，由调用方决定回退。
  *  preferPath：优先用「URL 含这个片段」的标签页。
  *  有些接口只有在对应页面里发才不被平台拒绝（Referer/页面上下文），
  *  比如「商品数据分析」的 SKU 列表——在别的页面发会被判成非法调用。 */
 async function runInPage(host, func, args, preferPath) {
   let tab = null;
+  let openedByUs = false;
   if (preferPath) {
     // 匹配时只看主路径（? 之前），query 各页面顺序不同
     const kw = preferPath.split("?")[0];
@@ -768,6 +811,7 @@ async function runInPage(host, func, args, preferPath) {
         await chrome.tabs.create({
           url: `https://${host}/${preferPath}`, active: false,
         });
+        openedByUs = true;
       } catch (e) { /* 忽略 */ }
       for (let i = 0; i < 12 && !tab; i++) {
         await sleep(2000);
@@ -791,6 +835,12 @@ async function runInPage(host, func, args, preferPath) {
   // 只是「URL 已经对了」还不够——标签刚建好时还在 loading，
   // 这时 executeScript 会报 Cannot access contents（看着像没授权，其实不是）。
   await waitTabReady(tab.id);
+  if (preferPath && openedByUs) {
+    // 让页面自己切到「按 SKU」并发一次请求，扩展借机学到这套参数，
+    // 之后我们的请求就能原样复刻
+    const clicked = await clickSkuTab(tab.id);
+    if (clicked) await sleep(4000);
+  }
   try {
     // world: "MAIN" 是关键，别去掉。
     // 扩展默认跑在隔离环境（ISOLATED），页面的 webmssdk 看不见、也不会给我们的
@@ -830,7 +880,12 @@ async function skuPageHint() {
 }
 
 async function pagePullSku(host, start, endExclusive, size, maxPages) {
-  const url = await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list");
+  // 这三个键是广告页那套参数带来的，商品分析页的请求里没有。
+  // 带着它们发，平台判非法调用（98001021）——抓包对比出来的。
+  const url = await buildUrl(
+    host, "/api/v2/insights/seller/ttp/product/sku/list", {},
+    ["aadvid", "shop_region", "user_language"],
+  );
 
   // reporting_level=2 就是「商品数据分析 → 按 SKU」那个页面。
   // 在这个页面里发请求，平台的判定和页面自己发的一致（否则会 98001021）。
