@@ -2405,10 +2405,23 @@ async function onDownloadComplete(delta) {
 // 免得用户被一个对话框拦住（文件我们已经从接口取回来了）。
 let SUPPRESS_DL = false;
 
+// 导出流程中浏览器如果真发起了下载：
+//   ① 把地址记下来（这就是我们要的文件地址）
+//   ② 立刻取消（避免「另存为」挡住流程）
+let DL_SEEN = [];
+
 if (chrome.downloads && chrome.downloads.onCreated) {
   chrome.downloads.onCreated.addListener((item) => {
     if (!SUPPRESS_DL || !item || !item.id) return;
+    try {
+      DL_SEEN.push({
+        url: item.url || item.finalUrl || "",
+        name: item.filename || "",
+        at: Date.now(),
+      });
+    } catch (e) { /* 忽略 */ }
     try { chrome.downloads.cancel(item.id); } catch (e) { /* 忽略 */ }
+    try { chrome.downloads.erase({ id: item.id }); } catch (e) { /* 忽略 */ }
   });
 }
 
@@ -2740,19 +2753,40 @@ async function installDownloadGuard(tabId) {
           } catch (e) { /* 忽略 */ }
         };
 
-        // ① 拦 <a download> 的点击
+        // ① 拦 <a> 点击：凡是「像文件」的链接都拦下来。
+        //    不能只看 download 属性——平台的下载链接经常是
+        //    href 指向一个返回附件头（Content-Disposition）的接口，
+        //    没有 download 属性，点了照样弹「另存为」。
         const origClick = HTMLAnchorElement.prototype.click;
         HTMLAnchorElement.prototype.click = function () {
           try {
             const href = this.href || "";
             const name = this.getAttribute("download") || "";
             const isFile = this.hasAttribute("download")
+              || href.startsWith("blob:")
               || /\.(xlsx|xls|csv|zip)(\?|$)/i.test(href)
-              || href.startsWith("blob:");
+              || /\/(export|download|export_task|download_task)(\/|\?|$)/i.test(href);
             if (isFile) { record(href, name); return; }   // 不真的点，浏览器就不会下载
           } catch (e) { /* 忽略 */ }
           return origClick.apply(this, arguments);
         };
+
+        // ①-b 拦 window.open（有些导出是开新窗口触发下载）
+        const origOpen = window.open;
+        window.open = function (u) {
+          try {
+            const href = String(u || "");
+            if (/\.(xlsx|xls|csv|zip)(\?|$)/i.test(href)
+              || /\/(export|download|export_task|download_task)(\/|\?|$)/i.test(href)) {
+              record(href, "");
+              return null;
+            }
+          } catch (e) { /* 忽略 */ }
+          return origOpen.apply(this, arguments);
+        };
+
+        // ①-c 测试/诊断用：暴露一下当前记到了什么
+        window.__jlDlPeek = () => (window.__jlDl || []).map((x) => x.href || ("blob:" + x.key));
 
         // ② 拦 URL.createObjectURL：把 Blob 留下来
         const origCreate = URL.createObjectURL;
@@ -2890,6 +2924,7 @@ async function exportViaApi(kind, host, log) {
 
   chrome.debugger.onEvent.addListener(onEvent);
   SUPPRESS_DL = true;      // 这个流程里不需要浏览器下载
+  DL_SEEN = [];            // 清空上一轮记下的地址
   try {
     const nt = await chrome.tabs.create({
       url: `https://${realHost}/${cfg.page}`, active: false,
@@ -2935,6 +2970,16 @@ async function exportViaApi(kind, host, log) {
       await sleep(2500);
     }
 
+    // 诊断：拦截器到底记到了什么（记不到时这一行能定位问题）
+    try {
+      const [pr] = await chrome.scripting.executeScript({
+        target: { tabId }, world: "MAIN",
+        func: () => (window.__jlDlPeek ? window.__jlDlPeek() : []),
+      });
+      const seen = (pr && pr.result) || [];
+      if (log) log(`   拦截器记录 ${seen.length} 条${seen.length ? "：" + seen.slice(0, 2).join(" | ").slice(0, 160) : ""}`);
+    } catch (e) { /* 忽略 */ }
+
     // 先看拦截器有没有截到文件（这条路不弹框、最快）
     for (let i = 0; i < 6; i++) {
       const h = await harvestDownload(tabId);
@@ -2946,6 +2991,35 @@ async function exportViaApi(kind, host, log) {
         return { ok: true, name: nm, path: saved.path, bytes: h.buf.byteLength };
       }
       await sleep(3000);
+    }
+
+    // 再试「浏览器真发起了下载」时记下的地址：
+    // 我们把它取消掉了，不会弹「另存为」，但地址已经拿到，自己取回来即可。
+    if (DL_SEEN.length) {
+      if (log) log(`   捕获到 ${DL_SEEN.length} 个下载地址，自己取回来…`);
+      for (const d of DL_SEEN.slice().reverse()) {
+        if (!/^https?:/i.test(d.url || "")) continue;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          try {
+            const resp = await fetch(d.url, { credentials: "include" });
+            if (resp.ok) {
+              const ct = resp.headers.get("content-type") || "";
+              if (!ct.includes("json")) {
+                const buf = await resp.arrayBuffer();
+                if (buf && buf.byteLength > 1024) {
+                  const nm = (d.name || "").split(/[\\/]/).pop()
+                    || `${kind}_${Date.now()}.xlsx`;
+                  const saved = await uploadToBridge(nm, buf, cfg.dir || "");
+                  if (log) log(`   已取回导出文件：${saved.path}（${Math.round(buf.byteLength / 1024)} KB）`);
+                  return { ok: true, name: nm, path: saved.path, bytes: buf.byteLength };
+                }
+              }
+            }
+          } catch (e) { /* 还没生成好 */ }
+          await sleep(4000);
+        }
+      }
+      if (log) log("   下载地址拿到了但取不到内容");
     }
 
     // 拦截器没截到 → 退回「从接口响应里找文件地址」
