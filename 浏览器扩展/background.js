@@ -1332,10 +1332,11 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   if (!done.length) {
     try {
       log("①-a 程序自动导出商品SKU表（不弹保存框）…");
-      let got = await exportViaApi("sku", host, log);
+      const got = await exportViaApi("sku", host, log);
       if (!got || !got.path) {
-        log(`   接口级导出没成：${(got && got.error) || "未知原因"}；改试浏览器下载…`);
-        got = await exportSkuByButton(host, await skuPageHint(), log);
+        // 不再退回「浏览器下载」那条：会弹「另存为」把自动化卡住。
+        // 直接交给下面的 ①-b 深度抓取（虽然只有第一页，但不会卡住）。
+        log(`   自动导出没成：${(got && got.error) || "未知原因"}；改用页面响应抓取`);
       }
       if (got && got.path) {
         log(`   已接住导出表：${got.path}（${Math.round((got.bytes || 0) / 1024)} KB）`);
@@ -2540,23 +2541,31 @@ function extractSkuList(respObj) {
 const EXPORT_FLOWS = {
   orders: {
     label: "订单表",
+    dir: "",                 // 按表头自动归类 → 店铺/inbox/订单表
+
     // 订单后台的导出分两步：先点「导出」，弹窗里再点一次「导出」
     page: "order",
     steps: [["导出"], ["导出", "确定", "确认"]],
   },
   ads: {
     label: "广告表",
+    dir: "ads",              // → 店铺/inbox/广告表
+
     page: "ads-creation/dashboard",
     steps: [["导出数据", "导出"], ["导出", "确定", "确认"]],
   },
   affiliate: {
     label: "联盟佣金表",
+    dir: "affiliate",        // → 店铺/inbox/联盟佣金表
+
     host: "affiliate.tiktok.com",
     page: "insights/transaction-analysis",
     steps: [["导出数据", "导出"], ["导出", "确定", "确认", "下载"]],
   },
   sku: {
     label: "商品SKU表",
+    dir: "mapping",          // → 数据/mapping（核算前自动并进主表）
+
     page: "compass/product-analysis",
     steps: [["按SKU", "按 SKU"], ["导出数据", "导出"], ["导出", "确定", "确认"]],
   },
@@ -2698,6 +2707,136 @@ async function exportSkuByButton(host, preferPath, log) {
  * 做法：挂调试器 → 点按钮 → 读导出接口的响应 → 拿到文件地址 →
  *      后台带 cookie 把文件取回来 → 直接回传落盘。
  */
+/** 装一个「下载拦截器」：页面想下载文件时，把地址/内容拿下来，但不真的下载。
+ *
+ * 为什么必须要它：
+ *   点「导出数据」后页面会用 <a download> 触发浏览器下载，
+ *   而浏览器设置了「下载前询问保存位置」，就会弹「另存为」——
+ *   自动化就卡在这个对话框上（用户必须手点保存）。
+ *
+ *   我们在页面主世界里把 a.click() 拦下来，既拿到文件地址，
+ *   又不让浏览器发起下载，所以**根本不会弹框**。
+ *   如果是 blob: 地址，就把 Blob 本身留在页面里，稍后由我们来取内容。
+ */
+async function installDownloadGuard(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId }, world: "MAIN",
+      func: () => {
+        if (window.__jlGuard) return;
+        window.__jlGuard = true;
+        window.__jlDl = [];
+        window.__jlBlobs = {};
+
+        const record = (href, name, blob) => {
+          try {
+            if (blob) {
+              const key = "b" + Object.keys(window.__jlBlobs).length;
+              window.__jlBlobs[key] = blob;
+              window.__jlDl.push({ key, name: name || "", blob: true });
+            } else if (href) {
+              window.__jlDl.push({ href: String(href), name: name || "", blob: false });
+            }
+          } catch (e) { /* 忽略 */ }
+        };
+
+        // ① 拦 <a download> 的点击
+        const origClick = HTMLAnchorElement.prototype.click;
+        HTMLAnchorElement.prototype.click = function () {
+          try {
+            const href = this.href || "";
+            const name = this.getAttribute("download") || "";
+            const isFile = this.hasAttribute("download")
+              || /\.(xlsx|xls|csv|zip)(\?|$)/i.test(href)
+              || href.startsWith("blob:");
+            if (isFile) { record(href, name); return; }   // 不真的点，浏览器就不会下载
+          } catch (e) { /* 忽略 */ }
+          return origClick.apply(this, arguments);
+        };
+
+        // ② 拦 URL.createObjectURL：把 Blob 留下来
+        const origCreate = URL.createObjectURL;
+        URL.createObjectURL = function (obj) {
+          const u = origCreate.apply(this, arguments);
+          try {
+            if (obj && typeof obj.size === "number") {
+              window.__jlBlobs[u] = obj;
+            }
+          } catch (e) { /* 忽略 */ }
+          return u;
+        };
+      },
+    });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** 取回拦截器记下的文件（blob 或 http 地址），返回 {name, buf} 或 null。 */
+async function harvestDownload(tabId) {
+  let list = [];
+  try {
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId }, world: "MAIN",
+      func: () => (window.__jlDl || []).slice(-6),
+    });
+    list = (r && r.result) || [];
+  } catch (e) { return null; }
+  if (!list.length) return null;
+
+  // 优先 blob（内容已经在页面里，最稳）
+  for (const it of list.slice().reverse()) {
+    if (!it.blob) continue;
+    try {
+      const [r] = await chrome.scripting.executeScript({
+        target: { tabId }, world: "MAIN",
+        func: async (key) => {
+          const b = (window.__jlBlobs || {})[key];
+          if (!b) return null;
+          const buf = await b.arrayBuffer();
+          const bytes = new Uint8Array(buf);
+          let bin = "";
+          const CH = 0x8000;
+          for (let i = 0; i < bytes.length; i += CH) {
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+          }
+          return { b64: btoa(bin), size: bytes.length };
+        },
+        args: [it.key],
+      });
+      const got = r && r.result;
+      if (got && got.size > 1024) {
+        const bin = atob(got.b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return { name: it.name || "", buf: bytes.buffer };
+      }
+    } catch (e) { /* 换下一个 */ }
+  }
+
+  // 再试 http 地址
+  for (const it of list.slice().reverse()) {
+    if (it.blob || !it.href || !/^https?:/i.test(it.href)) continue;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        const resp = await fetch(it.href, { credentials: "include" });
+        if (resp.ok) {
+          const ct = resp.headers.get("content-type") || "";
+          if (!ct.includes("json")) {
+            const buf = await resp.arrayBuffer();
+            if (buf && buf.byteLength > 1024) {
+              return { name: it.name || "", buf };
+            }
+          }
+        }
+      } catch (e) { /* 还在生成 */ }
+      await sleep(4000);
+    }
+  }
+  return null;
+}
+
 async function exportViaApi(kind, host, log) {
   const cfg = EXPORT_FLOWS[kind];
   if (!cfg) return { error: `没有配置「${kind}」的导出流程` };
@@ -2773,6 +2912,8 @@ async function exportViaApi(kind, host, log) {
       } catch (e) { break; }
     }
     await sleep(3000);
+    // 装拦截器：页面要下载时我们拦住，浏览器就不会弹「另存为」
+    await installDownloadGuard(tabId);
 
     for (let si = 0; si < cfg.steps.length; si++) {
       const texts = cfg.steps[si];
@@ -2794,7 +2935,21 @@ async function exportViaApi(kind, host, log) {
       await sleep(2500);
     }
 
-    // 等文件地址出现（最多 60 秒）
+    // 先看拦截器有没有截到文件（这条路不弹框、最快）
+    for (let i = 0; i < 6; i++) {
+      const h = await harvestDownload(tabId);
+      if (h && h.buf && h.buf.byteLength > 1024) {
+        const nm = h.name
+          || `${kind}_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.xlsx`;
+        const saved = await uploadToBridge(nm, h.buf, cfg.dir || "");
+        if (log) log(`   已拦截到导出文件：${saved.path}（${Math.round(h.buf.byteLength / 1024)} KB）`);
+        return { ok: true, name: nm, path: saved.path, bytes: h.buf.byteLength };
+      }
+      await sleep(3000);
+    }
+
+    // 拦截器没截到 → 退回「从接口响应里找文件地址」
+    if (log) log("   拦截器没截到文件，改从接口响应里找地址…");
     for (let i = 0; i < 30 && !fileUrls.length; i++) await sleep(2000);
     if (!fileUrls.length) {
       return { error: "没在导出接口的响应里找到文件地址" };
@@ -2813,7 +2968,7 @@ async function exportViaApi(kind, host, log) {
               if (buf && buf.byteLength > 1024) {
                 const name = decodeURIComponent(
                   (u.split("?")[0].split("/").pop() || `${kind}.xlsx`));
-                const saved = await uploadToBridge(name, buf, kind === "sku" ? "mapping" : "");
+                const saved = await uploadToBridge(name, buf, cfg.dir || "");
                 return { ok: true, name, path: saved.path, bytes: buf.byteLength };
               }
             }
