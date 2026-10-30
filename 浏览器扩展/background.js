@@ -1332,8 +1332,11 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   if (!done.length) {
     try {
       log("①-a 程序自动导出商品SKU表（不弹保存框）…");
+      // 页面的 timeRange 结束日期是**开区间**：
+      // 传 10-21 只导到 10-20（实测表头就是 10-01 ~ 10-20，少一天）。
+      // 所以这里传「区间的次日」，让它正好覆盖到末日。
       const got = await exportViaApi("sku", host, log, {
-        range: { start: startDate, end: shiftDate(endDateExclusive, -1) },
+        range: { start: startDate, end: endDateExclusive },
       });
       if (!got || !got.path) {
         // 不再退回「浏览器下载」那条：会弹「另存为」把自动化卡住。
