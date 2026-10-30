@@ -328,12 +328,26 @@ async function learnParams(url) {
   if (Object.keys(fresh).length === 0) return;
   const { params = {} } = await chrome.storage.local.get({ params: {} });
   params[host] = { ...(params[host] || {}), ...fresh, _at: Date.now() };
+  // 同一个站，不同页面带的参数集合不一样（商品分析页 18 个、广告页 20 个）。
+  // 混在一起发出去，平台会判成非法调用（98001021）。
+  // 所以再按「路径」各存一份，取数时用对应路径的那套。
+  const pathKey = `${host}|${u.pathname}`;
+  params[pathKey] = { ...(params[pathKey] || {}), ...fresh, _at: Date.now() };
+  // 再存一份「完整 query」：页面发这条接口时到底带了哪些参数，一个不漏。
+  // 有些参数不在学习清单里，但缺了平台照样判非法调用，原样复刻最稳。
+  const full = {};
+  for (const [k, v] of u.searchParams.entries()) full[k] = v;
+  params[`full:${pathKey}`] = { ...full, _at: Date.now() };
   await chrome.storage.local.set({ params });
 }
 
 async function buildUrl(host, path, extra = {}) {
   const { params = {} } = await chrome.storage.local.get({ params: {} });
-  const p = params[host] || {};
+  // 有这个路径专属的参数就用它（页面自己发这条接口时带的那一套），
+  // 没有才退回 host 级汇总——那份是各页面混在一起的，不一定对。
+  const p = params[`full:${host}|${path}`]
+    || params[`${host}|${path}`]
+    || params[host] || {};
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(p)) {
     if (k.startsWith("_")) continue;
@@ -344,7 +358,10 @@ async function buildUrl(host, path, extra = {}) {
 }
 
 function pickHost(params, hint) {
-  return Object.keys(params).find((h) => h.includes(hint));
+  // 只看 host 级键（不含 "|" 的），路径级的键带 "|" 后缀
+  return Object.keys(params)
+    .filter((k) => !k.includes("|"))
+    .find((h) => h.includes(hint));
 }
 
 const PAGE_HINTS = {
