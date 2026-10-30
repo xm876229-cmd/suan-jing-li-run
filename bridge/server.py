@@ -733,7 +733,11 @@ class Handler(BaseHTTPRequestHandler):
             table_kind = ""
 
         warning = ""
-        if kind == "mapping" or table_kind == "mapping":
+        if kind == "capture":
+            # 诊断类文件（导出流程记录）不进 inbox、不参与核算，
+            # 单独放 数据/capture/，开发侧直接看
+            target_dir = paths.CAPTURE
+        elif kind == "mapping" or table_kind == "mapping":
             # 映射表（商品管理 SKU、链接资料）走全局累积主表：
             # 链接改绑后老 SKU 也要能查到归属，所以不能只留最新一份。
             target_dir = MAPPING_DIR

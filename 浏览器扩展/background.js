@@ -2874,24 +2874,57 @@ async function deepCapture(seconds, log) {
     }
   }
 
-  const onEvent = (source, method, params) => {
-    if (!ids.has(source.tabId) || method !== "Network.requestWillBeSent") return;
-    const req = params.request || {};
-    const url = req.url || "";
-    // GET/OPTIONS 是静态资源和预检，记下来只会淹没真正有用的信息
-    if (req.method === "GET" || req.method === "OPTIONS") return;
-    recordCapture({
-      kind: "debugger",
-      url,
-      method: req.method,
-      status: null,
-      contentType: "",
-      ms: 0,
-      reqBody: (req.postData || "").slice(0, 4000) || null,
-      respSample: null,
-      page: "",
-      at: new Date().toISOString(),
-    });
+  // 抓「导出流程」时，只有请求体不够——任务 ID、文件地址都在**响应**里。
+  // 所以这里把响应用 Network.getResponseBody 读出来，一起落盘。
+  const flow = [];                 // 完整流程（请求 + 响应），给开发侧分析用
+  const flowOf = new Map();        // requestId → flow 条目
+  const KEEP = /export|download|task|insight|stat|order\/list|sku\/list|transaction/i;
+
+  const onEvent = async (source, method, params) => {
+    if (!ids.has(source.tabId)) return;
+    try {
+      if (method === "Network.requestWillBeSent") {
+        const req = params.request || {};
+        const url = req.url || "";
+        // GET/OPTIONS 是静态资源和预检，记下来只会淹没真正有用的信息
+        if (req.method === "GET" || req.method === "OPTIONS") return;
+        recordCapture({
+          kind: "debugger",
+          url,
+          method: req.method,
+          status: null,
+          contentType: "",
+          ms: 0,
+          reqBody: (req.postData || "").slice(0, 4000) || null,
+          respSample: null,
+          page: "",
+          at: new Date().toISOString(),
+        });
+        if (KEEP.test(url)) {
+          const item = {
+            at: new Date().toISOString(),
+            url,
+            method: req.method,
+            postData: (req.postData || "").slice(0, 4000),
+            headers: req.headers || {},
+          };
+          flowOf.set(params.requestId, item);
+          flow.push(item);
+        }
+        return;
+      }
+      if (method === "Network.loadingFinished") {
+        const item = flowOf.get(params.requestId);
+        if (!item || item.respBody) return;
+        try {
+          const b = await chrome.debugger.sendCommand(
+            { tabId: source.tabId }, "Network.getResponseBody",
+            { requestId: params.requestId });
+          item.respBody = ((b && b.body) || "").slice(0, 20000);
+          item.base64 = !!(b && b.base64Encoded);
+        } catch (e) { /* 有些响应取不到，忽略 */ }
+      }
+    } catch (e) { /* 单个事件出错不影响其它 */ }
   };
 
   chrome.debugger.onEvent.addListener(onEvent);
@@ -2909,6 +2942,19 @@ async function deepCapture(seconds, log) {
       try { await chrome.debugger.detach({ tabId: id }); } catch (e) { /* 已断开 */ }
     }
     log(`深度抓包结束（${reason}），已记录 ${ids.size} 个标签页的请求`);
+    // 把「请求+响应」完整流程落一份，导出自动化就是照它写的
+    try {
+      if (flow.length) {
+        const text = JSON.stringify({ at: new Date().toISOString(), flow }, null, 2);
+        const bytes = new TextEncoder().encode(text);
+        const saved = await uploadToBridge(
+          `导出流程_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}.json`,
+          bytes.buffer, "capture");
+        log(`导出流程已保存：${saved.path}（${flow.length} 条请求，含响应）`);
+      }
+    } catch (e) {
+      log(`导出流程保存失败：${(e && e.message) || e}`);
+    }
   };
 
   deepTimer = setTimeout(() => stop(`${seconds} 秒到`), seconds * 1000);
