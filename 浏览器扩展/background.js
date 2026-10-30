@@ -104,6 +104,43 @@ function flush() {
   });
 }
 
+const LAST_REQ_KEY = "lastRequestByPath";
+
+/** 记住页面最近一次发往某个接口的请求（完整 URL + body）。
+
+ * 为什么记：平台对这条接口的判定很严——请求体结构、参数、签名差一点就回
+ * 98001021。与其猜，不如**原样复刻页面自己发过的那一条**，只改必要的地方。
+ */
+const EXT_MARK = "#jl-ext";   // fragment 不会发给平台，只用来识别「这请求是扩展自己发的」
+
+async function rememberRequest(url, body) {
+  try {
+    // 扩展自己发的请求不能当作「页面那条」记下来，否则会自己覆盖自己
+    if (String(url).includes(EXT_MARK)) return;
+    const u = new URL(url);
+    const { [LAST_REQ_KEY]: all = {} } = await chrome.storage.local.get({ [LAST_REQ_KEY]: {} });
+    const key = `${u.hostname}|${u.pathname}`;
+    all[key] = { url: String(url), body: body === undefined ? null : body, at: Date.now() };
+    const keys = Object.keys(all)
+      .sort((a, b) => (all[b].at || 0) - (all[a].at || 0)).slice(0, 40);
+    const trimmed = {};
+    for (const k of keys) trimmed[k] = all[k];
+    await chrome.storage.local.set({ [LAST_REQ_KEY]: trimmed });
+  } catch (e) { /* 忽略 */ }
+}
+
+async function lastRequestFor(host, path) {
+  try {
+    const { [LAST_REQ_KEY]: all = {} } = await chrome.storage.local.get({ [LAST_REQ_KEY]: {} });
+    const hit = all[`${host}|${path}`];
+    // 只认 30 分钟内的那条：参数和登录态都可能变了
+    if (!hit || !hit.at || Date.now() - hit.at > 30 * 60 * 1000) return null;
+    return hit;
+  } catch (e) {
+    return null;
+  }
+}
+
 // ---------------- 抓包记录入口 ----------------
 
 function recordCapture(payload) {
@@ -114,6 +151,7 @@ function recordCapture(payload) {
   chrome.storage.local.set({ stats });
   if (payload.url) {
     learnParams(payload.url);
+    rememberRequest(payload.url, payload.reqBody);
     try {
       learnHeaders(new URL(payload.url).hostname, payload.reqHeaders);
     } catch (e) { /* URL 不合法就跳过 */ }
@@ -926,17 +964,38 @@ async function skuPageHint() {
 }
 
 async function pagePullSku(host, start, endExclusive, size, maxPages) {
-  // 这三个键是广告页那套参数带来的，商品分析页的请求里没有。
-  // 带着它们发，平台判非法调用（98001021）——抓包对比出来的。
-  const url = await buildUrl(
-    host, "/api/v2/insights/seller/ttp/product/sku/list", {},
-    ["aadvid", "shop_region", "user_language"],
-  );
+  const SKU_PATH = "/api/v2/insights/seller/ttp/product/sku/list";
+  // 优先**原样复刻页面自己发过的那一条**：
+  // URL 的 query 一个不漏、body 结构照抄（平台的判定严到差一点就 98001021，
+  // 与其猜，不如用页面自己那条）。页面若发的是「按商品」维度的极简 body，
+  // 那正好一次就是全量 SKU（含当期没销量的链接）——正是我们要的。
+  const last = await lastRequestFor(host, SKU_PATH);
+  let url;
+  let tpl = null;
+  if (last && last.url) {
+    url = String(last.url).split("#")[0];
+    try {
+      tpl = typeof last.body === "string" ? JSON.parse(last.body) : last.body;
+    } catch (e) { tpl = null; }
+  } else {
+    // 这三个键是广告页那套参数带来的，商品分析页的请求里没有。
+    // 带着它们发，平台判非法调用（98001021）——抓包对比出来的。
+    url = await buildUrl(
+      host, SKU_PATH, {},
+      ["aadvid", "shop_region", "user_language"],
+    );
+  }
+  // 打上扩展自己的标记，免得这条又被当成「页面那条」记回去
+  url = url + EXT_MARK;
 
   // reporting_level=2 就是「商品数据分析 → 按 SKU」那个页面。
   // 在这个页面里发请求，平台的判定和页面自己发的一致（否则会 98001021）。
-  const r = await runInPage(host, async (u, s, e, sz, mp) => {
+  const r = await runInPage(host, async (u, s, e, sz, mp, tpl) => {
     const all = [];
+    // 页面发的是极简 body（没有 list_control）时，平台一次就返回全量，
+    // 不需要翻页；硬加 list_control 反而会被拒。
+    const tplPaging = !!(tpl && tpl.request && tpl.request.list_control);
+    if (tpl && !tplPaging) mp = 1;
     // 探针：同源的一个小资源能不能取到？
     // 取不到 → 是这个页面/网络/标签页的问题（不是平台拒绝）；
     // 取得到 → 是平台对这个接口的判定问题。两种情况以前分不清。
@@ -948,17 +1007,32 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
       probe = `同源探针也失败：${(e2 && e2.name) || ""} ${(e2 && e2.message) || e2}`;
     }
     for (let page = 0; page < mp; page++) {
-      const body = {
-        request: {
-          time_descriptor: { start: s, end: e },
-          search: {},
-          filter: {},
-          list_control: {
-            rules: [{ direction: 2, field: "sku_gmv" }],
-            pagination: { size: sz, page },
+      let body;
+      if (tpl && typeof tpl === "object") {
+        // 原样复制页面那条的 body，只改必要的地方
+        body = JSON.parse(JSON.stringify(tpl));
+        const rq = body.request || (body.request = {});
+        const td = rq.time_descriptor;
+        if (td && typeof td === "object" && Object.keys(td).length) {
+          rq.time_descriptor = { start: s, end: e };
+        }
+        if (rq.list_control && rq.list_control.pagination) {
+          rq.list_control.pagination.size = sz;
+          rq.list_control.pagination.page = page;
+        }
+      } else {
+        body = {
+          request: {
+            time_descriptor: { start: s, end: e },
+            search: {},
+            filter: {},
+            list_control: {
+              rules: [{ direction: 2, field: "sku_gmv" }],
+              pagination: { size: sz, page },
+            },
           },
-        },
-      };
+        };
+      }
       let j;
       let raw = "";
       try {
@@ -988,7 +1062,7 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
       if (items.length < sz) return { items: all, pages: page + 1 };
     }
     return { items: all, pages: mp, truncated: true };
-  }, [url, start, endExclusive, size, maxPages], await skuPageHint());
+  }, [url, start, endExclusive, size, maxPages, tpl], await skuPageHint());
 
   if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
   if (r.error) throw new Error(r.error);
