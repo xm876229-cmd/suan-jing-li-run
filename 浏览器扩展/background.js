@@ -1332,7 +1332,9 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   if (!done.length) {
     try {
       log("①-a 程序自动导出商品SKU表（不弹保存框）…");
-      const got = await exportViaApi("sku", host, log);
+      const got = await exportViaApi("sku", host, log, {
+        range: { start: startDate, end: shiftDate(endDateExclusive, -1) },
+      });
       if (!got || !got.path) {
         // 不再退回「浏览器下载」那条：会弹「另存为」把自动化卡住。
         // 直接交给下面的 ①-b 深度抓取（虽然只有第一页，但不会卡住）。
@@ -2887,10 +2889,25 @@ async function harvestDownload(tabId) {
   return null;
 }
 
-async function exportViaApi(kind, host, log) {
+async function exportViaApi(kind, host, log, opts = {}) {
   const cfg = EXPORT_FLOWS[kind];
   if (!cfg) return { error: `没有配置「${kind}」的导出流程` };
   const realHost = cfg.host || host;
+
+  // 页面默认按「今天」导出，必须把区间带进地址，否则导出来的是当天数据。
+  // 商品分析页认 timeRange=开始|结束（闭区间）。
+  let pagePath = cfg.page;
+  if (kind === "sku" && opts.range && opts.range.start) {
+    let region = "MY";
+    try {
+      const st = (await skGet({ settings: {} })).settings || {};
+      const map = { "马来西亚": "MY", "菲律宾": "PH", "泰国": "TH", "印尼": "ID" };
+      if (map[st.country]) region = map[st.country];
+    } catch (e) { /* 忽略 */ }
+    pagePath += `?lng=zh-CN&shop_region=${region}`
+      + `&timeRange=${opts.range.start}%7C${opts.range.end}`;
+    if (log) log(`   导出区间：${opts.range.start} ~ ${opts.range.end}`);
+  }
 
   let tabId = 0;
   let attached = false;
@@ -2943,7 +2960,7 @@ async function exportViaApi(kind, host, log) {
   DL_SEEN = [];            // 清空上一轮记下的地址
   try {
     const nt = await chrome.tabs.create({
-      url: `https://${realHost}/${cfg.page}`, active: false,
+      url: `https://${realHost}/${pagePath}`, active: false,
     });
     tabId = nt.id;
     try {
