@@ -550,7 +550,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.21.38</span></div>
+      <div class="row"><span>版本</span><span>0.21.39</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -704,15 +704,15 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <p>在战斧里登录过的店铺会自动出现在这里。名字可以自己改，只有你自己看得到——底下那串 ID 才是唯一标识。</p></div>
       <div class="card"><h2>所有店铺<span class="hint" id="store-hint"></span></h2>
         <div class="body tight" id="store-list"><div class="empty">加载中…</div></div></div>
-      <div class="card"><h2>链接资料（款式编码）<span class="hint">报表上那列「款式编码」靠它</span></h2>
+      <div class="card"><h2>链接资料（款式编码）<span class="hint">现在不用导了，留作手动补漏</span></h2>
         <div class="body">
           <p class="muted" style="font-size:12.5px;margin:0 0 12px">
-            在店铺后台点「批量编辑」下载<b>链接资料</b>（商品信息表），在这里传上来。
-            程序会读出每条链接下的所有款式编码，报表里那条链接就显示成
-            <span class="mono">V1/V2/V61</span> 这样的样子。<br>
-            店铺后台下载的表<b>没有款式编码那一列</b>，程序会从商家 SKU 推导
-            （<span class="mono">V27-White-10Pcs</span> → <span class="mono">V27</span>），
-            跟你手工维护的那列效果一致。
+            <b>已不需要再导这张表。</b>订单表里每行都带「SKU ID」和「Seller SKU」，
+            程序会自动从订单里推出款式编码
+            （<span class="mono">MY-J12-5PCS</span> → <span class="mono">MY-J12</span>），
+            报表里那条链接就显示成 <span class="mono">V1/V2/V61</span> 这样的样子。<br>
+            这里保留上传入口，只用于两种情况：某个 SKU 一直没出过单（订单里抓不到），
+            或你想手工指定某个款式编码。
           </p>
           <div class="tools">
             <label class="mini-btn">选择链接资料表
