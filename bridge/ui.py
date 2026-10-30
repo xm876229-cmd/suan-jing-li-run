@@ -550,7 +550,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.21.41</span></div>
+      <div class="row"><span>版本</span><span>0.21.42</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>

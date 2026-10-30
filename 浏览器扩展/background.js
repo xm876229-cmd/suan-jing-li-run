@@ -472,13 +472,24 @@ async function ensureHost(hint, log, force = false) {
   const url = PAGE_HINTS[hint];
   if (url) {
     log(`后台打开页面获取参数：${url}`);
-    try { await chrome.tabs.create({ url, active: false }); } catch (e) { log(`打开失败：${e.message}`); }
+    // 记下这个自开的标签页，学到参数后关掉——
+    // 不然每轮都留一个后台页，几天下来能攒几十个。
+    let createdId = 0;
+    try {
+      const nt = await chrome.tabs.create({ url, active: false });
+      createdId = nt && nt.id;
+    } catch (e) { log(`打开失败：${e.message}`); }
     for (let i = 0; i < 16; i++) {
       await sleep(2500);
       params = await read();
       host = pickHost(params, hint);
-      if (host) { log(`已学到 ${host} 的参数`); return host; }
+      if (host) {
+        log(`已学到 ${host} 的参数`);
+        if (createdId) { try { await chrome.tabs.remove(createdId); } catch (e) { /* 忽略 */ } }
+        return host;
+      }
     }
+    if (createdId) { try { await chrome.tabs.remove(createdId); } catch (e) { /* 忽略 */ } }
   }
 
   const label = hint === "affiliate" ? "达人联盟后台" : "卖家后台";
