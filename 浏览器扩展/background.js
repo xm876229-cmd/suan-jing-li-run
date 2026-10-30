@@ -351,13 +351,16 @@ async function buildUrl(host, path, extra = {}, drop = []) {
   const byPath = params[`${host}|${path}`];
   let p;
   if (full) {
-    p = full;
+    p = { ...full };
   } else if (byPath) {
-    p = byPath;
+    p = { ...byPath };
   } else {
     p = { ...(params[host] || {}) };
-    for (const k of drop) delete p[k];
   }
+  // 剔除已知多余的键——**任何一档都要剔**。
+  // （之前只在兜底时剔，结果 full 那档存的就是扩展自己发出去的 21 键，
+  //   剔了也白搭——扩展发的请求同样被记录，等于自己污染自己。）
+  for (const k of drop) delete p[k];
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(p)) {
     if (k.startsWith("_")) continue;
@@ -794,7 +797,30 @@ async function clickSkuTab(tabId) {
  *  preferPath：优先用「URL 含这个片段」的标签页。
  *  有些接口只有在对应页面里发才不被平台拒绝（Referer/页面上下文），
  *  比如「商品数据分析」的 SKU 列表——在别的页面发会被判成非法调用。 */
+/** 跑一次页面请求；遇到 "Failed to fetch" 自动重来一次。
+
+ * 扩展刚重载、后台脚本刚被唤醒、或标签页刚被浏览器冻结时，
+ * 第一次请求会以 Failed to fetch 收场——这不是平台拒绝，重试就好。
+ */
 async function runInPage(host, func, args, preferPath) {
+  let last = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await _runInPageOnce(host, func, args, preferPath);
+    if (r.missingTab) return r;
+    const inner = (r.result && r.result.error) || "";
+    const msg = r.error || inner || "";
+    if (!msg) return r;
+    last = msg;
+    if (/Failed to fetch|NetworkError|ERR_/i.test(msg)) {
+      await sleep(2000);
+      continue;
+    }
+    return r;
+  }
+  return { error: last || "页面请求失败" };
+}
+
+async function _runInPageOnce(host, func, args, preferPath) {
   let tab = null;
   let openedByUs = false;
   if (preferPath) {
@@ -1200,12 +1226,15 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   //    报表先用现有主表算出来，文件一好就自动入库，下次核算生效。
   const bgTries = 90;      // 最多约 7 分钟（90 次 × 2 秒 + 每次请求开销）
   const bgWait = 2000;
-  pagePullSkuByExport(host, startDate, endDateExclusive, bgTries, bgWait, log)
-    .then((saved) => {
-      log(`② 商品SKU导出完成（后台）：${saved.path}`);
-      log(`   新映射已入库，再点一次「立即运行」即用新归属重新核算`);
-    })
-    .catch((e) => log(`② 商品SKU导出（后台）：${(e && e.message) || e}`));
+  const startBgExport = () => {
+    // 放最后启动：它也要用页面标签页，跟③ 并发会互相干扰（表现为 Failed to fetch）
+    pagePullSkuByExport(host, startDate, endDateExclusive, bgTries, bgWait, log)
+      .then((saved) => {
+        log(`② 商品SKU导出完成（后台）：${saved.path}`);
+        log(`   新映射已入库，再点一次「立即运行」即用新归属重新核算`);
+      })
+      .catch((e) => log(`② 商品SKU导出（后台）：${(e && e.message) || e}`));
+  };
   // 故意不 await：不让这 1~4 分钟拖住报表
 
   // ③ 兜底：list 接口分段
@@ -1226,6 +1255,8 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
       }
     }
   }
+
+  startBgExport();
 
   if (!done.length) {
     // ② 已经在后台轮询（上面不 await），文件好了会自动入库；
