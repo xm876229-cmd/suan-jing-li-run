@@ -2593,22 +2593,38 @@ async function clickByTextIn(tabId, want) {
         const norm = (x) => (x || "").replace(/\s+/g, "").trim();
         const cands = Array.from(
           document.querySelectorAll("button,span,div,a,li,label,td,[role=button]"));
-        const hit = cands.find((e) => {
+        const visible = (e) => e.offsetParent !== null;
+
+        // 先精确匹配（最安全）
+        const exact = cands.find((e) => {
           const t = norm(e.textContent);
           if (!texts.includes(t)) return false;
-          if (e.offsetParent === null) return false;
+          if (!visible(e)) return false;
           const kids = e.querySelectorAll("button,span,a,li,label,td");
           return ![...kids].some((k) => texts.includes(norm(k.textContent)));
         });
-        if (!hit) return false;
-        hit.click();
-        return true;
+        if (exact) { exact.click(); return "exact"; }
+
+        // 再退一步：包含匹配（弹窗按钮常叫「确认导出」「导出数据」这类）
+        const loose = cands.find((e) => {
+          const t = norm(e.textContent);
+          if (!t || t.length > 12) return false;
+          if (!texts.some((w) => t.includes(w))) return false;
+          if (!visible(e)) return false;
+          const kids = e.querySelectorAll("button,span,a,li,label");
+          return ![...kids].some((k) => {
+            const kt = norm(k.textContent);
+            return kt && kt.length <= 12 && texts.some((w) => kt.includes(w));
+          });
+        });
+        if (loose) { loose.click(); return "loose"; }
+        return "";
       },
       args: [want],
     });
-    return !!(r && r.result);
+    return (r && r.result) || "";
   } catch (e) {
-    return false;
+    return "";
   }
 }
 
@@ -2671,7 +2687,7 @@ async function exportByButton(kind, host, log) {
         if (clicked) break;
         await sleep(1500);
       }
-      if (log) log(`   第 ${si + 1} 步点「${texts[0]}」：${clicked}`);
+      if (log) log(`   第 ${si + 1} 步点「${texts[0]}」：${clicked || "没找到"}`);
       if (!clicked) {
         if (si === 0) {
           const names = await scanExportButtons(tabId);
@@ -3060,6 +3076,56 @@ async function exportViaApi(kind, host, log) {
   }
 }
 
+/** 点「下一页」：文案/aria-label/箭头类控件都试一遍。 */
+async function clickNextPage(tabId) {
+  try {
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId }, world: "MAIN",
+      func: () => {
+        const norm = (x) => (x || "").replace(/\s+/g, "").trim();
+        const vis = (e) => e.offsetParent !== null;
+        const cands = Array.from(document.querySelectorAll(
+          "button,[role=button],a,li,span,div,svg"));
+
+        // ① 明确文案 / aria-label
+        for (const e of cands) {
+          if (!vis(e)) continue;
+          const t = norm(e.textContent);
+          const al = norm(e.getAttribute && e.getAttribute("aria-label"));
+          if (t === "下一页" || al === "下一页" || t === "Next" || al === "Next") {
+            e.click();
+            return "text";
+          }
+        }
+        // ② 分页控件里的「>」「›」箭头
+        for (const e of cands) {
+          if (!vis(e)) continue;
+          const t = norm(e.textContent);
+          if (t !== ">" && t !== "›" && t !== "»") continue;
+          const cls = String(e.className || "") + " " +
+            String((e.parentElement && e.parentElement.className) || "");
+          if (!/page|pagination|pager|next/i.test(cls)) continue;
+          e.click();
+          return "arrow";
+        }
+        // ③ 整页找 class 带 next 的可点元素
+        for (const e of cands) {
+          if (!vis(e)) continue;
+          const cls = String(e.className || "");
+          if (!/next/i.test(cls)) continue;
+          if (/disabled/i.test(cls)) continue;
+          e.click();
+          return "class";
+        }
+        return "";
+      },
+    });
+    return !!(r && r.result);
+  } catch (e) {
+    return false;
+  }
+}
+
 async function deepCaptureSku(host, preferPath, log) {
   // 个别定制浏览器可能整个裁掉调试接口，这里先挡一下，
   // 免得抛 TypeError 把整轮取数带崩。
@@ -3235,6 +3301,27 @@ async function deepCaptureSku(host, preferPath, log) {
     }
   }
 
+  // 翻页：这一页只有 10 条，后台实际可能上百个 SKU。
+  // 点「下一页」让页面自己继续请求，我们照样把响应收下来。
+  if (hits.length) {
+    let guard = 0;
+    while (guard < 40) {
+      guard += 1;
+      const before = hits.length;
+      const ok = await clickNextPage(tabId);
+      if (!ok) break;
+      // 等新响应（最多 10 秒）
+      let waited = 0;
+      while (hits.length === before && waited < 10) {
+        await sleep(1000);
+        waited += 1;
+      }
+      if (hits.length === before) break;      // 没有新数据了，停
+      if (log) log(`   翻页 +1（已收 ${hits.length} 条响应）`);
+    }
+    if (log) log(`   翻页结束，共 ${hits.length} 条响应`);
+  }
+
   try { chrome.debugger.onEvent.removeListener(onEvent); } catch (e) { /* 忽略 */ }
   if (attached) {
     try { await chrome.debugger.detach({ tabId }); } catch (e) { /* 忽略 */ }
@@ -3272,6 +3359,27 @@ async function deepCaptureSku(host, preferPath, log) {
     if (obj && obj.code !== undefined && Number(obj.code) !== 0) continue;
     const rows = extractSkuList(obj);
     if (rows.length > bestRows.length) { best = h; bestRows = rows; }
+  }
+  // 多页合并：把所有响应的行按 sku_id 去重后拼起来（翻页拿到的才算全量）
+  if (hits.length > 1) {
+    const seen = new Set();
+    const merged = [];
+    for (const h of hits) {
+      let obj = null;
+      try {
+        obj = h.base64
+          ? JSON.parse(new TextDecoder().decode(
+              Uint8Array.from(atob(h.bodyText), (c) => c.charCodeAt(0))))
+          : JSON.parse(h.bodyText);
+      } catch (e) { continue; }
+      if (obj && obj.code !== undefined && Number(obj.code) !== 0) continue;
+      for (const row of extractSkuList(obj)) {
+        if (!row.sku_id || seen.has(row.sku_id)) continue;
+        seen.add(row.sku_id);
+        merged.push(row);
+      }
+    }
+    if (merged.length > bestRows.length) bestRows = merged;
   }
 
   if (!best) {
