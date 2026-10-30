@@ -63,6 +63,23 @@ PYI_BASE = [
 ]
 
 
+def _copy_missing_tree(src: Path, dst: Path) -> None:
+    """把 src 里的文件补到 dst，**已存在的一律不覆盖**。
+
+    数据根改成程序目录之后，发布目录里的 配置/、数据/ 就是用户的真数据
+    （他在这台电脑上改的费率、导进的成本都在里面）。
+    重建只能补缺的文件，绝不能拿开发机上的旧副本把用户数据冲掉。
+    """
+    for f in src.rglob("*"):
+        rel = f.relative_to(src)
+        target = dst / rel
+        if f.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, target)
+
+
 def _retire_dir(path: Path) -> None:
     """把上一轮的构建目录**挪走**，而不是删掉。
 
@@ -171,8 +188,11 @@ def build_app() -> Path:
         src = _real.get(name) or (ROOT / name)
         if not src.exists():
             continue
-        if name in CN_DIRS:
-            # 顶层用中文名：配置 / 浏览器扩展 / 文档
+        if name == "配置":
+            # 用户数据：只补缺，不覆盖（他在这台机器上改的费率/公式都在这）
+            _copy_missing_tree(src, out / CN_DIRS[name])
+        elif name in CN_DIRS:
+            # 顶层用中文名：浏览器扩展 / 文档（程序文件，随版本更新覆盖）
             shutil.copytree(src, out / CN_DIRS[name], dirs_exist_ok=True)
         elif name in INNER_DIRS:
             # 代码副本收进 _internal/源码/，顶层清爽点
@@ -184,15 +204,16 @@ def build_app() -> Path:
         if src.exists():
             shutil.copy2(src, out / name)
 
-    # 成本主表 / 映射主表也带进发布包：安装版和免安装版开箱就是最新成本，
-    # 不用再让用户重新导一遍。抓包原始数据（很大）不带。
+    # 成本主表 / 映射主表也带进发布包：首次安装开箱就有最新成本。
+    # 但数据根现在是程序目录，这两份在发布目录里就是用户的数据——
+    # 已经存在就绝不能覆盖，否则他在程序里导的新成本会被开发机的旧版冲掉。
     for sub in ("costs", "mapping"):
         f = _paths.DATA / sub / "master.csv"
-        if f.is_file():
-            dst = out / "数据" / sub / "master.csv"
+        dst = out / "数据" / sub / "master.csv"
+        if f.is_file() and not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dst)
-            print(f"[OK] 带上 数据/{sub}/master.csv（{f.stat().st_size / 1024:.0f} KB）")
+            print(f"[OK] 补 数据/{sub}/master.csv（{f.stat().st_size / 1024:.0f} KB）")
     # 源码模式的入口脚本也收进 _internal，顶层只留 jingli.exe
     if (ROOT / "jingli.py").exists():
         (out / "_internal" / "源码").mkdir(parents=True, exist_ok=True)

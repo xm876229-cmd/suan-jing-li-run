@@ -1068,26 +1068,23 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     log(`   商品管理接口失败：${(e && e.message) || e}`);
   }
 
-  // ② 区间内 SKU：只补①里没有的 SKU（例如已删除、但区间内仍有订单的链接）。
-  //    归属冲突时以①为准——①是 SKU ID 全量表，属于主来源。
+  // ② 区间导出：这是「数据分析 → 商品数据分析 → 按 SKU → 导出数据」同一条路，
+  //    也是链接归属的权威来源——已删除的 SKU 只有这份表里才有，
+  //    累积主表只是临时兜底，所以这条路必须走通。
   //
-  //    等多久要看①的结果：①要是整个接口都不通（账号被风控、返回 validating），
-  //    ② 这条同源的路几乎不可能通，这时候还按 40 次轮询就是纯浪费——
-  //    实测一次白等了 249 秒，占了整轮时间的九成。
-  const listOk = done.length > 0;
-  try {
-    log("② 取区间内 SKU（归属按所选区间）…");
-    const saved = await pagePullSkuByExport(
-      host, startDate, endDateExclusive,
-      listOk ? 40 : 6,
-      listOk ? 1500 : 1200,
-      log,
-    );
-    log(`   已保存：${saved.path}（${Math.round((saved.bytes || 0) / 1024)} KB）`);
-    done.push("区间导出");
-  } catch (e) {
-    log(`   区间导出失败：${(e && e.message) || e}（沿用①的全量归属）`);
-  }
+  //    诊断确认过：创建导出成功，轮询返回的确实是 xlsx，
+  //    只是刚创建时还是 0 字节，平台生成文件要 1~4 分钟。
+  //    之前阻塞在这里等，把一轮拖到 279 秒；现在改成后台轮询：
+  //    报表先用现有主表算出来，文件一好就自动入库，下次核算生效。
+  const bgTries = 90;      // 最多约 7 分钟（90 次 × 2 秒 + 每次请求开销）
+  const bgWait = 2000;
+  pagePullSkuByExport(host, startDate, endDateExclusive, bgTries, bgWait, log)
+    .then((saved) => {
+      log(`② 商品SKU导出完成（后台）：${saved.path}`);
+      log(`   新映射已入库，再点一次「立即运行」即用新归属重新核算`);
+    })
+    .catch((e) => log(`② 商品SKU导出（后台）：${(e && e.message) || e}`));
+  // 故意不 await：不让这 1~4 分钟拖住报表
 
   // ③ 兜底：list 接口分段
   if (!done.length) {
@@ -1101,9 +1098,11 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   }
 
   if (!done.length) {
-    throw new Error(
-      "商品SKU三条路都没取到，本轮沿用现有主表（主工作簿「链接资料」表已自动作为来源）",
-    );
+    // ② 已经在后台轮询（上面不 await），文件好了会自动入库；
+    //    本轮先用现有主表把报表算出来，归属不变。
+    log("本轮商品SKU没取到：② 正在后台等导出文件（好了会写日志），"
+        + "本轮沿用现有主表，归属不变");
+    return;   // 不算失败：主流程继续，报表照常出
   }
   await skSet({ skuCache: { at: Date.now(), items: null } });
   log(`映射取数完成：${done.join(" + ")}`);
