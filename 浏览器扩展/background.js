@@ -803,16 +803,19 @@ async function clickSkuTab(tabId) {
  * 第一次请求会以 Failed to fetch 收场——这不是平台拒绝，重试就好。
  */
 async function runInPage(host, func, args, preferPath) {
+  const exclude = new Set();
   let last = "";
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const r = await _runInPageOnce(host, func, args, preferPath);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await _runInPageOnce(host, func, args, preferPath, exclude);
     if (r.missingTab) return r;
     const inner = (r.result && r.result.error) || "";
     const msg = r.error || inner || "";
     if (!msg) return r;
     last = msg;
-    if (/Failed to fetch|NetworkError|ERR_/i.test(msg)) {
-      await sleep(2000);
+    if (/Failed to fetch|NetworkError|ERR_|about:blank|chrome-error/i.test(msg)) {
+      // 这个标签页用不了了（被浏览器冻结、加载失败、已关闭）——换一个再试
+      if (r.tabId) exclude.add(r.tabId);
+      await sleep(1500);
       continue;
     }
     return r;
@@ -820,14 +823,18 @@ async function runInPage(host, func, args, preferPath) {
   return { error: last || "页面请求失败" };
 }
 
-async function _runInPageOnce(host, func, args, preferPath) {
+async function _runInPageOnce(host, func, args, preferPath, exclude) {
+  exclude = exclude || new Set();
+  // 能用的标签页：没被排除、URL 正常（排除错误页和空白页）
+  const usable = (t) => t && t.id && !exclude.has(t.id)
+    && !/^chrome-error:|^about:/.test(String(t.url || ""));
   let tab = null;
   let openedByUs = false;
+  const kw = preferPath ? preferPath.split("?")[0] : "";
   if (preferPath) {
     // 匹配时只看主路径（? 之前），query 各页面顺序不同
-    const kw = preferPath.split("?")[0];
     const pick = (list) => (list || []).find(
-      (t) => t && t.id && String(t.url || "").includes(kw)) || null;
+      (t) => usable(t) && String(t.url || "").includes(kw)) || null;
     try {
       tab = pick(await chrome.tabs.query({ url: [`*://${host}/*`] }));
     } catch (e) { /* 忽略 */ }
@@ -845,9 +852,22 @@ async function _runInPageOnce(host, func, args, preferPath) {
           tab = pick(await chrome.tabs.query({ url: [`*://${host}/*`] }));
         } catch (e) { break; }
       }
+      // 还没匹配上就退回 active 页 / 任意可用页
+      if (!tab) {
+        try {
+          const all = (await chrome.tabs.query({ url: [`*://${host}/*`] })) || [];
+          tab = all.find((t) => usable(t) && t.active) || all.find(usable) || null;
+        } catch (e) { /* 忽略 */ }
+      }
     }
   }
-  if (!tab) tab = await findTabFor(host);
+  if (!tab) {
+    try {
+      const all = (await chrome.tabs.query({ url: [`*://${host}/*`] })) || [];
+      // 优先用用户正在看的那个标签页——它最不容易被浏览器冻结
+      tab = all.find((t) => usable(t) && t.active) || all.find(usable) || null;
+    } catch (e) { /* 忽略 */ }
+  }
   if (!tab) {
     // 参数是新鲜的，ensureHost 不会开页，但页面上下文取数必须有 tab
     try { await chrome.tabs.create({ url: `https://${host}/`, active: false }); } catch (e) { /* 忽略 */ }
@@ -876,16 +896,16 @@ async function _runInPageOnce(host, func, args, preferPath) {
     const [res] = await chrome.scripting.executeScript({
       target: { tabId: tab.id }, func, args, world: "MAIN",
     });
-    return { result: res && res.result };
+    return { result: res && res.result, tabId: tab.id };
   } catch (e) {
     const msg = String((e && e.message) || e);
     // 这句英文原文很难懂，翻成能照着做的提示
     if (/Cannot access contents/i.test(msg)) {
       return { error:
         "扩展没有这个页面的访问权限：到 chrome://extensions → 净利助手 → 详情 → " +
-        "「网站访问权限」改成「在所有网站上」，然后重新点运行" };
+        "「网站访问权限」改成「在所有网站上」，然后重新点运行", tabId: tab.id };
     }
-    return { error: msg };
+    return { error: msg, tabId: tab.id };
   }
 }
 
@@ -917,6 +937,16 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
   // 在这个页面里发请求，平台的判定和页面自己发的一致（否则会 98001021）。
   const r = await runInPage(host, async (u, s, e, sz, mp) => {
     const all = [];
+    // 探针：同源的一个小资源能不能取到？
+    // 取不到 → 是这个页面/网络/标签页的问题（不是平台拒绝）；
+    // 取得到 → 是平台对这个接口的判定问题。两种情况以前分不清。
+    let probe = "";
+    try {
+      const pr = await fetch("/favicon.ico?j=" + Date.now(), { cache: "no-store" });
+      probe = `同源探针 ${pr.status}`;
+    } catch (e2) {
+      probe = `同源探针也失败：${(e2 && e2.name) || ""} ${(e2 && e2.message) || e2}`;
+    }
     for (let page = 0; page < mp; page++) {
       const body = {
         request: {
@@ -941,12 +971,15 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
         raw = await resp.text();
         j = JSON.parse(raw);
       } catch (err) {
-        return { error: `第 ${page + 1} 页请求失败：${(err && err.message) || err}` };
+        return {
+          error: `第 ${page + 1} 页请求失败：${(err && err.name) || ""} ${(err && err.message) || err}｜${probe}`,
+          page: page + 1,
+        };
       }
       if (!j || j.code !== 0) {
         // 把平台原话带回去：只给 code=98001021 猜不出原因
         return {
-          error: `code=${j && j.code} ${(j && j.message) || ""}｜原文=${raw.slice(0, 200)}`.trim(),
+          error: `code=${j && j.code} ${(j && j.message) || ""}｜原文=${raw.slice(0, 200)}｜${probe}`.trim(),
           page: page + 1,
         };
       }

@@ -92,21 +92,29 @@
     }
 
     return origFetch.apply(this, arguments).then(async (resp) => {
-      if (enabled && interesting(url)) {
-        const reqBody = await bodyPromise;
-        let sample = null;
-        const ct = resp.headers.get("content-type") || "";
-        try {
-          if (ct.includes("json") || ct.includes("text")) {
-            sample = clip(await resp.clone().text(), MAX_RESP);
-          }
-        } catch (e) { /* 响应体读不出来就算了 */ }
-        emit({
-          kind: "fetch", url, method, status: resp.status,
-          contentType: ct, ms: Date.now() - started,
-          reqBody, respSample: sample, reqHeaders,
-          page: location.href, at: new Date().toISOString(),
-        });
+      // 抓包记录必须与业务请求彻底隔离。
+      // 扩展被重新加载时，页面里残留的旧 hook 已经失去后台连接，
+      // 一旦上报抛错，异常会顺着 Promise 链把**业务的 fetch 一起带崩**
+      // （页面侧看到的就是 Failed to fetch）——整轮取数全挂就是这么来的。
+      try {
+        if (enabled && interesting(url)) {
+          const reqBody = await bodyPromise;
+          let sample = null;
+          const ct = resp.headers.get("content-type") || "";
+          try {
+            if (ct.includes("json") || ct.includes("text")) {
+              sample = clip(await resp.clone().text(), MAX_RESP);
+            }
+          } catch (e) { /* 响应体读不出来就算了 */ }
+          emit({
+            kind: "fetch", url, method, status: resp.status,
+            contentType: ct, ms: Date.now() - started,
+            reqBody, respSample: sample, reqHeaders,
+            page: location.href, at: new Date().toISOString(),
+          });
+        }
+      } catch (e) {
+        // 记录失败就放弃记录，绝不影响页面自己的请求
       }
       return resp;
     }).catch((err) => { throw err; });
