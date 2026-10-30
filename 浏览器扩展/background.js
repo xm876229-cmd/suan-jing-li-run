@@ -797,6 +797,21 @@ async function runInPage(host, func, args, preferPath) {
 }
 
 /** 分页拉全量商品 SKU（在页面上下文里循环，一次调用拿完）。 */
+/** 「商品数据分析」页的地址。
+
+ * SKU 列表接口（/insights/seller/ttp/product/sku/list）只在这个页面里发才不被拒，
+ * 在别的店铺页面发会回 98001021。页面真实路径是 /compass/product-analysis。
+ */
+async function skuPageHint() {
+  let region = "MY";
+  try {
+    const st = (await skGet({ settings: {} })).settings || {};
+    const map = { "马来西亚": "MY", "菲律宾": "PH", "泰国": "TH", "印尼": "ID" };
+    if (map[st.country]) region = map[st.country];
+  } catch (e) { /* 忽略 */ }
+  return `compass/product-analysis?lang=zh-CN&shop_region=${region}`;
+}
+
 async function pagePullSku(host, start, endExclusive, size, maxPages) {
   const url = await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list");
 
@@ -842,7 +857,7 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
       if (items.length < sz) return { items: all, pages: page + 1 };
     }
     return { items: all, pages: mp, truncated: true };
-  }, [url, start, endExclusive, size, maxPages], "ads-creation/dashboard?type=product&reporting_level=2");
+  }, [url, start, endExclusive, size, maxPages], await skuPageHint());
 
   if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
   if (r.error) throw new Error(r.error);
@@ -1129,6 +1144,14 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
       const saved = await uploadToBridge(`sku_list_${startDate}_${shiftDate(endDateExclusive, -1)}.json`, bytes.buffer, "mapping");
       log(`③ 已保存：${saved.path}（${all.length} 条）`);
       done.push(`list 分段 ${all.length} 条`);
+      // 同一批数据顺便生成「链接资料」（链接 → 款式编码），
+      // 免得再单独跑一次链接资料任务
+      try {
+        const linkSaved = await saveLinkInfoCsv(all, today, log);
+        if (linkSaved) done.push(`链接资料 ${linkSaved.sku_count} 条`);
+      } catch (e) {
+        log(`   链接资料导出失败（不影响其余取数）：${(e && e.message) || e}`);
+      }
     }
   }
 
@@ -1181,16 +1204,21 @@ async function saveLinkInfoCsv(skus, today, log) {
   const rows = [];
   const seen = new Set();
   for (const it of skus || []) {
-    const sid = String(it.sku_id || it.skuId || "");
-    const pid = String(it.product_id || it.productId || "");
+    // 两种来源结构都要认：
+    //   商品管理接口  → {sku_id, product_id, seller_sku, product_title}
+    //   商品数据分析  → {meta: {sku_id, product_id, seller_sku, ...}}
+    const src = (it && it.meta) || it || {};
+    const sid = String(src.sku_id || src.skuId || "");
+    const pid = String(src.product_id || src.productId || "");
     if (!sid || !pid || seen.has(sid)) continue;
     seen.add(sid);
+    const sku = String(src.seller_sku || src.sellerSku || "");
     rows.push({
       sku_id: sid,
       product_id: pid,
-      seller_sku: String(it.seller_sku || it.sellerSku || ""),
-      product_name: String(it.product_title || it.productTitle || ""),
-      style_code: deriveStyleCode(it.seller_sku || it.sellerSku || ""),
+      seller_sku: sku,
+      product_name: String(src.product_title || src.productTitle || src.product_name || ""),
+      style_code: deriveStyleCode(sku),
     });
   }
   if (!rows.length) return null;
