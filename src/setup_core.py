@@ -89,6 +89,22 @@ def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 
 # ---------------- 文件部署 ----------------
 
+def _copy_missing_tree(src: Path, dst: Path) -> None:
+    """把 src 里「dst 没有的」文件补过去；已存在的一律不动。"""
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.rglob("*"):
+        if not item.is_file():
+            continue
+        target = dst / item.relative_to(src)
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(item, target)
+        except OSError:
+            pass
+
+
 def copy_app_files(dest: Path, source: Path, log=print) -> None:
     """把发布文件拷到安装目录。data / output 不碰。"""
     dest.mkdir(parents=True, exist_ok=True)
@@ -99,6 +115,13 @@ def copy_app_files(dest: Path, source: Path, log=print) -> None:
             continue
         dst = dest / name
         if src.is_dir():
+            if name == "配置":
+                # 配置里是用户可能改过的费率、公式、表头识别——
+                # 升级时只补新增/缺失的文件，**绝不覆盖、绝不删除**。
+                # （以前这里是 rmtree + 整体复制，一升级用户改的就全没了）
+                _copy_missing_tree(src, dst)
+                log(f"  {name}（只补缺，不覆盖你改过的）")
+                continue
             # _internal 里是运行库，必须整目录替换，否则新旧混用会崩
             if dst.exists():
                 shutil.rmtree(dst, ignore_errors=True)
@@ -234,7 +257,7 @@ def write_uninstall_entry(dest: Path) -> None:
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
             winreg.SetValueEx(k, "DisplayName", 0, winreg.REG_SZ, APP_NAME)
-            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.21.40")
+            winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, "0.21.41")
             winreg.SetValueEx(k, "Publisher", 0, winreg.REG_SZ, "净利助手")
             winreg.SetValueEx(k, "InstallLocation", 0, winreg.REG_SZ, str(dest))
             winreg.SetValueEx(k, "DisplayIcon", 0, winreg.REG_SZ, str(exe))
