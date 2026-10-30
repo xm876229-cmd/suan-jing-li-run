@@ -707,8 +707,28 @@ async function pullSkuPages(host, start, endExclusive, size, maxPages, log) {
 
 async function findTabFor(host) {
   const tabs = await chrome.tabs.query({ url: [`*://${host}/*`] });
-  const tab = (tabs || []).find((x) => x && x.id);
-  return tab || null;
+  const list = (tabs || []).filter((x) => x && x.id);
+  // 被浏览器休眠（discarded）的标签页注入不了脚本，优先挑活着的
+  return list.find((x) => !x.discarded) || list[0] || null;
+}
+
+/** 等标签页真正加载完。
+ *  刚创建的标签页 URL 已经有了、但 status 还是 "loading" 时去注入脚本，
+ *  Chrome 会报「Cannot access contents of the page」——看起来像没权限，
+ *  其实只是页面还没准备好。这个坑很容易误判成权限问题。 */
+async function waitTabReady(tabId, ms = 20000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    try {
+      const t = await chrome.tabs.get(tabId);
+      if (!t) return false;
+      if (t.status === "complete" && !t.discarded) return true;
+    } catch (e) {
+      return false;
+    }
+    await sleep(400);
+  }
+  return false;
 }
 
 /** 在页面里跑一段函数，拿到 JSON。页面没开时返回 null，由调用方决定回退。 */
@@ -723,6 +743,10 @@ async function runInPage(host, func, args) {
     }
   }
   if (!tab) return { missingTab: true };
+  // 关键：等页面 status 变成 complete 再注入。
+  // 只是「URL 已经对了」还不够——标签刚建好时还在 loading，
+  // 这时 executeScript 会报 Cannot access contents（看着像没授权，其实不是）。
+  await waitTabReady(tab.id);
   try {
     // world: "MAIN" 是关键，别去掉。
     // 扩展默认跑在隔离环境（ISOLATED），页面的 webmssdk 看不见、也不会给我们的
