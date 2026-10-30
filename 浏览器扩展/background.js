@@ -1338,35 +1338,25 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
       const cap = await deepCaptureSku(host, await skuPageHint(), log);
       if (cap.error) {
         log(`   深度抓取失败：${cap.error}`);
-      } else {
-        let obj = null;
-        if (cap.base64) {
-          const bin = atob(cap.bodyText);
-          const bytes = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          obj = JSON.parse(new TextDecoder().decode(bytes));
-        } else {
-          obj = JSON.parse(cap.bodyText);
+        if (cap.sawRequest) {
+          log(`   但抓到了请求：${String(cap.lastUrl || "").slice(0, 120)}`);
+          if (cap.lastPost) log(`   请求体：${String(cap.lastPost).slice(0, 300)}`);
         }
-        // 平台用业务码表示失败，HTTP 200 也不代表成功
-        if (obj && obj.code !== undefined && Number(obj.code) !== 0) {
-          log(`   页面这次请求也失败了：code=${obj.code} ${obj.message || ""}`);
-        } else {
-          const skus = extractSkuList(obj);
-          if (skus.length) {
-            const bytes2 = new TextEncoder().encode(JSON.stringify({ skus }));
-            const saved = await uploadToBridge(
-              `sku_list_商品数据分析_${today}.json`, bytes2.buffer, "mapping");
-            log(`   已保存：${saved.path}（${skus.length} 个 SKU）`);
-            done.push(`商品数据分析 ${skus.length} 条`);
-            try {
-              const linkSaved = await saveLinkInfoCsv(skus, today, log);
-              if (linkSaved) done.push(`链接资料 ${linkSaved.sku_count} 条`);
-            } catch (e) {
-              log(`   链接资料导出失败（不影响其余取数）：${(e && e.message) || e}`);
-            }
-          } else {
-            log("   响应里没找到 SKU 列表（结构未知）");
+        if (cap.rawSample) log(`   响应原文（前 3000 字）：${cap.rawSample}`);
+      } else {
+        const skus = cap.rows || [];
+        log(`   拿到 ${cap.candidates || 1} 条响应，取最全的那条：${skus.length} 个 SKU`);
+        if (skus.length) {
+          const bytes2 = new TextEncoder().encode(JSON.stringify({ skus }));
+          const saved = await uploadToBridge(
+            `sku_list_商品数据分析_${today}.json`, bytes2.buffer, "mapping");
+          log(`   已保存：${saved.path}（${skus.length} 个 SKU）`);
+          done.push(`商品数据分析 ${skus.length} 条`);
+          try {
+            const linkSaved = await saveLinkInfoCsv(skus, today, log);
+            if (linkSaved) done.push(`链接资料 ${linkSaved.sku_count} 条`);
+          } catch (e) {
+            log(`   链接资料导出失败（不影响其余取数）：${(e && e.message) || e}`);
           }
         }
       }
@@ -2416,7 +2406,9 @@ function extractSkuList(respObj) {
       const src = (it.meta && typeof it.meta === "object") ? it.meta : it;
       const sid = pick(src, SKEYS);
       const pid = pick(src, PKEYS);
-      if (!sid && !pid) continue;
+      // 归属靠的是 sku_id → product_id，缺 sku_id 的行（比如「按商品」维度的结果）
+      // 对映射没用，直接丢掉——否则会把最优响应判错
+      if (!sid || !pid) continue;
       const skuName = pick(src, SKU_NAME_KEYS);
       out.push({
         sku_id: sid,
@@ -2463,162 +2455,175 @@ function extractSkuList(respObj) {
 }
 
 async function deepCaptureSku(host, preferPath, log) {
-  const SKU_PATH = "/api/v2/insights/seller/ttp/product/sku/list";
-  const tabs = await chrome.tabs.query({ url: [`*://${host}/*`] });
-  const kw = preferPath ? preferPath.split("?")[0] : "";
-  const usable = (t) => t && t.id && !/^chrome-error:|^about:/.test(String(t.url || ""));
-  let target = null;
-  try {
-    target = tabs.find((t) => usable(t) && kw && String(t.url || "").includes(kw));
-  } catch (e) { /* 忽略 */ }
-  if (!target) {
-    try {
-      target = tabs.find((t) => usable(t) && t.active) || tabs.find(usable) || null;
-    } catch (e) { /* 忽略 */ }
+  // 个别定制浏览器可能整个裁掉调试接口，这里先挡一下，
+  // 免得抛 TypeError 把整轮取数带崩。
+  if (!chrome.debugger || !chrome.debugger.attach) {
+    throw new Error("这个浏览器没有开放调试接口（chrome.debugger 不可用）");
   }
-  if (!target) throw new Error(`没有找到 ${host} 的标签页`);
+  const SKU_PATH = "/api/v2/insights/seller/ttp/product/sku/list";
+  const kw = preferPath ? preferPath.split("?")[0] : "";
 
-  let tabId = target.id;
+  let tabId = 0;
   let ownTab = false;
-  const reqIds = new Map();   // requestId → 抓到的信息
-  let resolveHit = null;
-  let got = null;
-  const done = new Promise((resolve) => { resolveHit = resolve; });
+  const reqIds = new Map();     // requestId → {url, postData, headers}
+  const hits = [];              // 所有拿到的响应（可能有多条，最后挑最好的）
+  let wake = null;
+  const bump = () => { if (wake) { const w = wake; wake = null; w(); } };
 
-  // 注意：调试器是挂在「后台新开」的那个标签页上的，
-  // 所以这里比对的是运行时才知道的 tabId（下面 attachTo 之后才定下来）。
   const onEvent = async (source, method, params) => {
     if (source.tabId !== tabId) return;
-    if (method === "Network.requestWillBeSent") {
-      const req = params.request || {};
-      if (!String(req.url || "").includes(SKU_PATH)) return;
-      reqIds.set(params.requestId, {
-        url: req.url,
-        postData: req.postData || "",
-      });
-      return;
-    }
-    if (method === "Network.responseReceived") {
-      const rid = params.requestId;
-      const info = reqIds.get(rid);
-      if (!info) return;
-      const resp = params.response || {};
-      info.status = resp.status;
-      info.mimeType = resp.mimeType || "";
-      // 平台返回业务错误码时不算成功
-      if (resp.status && resp.status >= 400) return;
-      try {
-        const body = await chrome.debugger.sendCommand(
-          { tabId }, "Network.getResponseBody", { requestId: rid });
-        info.bodyText = body && body.body ? body.body : "";
-        info.base64 = !!(body && body.base64Encoded);
-      } catch (e) {
-        // 响应体可能还没到（要等 loadingFinished），下次再试
-        info.pending = true;
+    try {
+      if (method === "Network.requestWillBeSent") {
+        const req = params.request || {};
+        if (!String(req.url || "").includes(SKU_PATH)) return;
+        reqIds.set(params.requestId, {
+          url: req.url,
+          postData: req.postData || "",
+          headers: req.headers || {},
+        });
+        return;
       }
-      return;
-    }
-    if (method === "Network.loadingFinished") {
-      const info = reqIds.get(params.requestId);
-      if (!info || info.bodyText) return;
-      try {
-        const body = await chrome.debugger.sendCommand(
-          { tabId }, "Network.getResponseBody", { requestId: params.requestId });
-        info.bodyText = body && body.body ? body.body : "";
-        info.base64 = !!(body && body.base64Encoded);
-      } catch (e) { /* 拿不到就算了 */ }
-      if (info.bodyText) {
-        got = info;
-        if (resolveHit) resolveHit(info);
+      // 这条事件里有浏览器实际发出的全部请求头（含自定义头、Cookie 之外的签名头）
+      if (method === "Network.requestWillBeSentExtraInfo") {
+        const info = reqIds.get(params.requestId);
+        if (!info) return;
+        const h = params.headers || {};
+        info.extraHeaders = h;
+        return;
       }
-    }
+      if (method === "Network.responseReceived") {
+        const info = reqIds.get(params.requestId);
+        if (!info) return;
+        const resp = params.response || {};
+        info.status = resp.status;
+        info.mimeType = resp.mimeType || "";
+        if (resp.status && resp.status >= 400) return;
+        // 响应体这时通常还取不到，先记下，等 loadingFinished 再取
+        return;
+      }
+      if (method === "Network.loadingFinished") {
+        const info = reqIds.get(params.requestId);
+        if (!info || info.bodyText) return;
+        try {
+          const body = await chrome.debugger.sendCommand(
+            { tabId }, "Network.getResponseBody", { requestId: params.requestId });
+          info.bodyText = (body && body.body) || "";
+          info.base64 = !!(body && body.base64Encoded);
+        } catch (e) { /* 拿不到就算了 */ }
+        if (info.bodyText) { hits.push(info); bump(); }
+      }
+    } catch (e) { /* 单个事件出错不能影响后面的 */ }
+  };
+
+  const waitFor = (ms) => new Promise((resolve) => {
+    const t = setTimeout(() => { wake = null; resolve(false); }, ms);
+    wake = () => { clearTimeout(t); resolve(true); };
+  });
+
+  const attachTo = async (tid) => {
+    await chrome.debugger.attach({ tabId: tid }, "1.3");
+    await chrome.debugger.sendCommand({ tabId: tid }, "Network.enable", {});
   };
 
   chrome.debugger.onEvent.addListener(onEvent);
   let attached = false;
 
-  const attachTo = async (tid) => {
-    await chrome.debugger.attach({ tabId: tid }, "1.3");
-    await chrome.debugger.sendCommand({ tabId: tid }, "Network.enable", {});
-    attached = true;
-  };
-
-  // 先开新页（在后台），再把调试器挂上去——
-  // 反过来的话，新页加载时发出的请求就漏掉了。
+  // 先开新页（后台）再挂调试器：反过来的话，新页加载时发的请求就漏掉了。
+  // 用新页而不是刷新用户的页面——刷新会把他正在做的筛选、翻页全冲掉。
   try {
     const url = `https://${host}/${kw || "compass/product-analysis"}`;
     const nt = await chrome.tabs.create({ url, active: false });
     ownTab = true;
     tabId = nt.id;
     await attachTo(tabId);
+    attached = true;
     if (log) log("   已后台新开商品分析页并挂上调试器…");
   } catch (e) {
-    if (log) log(`   新开页面失败，改用原标签页：${(e && e.message) || e}`);
+    if (log) log(`   后台新开+挂载失败：${(e && e.message) || e}`);
   }
+
+  // 退路：用现有标签页
   if (!attached) {
     try {
+      const tabs = await chrome.tabs.query({ url: [`*://${host}/*`] });
+      const usable = (t) => t && t.id && !/^chrome-error:|^about:/.test(String(t.url || ""));
+      let t0 = (tabs || []).find((t) => usable(t) && kw && String(t.url || "").includes(kw))
+        || (tabs || []).find((t) => usable(t) && t.active)
+        || (tabs || []).find(usable);
+      if (!t0) throw new Error(`没有找到 ${host} 的标签页`);
+      tabId = t0.id;
       await attachTo(tabId);
+      attached = true;
+      if (log) log("   已挂到现有标签页的调试器上");
     } catch (e) {
       chrome.debugger.onEvent.removeListener(onEvent);
-      throw new Error(`挂不上调试器：${(e && e.message) || e}（可能这个标签页已有其它调试会话）`);
+      // 这条信息要足够具体：定制版浏览器可能禁用了调试接口
+      throw new Error(
+        `挂不上调试器：${(e && e.message) || e}。`
+        + "如果一直失败，说明这个浏览器禁用了开发者调试接口（部分定制版会这样），"
+        + "换 Chrome / Edge 跑扩展即可",
+      );
     }
   }
 
-  // 让页面带着「按 SKU」维度发一次请求。
-  // 这一步不能省：页面已经停在「按 SKU」时，切维度不会触发新请求，
-  // 我们就会干等 40 秒。
-  try {
-    // 等新页加载完
-    for (let i = 0; i < 20; i++) {
-      await sleep(1000);
-      try {
-        const t = await chrome.tabs.get(tabId);
-        if (!t || t.status === "complete") break;
-      } catch (e) { break; }
-    }
-    // 新开的页默认是「按商品」维度，切到「按 SKU」它才会发 sku/list
+  // 让页面自己发一次 sku/list：
+  // 新开的页默认停在「按商品」维度，点「按 SKU」它才会发这条请求。
+  const clickSkuTab = async () => {
     try {
-      const [r2] = await chrome.scripting.executeScript({
+      const [r] = await chrome.scripting.executeScript({
         target: { tabId }, world: "MAIN",
         func: () => {
+          const norm = (x) => (x || "").replace(/\s+/g, "").trim();
           const cands = Array.from(
             document.querySelectorAll("span,div,button,a,li,label,td"));
           const hit = cands.find((e) => {
-            const t = (e.textContent || "").replace(/\s+/g, "").trim();
-            if (t !== "按SKU" && t !== "按 SKU") return false;
+            const t = norm(e.textContent);
+            if (t !== "按SKU") return false;
             if (e.offsetParent === null) return false;
-            const kids = e.querySelectorAll("span,div,a,button,li,label");
-            return ![...kids].some(
-              (k) => (k.textContent || "").replace(/\s+/g, "").trim() === "按SKU");
+            const kids = e.querySelectorAll("span,div,a,button,li,label,td");
+            return ![...kids].some((k) => norm(k.textContent) === "按SKU");
           });
           if (!hit) return false;
           hit.click();
           return true;
         },
       });
-      if (log) log(`   新页已切到「按 SKU」维度：${!!(r2 && r2.result)}`);
+      return !!(r && r.result);
     } catch (e) {
-      if (log) log(`   新页切维度失败：${(e && e.message) || e}`);
+      return false;
     }
-    await sleep(4000);
-  } catch (e) {
-    if (log) log(`   新开页面失败，改用原标签页：${(e && e.message) || e}`);
+  };
+
+  // 等新页加载完
+  for (let i = 0; i < 25; i++) {
+    await sleep(1000);
+    try {
+      const t = await chrome.tabs.get(tabId);
+      if (!t || t.status === "complete") break;
+    } catch (e) { break; }
   }
 
-  // 等页面发请求并拿到响应（最多 40 秒）
-  let hit = await Promise.race([
-    done, new Promise((resolve) => setTimeout(() => resolve(null), 25000)),
-  ]);
+  const clicked = await clickSkuTab();
+  if (log) log(`   已点「按 SKU」维度：${clicked}`);
 
-  // 还没等到 → 刷新一次页面，让它重新拉（页面停在「按 SKU」时切维度不触发新请求）
-  if (!hit) {
+  // 等第一批响应（点完按钮后给 20 秒）
+  await waitFor(20000);
+
+  // 还没拿到 → 刷新一次页面：页面已停在「按 SKU」时点维度不会触发新请求
+  if (!hits.length && attached) {
     try {
       await chrome.tabs.reload(tabId);
       if (log) log("   还没等到请求，刷新页面再试…");
-      await sleep(4000);
-      hit = await Promise.race([
-        done, new Promise((resolve) => setTimeout(() => resolve(null), 20000)),
-      ]);
+      await sleep(3000);
+      for (let i = 0; i < 15; i++) {
+        await sleep(1000);
+        try {
+          const t = await chrome.tabs.get(tabId);
+          if (!t || t.status === "complete") break;
+        } catch (e) { break; }
+      }
+      await clickSkuTab();
+      await waitFor(20000);
     } catch (e) {
       if (log) log(`   刷新失败：${(e && e.message) || e}`);
     }
@@ -2628,20 +2633,55 @@ async function deepCaptureSku(host, preferPath, log) {
   if (attached) {
     try { await chrome.debugger.detach({ tabId }); } catch (e) { /* 忽略 */ }
   }
-  // 自己开的标签页用完就关掉，不给用户留一堆后台标签
   if (ownTab) {
     try { await chrome.tabs.remove(tabId); } catch (e) { /* 忽略 */ }
   }
 
-  if (!hit || !hit.bodyText) {
-    return { error: "40 秒内没拿到页面自己的 sku/list 响应" };
+  if (!hits.length) {
+    // 用抓到的请求信息给出可诊断的结论
+    const anyReq = [...reqIds.values()][0];
+    return {
+      error: "没拿到 sku/list 响应",
+      sawRequest: !!anyReq,
+      lastUrl: anyReq && anyReq.url,
+      lastPost: anyReq && anyReq.postData,
+    };
+  }
+
+  // 页面可能发过多次（按商品、按SKU、翻页）——挑「能解析出最多 SKU」的那条
+  let best = null;
+  let bestRows = [];
+  for (const h of hits) {
+    let obj = null;
+    try {
+      if (h.base64) {
+        const bin = atob(h.bodyText);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        obj = JSON.parse(new TextDecoder().decode(bytes));
+      } else {
+        obj = JSON.parse(h.bodyText);
+      }
+    } catch (e) { continue; }
+    if (obj && obj.code !== undefined && Number(obj.code) !== 0) continue;
+    const rows = extractSkuList(obj);
+    if (rows.length > bestRows.length) { best = h; bestRows = rows; }
+  }
+
+  if (!best) {
+    // 保留一份原始响应，便于下次照着改解析
+    const raw = hits[0];
+    return {
+      error: "拿到了响应但解析不出 SKU（结构未知）",
+      rawSample: raw && raw.bodyText ? raw.bodyText.slice(0, 3000) : "",
+    };
   }
   return {
-    bodyText: hit.bodyText,
-    base64: hit.base64,
-    status: hit.status,
-    url: hit.url,
-    postData: hit.postData,
+    rows: bestRows,
+    status: best.status,
+    url: best.url,
+    postData: best.postData,
+    candidates: hits.length,
   };
 }
 
