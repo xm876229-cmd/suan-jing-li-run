@@ -86,8 +86,11 @@ def find_sources() -> list[Path]:
             if not f.is_file() or f.suffix.lower() not in SUFFIXES:
                 continue
             low = f.name.lower()
+            # 兼容几种命名：扩展自动抓的 sku_list_*.json、
+            # 页面导出改名后的 sku_export_*.xlsx、
+            # 以及历史文件 sku_20261030.xlsx（早期命名，漏合并过，这里一并认）
             if ("sku_list" in low or "sku list" in low or "sku_export" in low
-                    or "产品" in f.name):
+                    or low.startswith("sku_") or "产品" in f.name):
                 out.append(f)
     return sorted(out, key=lambda f: f.stat().st_mtime)
 

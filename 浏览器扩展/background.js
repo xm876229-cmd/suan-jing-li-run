@@ -2991,8 +2991,9 @@ async function exportViaApi(kind, host, log, opts = {}) {
     for (let i = 0; i < 6; i++) {
       const h = await harvestDownload(tabId);
       if (h && h.buf && h.buf.byteLength > 1024) {
-        const nm = h.name
-          || `${kind}_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.xlsx`;
+        const nm = (kind === "sku")
+          ? `sku_export_商品数据分析_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.xlsx`
+          : (h.name || `${kind}_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.xlsx`);
         const saved = await uploadToBridge(nm, h.buf, cfg.dir || "");
         if (log) log(`   已拦截到导出文件：${saved.path}（${Math.round(h.buf.byteLength / 1024)} KB）`);
         return { ok: true, name: nm, path: saved.path, bytes: h.buf.byteLength };
@@ -3047,8 +3048,12 @@ async function exportViaApi(kind, host, log, opts = {}) {
             if (!ct.includes("json")) {
               const buf = await r.arrayBuffer();
               if (buf && buf.byteLength > 1024) {
-                const name = decodeURIComponent(
-                  (u.split("?")[0].split("/").pop() || `${kind}.xlsx`));
+                // 文件名要带 sku_export 前缀：本地合并逻辑靠它识别
+                // （以前叫 sku_20261030.xlsx，名字不含关键词，一直没被合并进去）
+                const base = kind === "sku"
+                  ? `sku_export_商品数据分析_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.xlsx`
+                  : decodeURIComponent(
+                      (u.split("?")[0].split("/").pop() || `${kind}.xlsx`));
                 const saved = await uploadToBridge(name, buf, cfg.dir || "");
                 return { ok: true, name, path: saved.path, bytes: buf.byteLength };
               }
