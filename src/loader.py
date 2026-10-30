@@ -1271,8 +1271,13 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
             issues.append(f"联盟佣金表合并：{len(buckets['affiliate'])} 份快照，去重 {dropped} 行")
 
     for kind, label in (("ads", "广告表"), ("affiliate", "联盟佣金表"), ("mapping", "商品映射表")):
-        if not buckets[kind]:
-            issues.append(f"目录里没识别出{label}，相关字段按 0 计")
+        if buckets[kind]:
+            continue
+        # 映射表现在是全局主表（数据/mapping/master.csv），不放在店目录里，
+        # 所以「店目录没有映射表」是正常的——只要已经有 SKU→商品 数据就不该报警。
+        if kind == "mapping" and len(getattr(sku_index, "by_sku_id", {}) or {}):
+            continue
+        issues.append(f"目录里没识别出{label}，相关字段按 0 计")
 
     attach_product_ids(orders, sku_index, issues)
     attach_costs(orders, costs, issues)
