@@ -49,6 +49,26 @@ _PENDING: list = []          # 待办队列：[{task, range, store, country, at}
 _PENDING_LOCK = threading.Lock()
 
 
+
+def _mirror_mapping_to_store(store: str, src) -> None:
+    """把映射表复制一份到店目录里，给使用者看。
+
+    程序内部用的是全局累积主表（data/mapping/master.csv，所有店共用一份），
+    但「每个店有哪些 SKU、哪些链接」是这家店自己的东西，放在店目录下才直观。
+    """
+    try:
+        from pathlib import Path as _P
+        sp = _P(str(src))
+        if not store or not sp.is_file():
+            return
+        sub = "链接资料" if "链接资料" in sp.name else "商品SKU表"
+        d = paths.store_root(store) / sub
+        d.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sp, d / sp.name)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _append_log(msg: str) -> None:
     line = f"{datetime.now():%Y-%m-%d %H:%M:%S}  {msg}"
     TASK_LOG.append(line)
@@ -755,6 +775,8 @@ class Handler(BaseHTTPRequestHandler):
         _snap = _make_snapshot(shop_id, payload)
         if _snap.get("id"):
             out["snapshot"] = _snap.get("id")
+        if kind == "mapping":
+            _mirror_mapping_to_store(shop_id, path)
         _json(self, out)
 
     def _post_presets(self):
@@ -1215,6 +1237,10 @@ class Handler(BaseHTTPRequestHandler):
                 out_dir.mkdir(parents=True, exist_ok=True)
 
             r = fetcher.process_results(task, results, rng, store, out_dir=out_dir)
+            # SKU / 链接资料是这家店自己的表，复制一份到店目录下给使用者看
+            if task in ("sku", "link"):
+                for f in (r.get("files") or []):
+                    _mirror_mapping_to_store(store, f)
             _json(self, {"ok": r["ok"], "files": r.get("files") or [],
                          "issues": r.get("issues") or []})
         except Exception as e:  # noqa: BLE001

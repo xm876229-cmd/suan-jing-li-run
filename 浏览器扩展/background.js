@@ -731,9 +731,36 @@ async function waitTabReady(tabId, ms = 20000) {
   return false;
 }
 
-/** 在页面里跑一段函数，拿到 JSON。页面没开时返回 null，由调用方决定回退。 */
-async function runInPage(host, func, args) {
-  let tab = await findTabFor(host);
+/** 在页面里跑一段函数，拿到 JSON。页面没开时返回 null，由调用方决定回退。
+ *  preferPath：优先用「URL 含这个片段」的标签页。
+ *  有些接口只有在对应页面里发才不被平台拒绝（Referer/页面上下文），
+ *  比如「商品数据分析」的 SKU 列表——在别的页面发会被判成非法调用。 */
+async function runInPage(host, func, args, preferPath) {
+  let tab = null;
+  if (preferPath) {
+    // 匹配时只看主路径（? 之前），query 各页面顺序不同
+    const kw = preferPath.split("?")[0];
+    const pick = (list) => (list || []).find(
+      (t) => t && t.id && String(t.url || "").includes(kw)) || null;
+    try {
+      tab = pick(await chrome.tabs.query({ url: [`*://${host}/*`] }));
+    } catch (e) { /* 忽略 */ }
+    if (!tab) {
+      // 没有就开一个：后台标签页，不打断用户
+      try {
+        await chrome.tabs.create({
+          url: `https://${host}/${preferPath}`, active: false,
+        });
+      } catch (e) { /* 忽略 */ }
+      for (let i = 0; i < 12 && !tab; i++) {
+        await sleep(2000);
+        try {
+          tab = pick(await chrome.tabs.query({ url: [`*://${host}/*`] }));
+        } catch (e) { break; }
+      }
+    }
+  }
+  if (!tab) tab = await findTabFor(host);
   if (!tab) {
     // 参数是新鲜的，ensureHost 不会开页，但页面上下文取数必须有 tab
     try { await chrome.tabs.create({ url: `https://${host}/`, active: false }); } catch (e) { /* 忽略 */ }
@@ -773,6 +800,8 @@ async function runInPage(host, func, args) {
 async function pagePullSku(host, start, endExclusive, size, maxPages) {
   const url = await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list");
 
+  // reporting_level=2 就是「商品数据分析 → 按 SKU」那个页面。
+  // 在这个页面里发请求，平台的判定和页面自己发的一致（否则会 98001021）。
   const r = await runInPage(host, async (u, s, e, sz, mp) => {
     const all = [];
     for (let page = 0; page < mp; page++) {
@@ -788,6 +817,7 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
         },
       };
       let j;
+      let raw = "";
       try {
         const resp = await fetch(u, {
           method: "POST",
@@ -795,19 +825,24 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
-        j = JSON.parse(await resp.text());
+        raw = await resp.text();
+        j = JSON.parse(raw);
       } catch (err) {
         return { error: `第 ${page + 1} 页请求失败：${(err && err.message) || err}` };
       }
       if (!j || j.code !== 0) {
-        return { error: `code=${j && j.code} ${(j && j.message) || ""}`.trim(), page: page + 1 };
+        // 把平台原话带回去：只给 code=98001021 猜不出原因
+        return {
+          error: `code=${j && j.code} ${(j && j.message) || ""}｜原文=${raw.slice(0, 200)}`.trim(),
+          page: page + 1,
+        };
       }
       const items = (j.data && j.data.items) || [];
       all.push(...items);
       if (items.length < sz) return { items: all, pages: page + 1 };
     }
     return { items: all, pages: mp, truncated: true };
-  }, [url, start, endExclusive, size, maxPages]);
+  }, [url, start, endExclusive, size, maxPages], "ads-creation/dashboard?type=product&reporting_level=2");
 
   if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
   if (r.error) throw new Error(r.error);

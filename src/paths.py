@@ -296,6 +296,9 @@ def ensure_dirs() -> None:
             for cn in KIND_DIR_CN.values():
                 (store_dir(sid) / cn).mkdir(parents=True, exist_ok=True)
             (store_root(sid) / "快照").mkdir(parents=True, exist_ok=True)
+            # 给使用者看的两份表：商品SKU表（SKU→商品ID）、链接资料（链接→款式编码）
+            for sub in ("商品SKU表", "链接资料"):
+                (store_root(sid) / sub).mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
 
