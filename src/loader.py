@@ -1218,6 +1218,83 @@ def table_range(path: Path, rows: list[tuple]) -> tuple[str, str] | None:
     return None
 
 
+def _rng_text(rng) -> str:
+    return f"{rng[0]}~{rng[1]}" if rng else "全量/无区间"
+
+
+def _pick_latest(items: list[tuple[Path, list[tuple]]], window, label: str,
+                 issues: list[str]) -> list[tuple[Path, list[tuple]]]:
+    """只留**最新导出的那一份**。
+
+    用户的要求：订单 / 广告 / 联盟佣金一律用"这次刚导的"，不复用旧文件。
+    文件夹里会攒下历次导出，全读进来既慢，又可能把过期的状态（比如已经退的
+    款那时候还没退）带进来。所以只取最新的一份。
+
+    前提是它盖得住本次报表区间；一份都盖不住（只导过 9 月却要算 10 月）时，
+    仍然取最新那份，并在异常页说明——让人知道这份数据不是这个区间的。
+    读不出区间的老文件不敢乱丢，保持原样。
+    """
+    if len(items) <= 1:
+        return items
+
+    stamped: list[tuple[float, Path, list[tuple], tuple | None]] = []
+    for p, rows in items:
+        try:
+            mt = p.stat().st_mtime
+        except OSError:
+            mt = 0.0
+        stamped.append((mt, p, rows, table_range(p, rows)))
+    stamped.sort(key=lambda x: (x[0], str(x[1])))
+
+    if any(s[3] is None for s in stamped):
+        return items          # 有读不出区间的，分不清新旧范围，保持全读
+
+    pick = None
+    if window:
+        lo, hi = window
+        cover = [s for s in stamped if s[3][0] <= lo and s[3][1] >= hi]
+        if cover:
+            pick = max(cover, key=lambda x: x[0])
+    if pick is None:
+        pick = stamped[-1]
+        if window and len(stamped) > 1:
+            issues.append(
+                f"{label}：没有一份导出盖得住报表区间 {window[0]}~{window[1]}，"
+                f"用了最新的 {pick[1].name}（{_rng_text(pick[3])}），请确认区间是否对"
+            )
+
+    dropped = [s[1].name for s in stamped if s is not pick]
+    if dropped:
+        newest = stamped[-1][1].name
+        if pick[1].name == newest:
+            issues.append(f"{label}：只用了最新导出的 {pick[1].name}，"
+                          f"忽略 {len(dropped)} 份更早的导出")
+        else:
+            issues.append(f"{label}：用了盖住报表区间的那份 {pick[1].name}"
+                          f"（{_rng_text(pick[3])}），忽略 {len(dropped)} 份其它导出")
+    return [(pick[1], pick[2])]
+
+
+def _map_rank(rng, window, mtime: float) -> tuple:
+    """映射来源的合并顺序：键越大越晚合并 = 优先级越高。
+
+    分三档（用户定的：按区间的优先，全量垫底）：
+      2  区间盖住了报表区间 —— 其中**越窄越优先**（最贴合的那份最后合并）
+      1  有区间但盖不住（部分重叠、或完全不沾边）
+      0  读不出区间（商品管理全量 JSON）—— 只做底，不许盖掉按区间导的表
+    同档里再按修改时间，越新越靠后。
+    """
+    if rng and window:
+        lo, hi = window
+        if rng[0] <= lo and rng[1] >= hi:
+            span = (_d(rng[1]) - _d(rng[0])).days
+            return (2, -span, mtime)
+        return (1, 0, mtime)
+    if rng:
+        return (1, 0, mtime)
+    return (0, 0, mtime)
+
+
 def _merge_aggregate(items: list[tuple[Path, list[tuple]]], label: str,
                      window: tuple[str, str] | None = None
                      ) -> tuple[list[tuple], int, int, list[str], tuple[str, str] | None]:
@@ -1412,7 +1489,8 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
                    ads_fields: dict | None = None,
                    affiliate_fields: dict | None = None,
                    mapping_fields: dict | None = None,
-                   window: tuple[str, str] | None = None) -> RawData:
+                   window: tuple[str, str] | None = None,
+                   latest_only: bool = True) -> RawData:
     """从**多个**目录一起读数据，跨目录合并去重。
 
     folders 按「从旧到新」排序传入。单个目录时行为和从前一样。
@@ -1441,6 +1519,13 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
     titles: list[str] = []
     # 广告 / 佣金实际用的是哪一段区间（这类表没有日期列，只能整段计入）
     ranges: dict = {}
+
+    # 订单 / 广告 / 佣金一律只用**最新导出的那一份**（用户要求：不复用旧文件）。
+    # 显式指定多份快照要合并时（--snapshots）例外，那种场景就是要拼起来。
+    if latest_only:
+        buckets["order"] = _pick_latest(buckets["order"], window, "订单表", issues)
+        buckets["ads"] = _pick_latest(buckets["ads"], window, "广告表", issues)
+        buckets["affiliate"] = _pick_latest(buckets["affiliate"], window, "联盟佣金表", issues)
 
     # ---- 订单：多份合并去重 ----
     orders: list[OrderLine] = []
@@ -1483,15 +1568,17 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
     # ---- 映射：本轮导出的 SKU 表是**第一选择**，累积主表只做兜底 ----
     #
     # 用户定的优先级，不能颠倒：
-    #   ① 这一轮取数刚导的「商品数据分析 → 按 SKU」表（区间对得上、最新）
+    #   ① 这一轮取数刚导的「商品数据分析 → 按 SKU」表（**区间对得上**的那份）
     #   ② 以前导过的 SKU 表 / 抓包 JSON（越新越优先）
     #   ③ 累积主表 master.csv —— 只在 SKU 表里查不到这个 sku_id 时才用
     #
-    # 以前是主表先合（self 优先），新表只能补缺；结果某个 SKU 改挂到新链接后，
-    # 主表里的老归属会把它顶回去，报表看着像"改了标题归属就乱了"。
+    # 「区间对得上」怎么判：SKU 表第一行就写着它导的是哪一段
+    # （`2026-09-01 ~ 2026-09-30`），按这个跟报表区间比。
+    # 能盖住报表区间的排最后合并（数字越大越晚 = 优先级越高），
+    # 其中区间更窄的又更优先；带不上区间的（商品管理全量 JSON）排最前只做底。
     sku_index = SkuIndex()
     parts: list[str] = []
-    fresh: list[tuple[float, str, SkuIndex]] = []
+    fresh: list[tuple[tuple, str, SkuIndex, str]] = []
     for mf, mrows in buckets["mapping"]:
         tidx = parse_mapping(mrows, mapping_fields)
         if len(tidx):
@@ -1499,7 +1586,8 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
                 mt = mf.stat().st_mtime
             except OSError:
                 mt = 0.0
-            fresh.append((mt, mf.name, tidx))
+            rng = table_range(mf, mrows)
+            fresh.append((_map_rank(rng, window, mt), mf.name, tidx, _rng_text(rng)))
         else:
             issues.append(f"映射表里没识别出 SKU ID / Product ID 列：{mf.name}")
     for jf, jidx in json_maps:
@@ -1507,16 +1595,24 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
             jt = jf.stat().st_mtime
         except OSError:
             jt = 0.0
-        fresh.append((jt, jf.name, jidx))
+        # 商品管理全量 JSON 不带区间：只能垫底，不能盖掉按区间导的表
+        fresh.append((_map_rank(None, window, jt), jf.name, jidx, "全量"))
 
     if not fresh:
         issues.append(
             "本轮没有导到「商品SKU表」：订单行只能靠历史映射认链接，"
             "新上架的 SKU 会归到「无ID」。取数时这一步不该被跳过"
         )
-    for _mt, _name, _idx in sorted(fresh, key=lambda x: x[0]):
-        sku_index.merge(_idx, override=True)      # 越新越算数
-        parts.append(_name)
+    for _key, _name, _idx, _rng in sorted(fresh, key=lambda x: x[0]):
+        sku_index.merge(_idx, override=True)      # 排在后面的赢
+        parts.append(f"{_name}（{_rng}）")
+
+    # 看看最后真正说了算的是哪一份，写进异常页——归属错了要能一眼看出用的是谁
+    if fresh and window:
+        _best = sorted(fresh, key=lambda x: x[0])[-1]
+        issues.append(
+            f"链接归属用的是 {_best[1]}（区间 {_best[3]}，报表区间 {window[0]}~{window[1]}）"
+        )
 
     if mapping_file and Path(mapping_file).exists():
         midx = parse_mapping(read_table(Path(mapping_file)), mapping_fields)
@@ -1533,14 +1629,24 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
     # 取数流程里 SKU 表是先导的，比订单表旧就说明这一步没跑成，
     # 链接归属只能靠历史数据——新上架的 SKU 会整片归到「无ID」。
     if fresh and buckets["order"]:
-        newest_map = max(x[0] for x in fresh)
+        map_times: list[float] = []
+        for _mf, _r in buckets["mapping"]:
+            try:
+                map_times.append(_mf.stat().st_mtime)
+            except OSError:
+                pass
+        for _jf, _i in json_maps:
+            try:
+                map_times.append(_jf.stat().st_mtime)
+            except OSError:
+                pass
         times = []
         for of, _r in buckets["order"]:
             try:
                 times.append(of.stat().st_mtime)
             except OSError:
                 pass
-        if times and newest_map < max(times) - 120:
+        if times and map_times and max(map_times) < max(times) - 120:
             issues.append(
                 "这次没有新导的「商品SKU表」（比订单表还旧），链接归属用的是历史数据；"
                 "本期新上架的 SKU 会归到「无ID」，重新取一次数即可"

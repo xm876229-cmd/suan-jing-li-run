@@ -419,7 +419,8 @@ def main(argv: list[str] | None = None) -> int:
             data = load_from_dirs(base_dirs, costs_path, params.usd_to_local, map_path,
                                   order_fields=order_fields, cost_fields=cost_fields,
                                   ads_fields=ads_fields, affiliate_fields=affiliate_fields,
-                                  mapping_fields=mapping_fields, window=_win)
+                                  mapping_fields=mapping_fields, window=_win,
+                                  latest_only=not bool(snap_dirs))
         else:
             if not args.dir.exists():
                 print(f"找不到目录：{args.dir}")

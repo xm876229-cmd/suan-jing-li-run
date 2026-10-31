@@ -952,23 +952,14 @@ async function runOrders({ startMs, endMs }, log) {
   const rTag = `${ymd(startMs)}-${ymd(endMs)}`;
   const wantName = `全部 笔订单-${rTag}-${stamp()}.csv`;
 
-  const sameRange = async () => {
-    const list = await exportRecords().catch(() => []);
-    return list.find((x) => isRealFileKey(x.file_key)
-      && decodeURIComponent(String(x.file_name || "")).includes(`全部 笔订单-${rTag}-`));
-  };
-
-  // ① 已有同区间的导出：直接拿，别再排一个
-  const exist = await sameRange();
-  if (exist) {
-    log(`发现同区间已生成的导出，直接复用：${decodeURIComponent(exist.file_name || "")}`);
-    const one = await saveOne(String(exist.export_task_id), exist, wantName);
-    return { saved: one.path, bytes: one.bytes, reused: true };
-  }
-
-  // ② 没有就建任务。大店（几万行）生成要几分钟，这一轮只等 48 秒，
-  //    等不到就排队，由后台每分钟去收——实测这条路是通的。
-  log("提交订单导出任务…");
+  // 用户明确要求：**每次运行都重新生成**，不许拿平台上以前那份算。
+  //
+  // 以前这里有一步「发现同区间已生成的导出就直接复用」，省掉大店 5 分钟的
+  // 生成时间；但复用意味着拿到的是**上次那一刻**的状态——这段时间里退的款、
+  // 取消的单都看不到。算净利宁可慢，也要反映当下。
+  //
+  // 所以这里只建新任务，不再查 export_record 复用。
+  log("提交订单导出任务（每次重新生成，不复用旧文件）…");
   const fullTask = await createTask(startMs, endMs, wantName);
   log(`任务已创建：${fullTask}`);
   const rec = await waitRecord(fullTask, 12, "订单导出");
@@ -1642,9 +1633,13 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   //     · 接口返回的数据里**没有「卖家SKU」**，而报表的款式编码列靠它算；
   //     · 导出的表才是后台「商品数据分析 → 按 SKU → 导出」的完整结果，
   //       含全部 SKU（不受分页 10 条限制）。
-  if (!done.length) {
+  //
+  //   用户要求：**每轮都按本次选区重新导一份**，不能因为「商品管理接口通了」
+  //   就跳过。那份接口数据是全量、不带区间的；区间内的归属只有这张表才准。
+  let skuTableSaved = false;
+  {
     try {
-      log("①-a 程序自动导出商品SKU表（不弹保存框）…");
+      log(`①-a 按区间 ${startDate} ~ ${shiftDate(endDateExclusive, -1)} 重新导出商品SKU表…`);
       // 页面的 timeRange 结束日期是**开区间**：
       // 传 10-21 只导到 10-20（实测表头就是 10-01 ~ 10-20，少一天）。
       // 所以这里传「区间的次日」，让它正好覆盖到末日。
@@ -1659,6 +1654,7 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
       if (got && got.path) {
         log(`   已接住导出表：${got.path}（${Math.round((got.bytes || 0) / 1024)} KB）`);
         done.push(`导出表 ${got.name || ""}`);
+        skuTableSaved = true;
       } else {
         log(`   导出没成功：${(got && got.error) || "未知原因"}`);
       }
@@ -1749,7 +1745,11 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     }
   }
 
-  startBgExport();
+  if (skuTableSaved) {
+    log("② 本轮已按区间导好商品SKU表，后台不再重复排一份");
+  } else {
+    startBgExport();
+  }
 
   if (!done.length) {
     // ② 已经在后台轮询（上面不 await），文件好了会自动入库；
