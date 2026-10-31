@@ -1,13 +1,17 @@
-"""导入 SKU→商品 映射：合并进主表，并记录改绑流水。
+"""导入 SKU→商品 映射：合并进主表，并记录异常流水。
 
 为什么映射也要主表，而不是直接用最新抓下来的那份：
-    链接一编辑，SKU 归属就可能变（一天变一次也正常）。最新那份只反映"现在"，
-    一旦某个老 SKU 从里面消失，历史订单里那些行就再也找不到商品ID，
-    会被整片归进「未识别商品」——报表看起来没错，实际少算了一个商品的全部净利。
+    最新那份只含「这一段有销量的 SKU」。一旦某个老 SKU 从里面消失
+    （这几个月没卖），历史订单里那些行就再也找不到商品ID，
+    会被整片归进「未识别商品」——报表看起来没错，实际少算了一条链接的净利。
+
+    注意：SKU ID 是平台唯一的，一个 SKU 只会属于一条链接。
+    把同一个规格加到另一条链接上，平台会生成**新的** SKU ID。
+    所以映射是一劳永逸的对应关系，不会随时间"改挂"。
 
 所以这里做增量合并：
     · 新 SKU        → 追加
-    · 商品ID 变绑    → 更新，并记一条 rebind 流水（旧商品 → 新商品）
+    · 商品ID 对不上  → 更新，并记一条 rebind 流水（这属于数据脏了，要留痕）
     · 卖家SKU/商品名 → 变了就更新（不记流水，属描述性字段）
     · 主表永远保留全部见过的 SKU
 
@@ -257,7 +261,7 @@ def merge_file(path: Path, master: dict[str, dict], events: list[dict], now: str
                 # 非主来源：只补缺，不改已有归属（归属以主来源为准）
                 same += 1
                 continue
-            # 链接改绑了商品：这是必须留痕的一类变更
+            # 同一个 SKU ID 指向了不同商品：SKU ID 不会改挂，这只可能是数据脏了
             events.append({"at": now, "kind": "rebind", "sku_id": sid,
                            "old": old["product_id"], "new": row["product_id"],
                            "seller_sku": row["seller_sku"]})
@@ -378,7 +382,8 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
 
     rebinds = [e for e in events if e["kind"] == "rebind"]
     if rebinds:
-        print(f"\n⚠ 本次有 {len(rebinds)} 个 SKU 改绑了商品（历史订单会按新商品归属统计）：")
+        print(f"\n⚠ 本次有 {len(rebinds)} 个 SKU 的归属跟主表对不上"
+              f"（SKU ID 不会改挂链接，多半是导出数据叠错了；已按这次的表覆盖）：")
         for e in rebinds[:8]:
             print(f"  SKU {e['sku_id']}（{e['seller_sku'] or '无卖家SKU'}）：商品 {e['old']} → {e['new']}")
     return 0

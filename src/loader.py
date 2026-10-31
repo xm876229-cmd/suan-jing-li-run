@@ -281,17 +281,22 @@ class SkuIndex:
         """合并另一份索引。
 
         override=False（默认）：self 优先，只补 self 没有的 —— 用于「主表垫底」。
-        override=True：other 优先，直接盖掉 —— 用于「越新的 SKU 表越算数」。
+        override=True：other 优先，直接盖掉 —— 用于「按区间的 SKU 表说了算」。
 
-        为什么两种都要：链接归属的第一选择是**这一轮刚导出的 SKU 表**，
-        累积主表只是查不到时的兜底。如果主表先合进来，同一个 SKU 在新的
-        SKU 表里已经改挂到新链接了，主表里的老归属会把它顶回去。
+        ⚠ 前提：**SKU ID 是平台内唯一的，一个 SKU 只属于一条链接**。
+        把同一个规格加到另一条链接上，平台会生成一个新的 SKU ID，
+        所以正常情况下绝对不会出现「同一个 SKU ID 指向两条不同链接」。
+
+        真出现了，只有两种可能：映射表拼错了（两次导出叠在一起）、
+        或者文件被手工改过。这种一定要报出来——以前是静默取第一条，
+        谁知道哪条是对的。
         """
         for sid, item in other.by_sku_id.items():
-            if override:
+            old = self.by_sku_id.get(sid)
+            if old is not None and to_str(old.get("product_id")) != to_str(item.get("product_id")):
+                self.conflicts.add(sid)
+            if override or old is None:
                 self.by_sku_id[sid] = item
-            else:
-                self.by_sku_id.setdefault(sid, item)
         for sku, items in other.by_seller_sku.items():
             bucket = self.by_seller_sku[sku]
             for it in items:
@@ -907,8 +912,9 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
     if sku_index.conflicts:
         sample = "、".join(sorted(sku_index.conflicts)[:3])
         issues.append(
-            f"映射表里 {len(sku_index.conflicts)} 个 SKU ID 指向了不同商品（如 {sample}），"
-            f"已取第一条；这属于映射数据冲突，建议重新导一次映射表"
+            f"有 {len(sku_index.conflicts)} 个 SKU ID 在不同来源里指向了不同商品（如 {sample}）。"
+            f"SKU ID 是平台唯一的、不会改挂到别的链接，所以这只能是映射数据拼错了"
+            f"（多次导出叠在一起 / 文件被手工改过）；已按最新那份取，建议清一次映射主表重导"
         )
     if ambiguous_rows:
         issues.append(
