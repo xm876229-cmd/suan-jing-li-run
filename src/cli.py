@@ -131,13 +131,17 @@ def refresh_link_info() -> None:
         print(f"⚠ 链接资料导出失败：{e}")
 
 
-def pick_mapping(explicit: Path | None) -> tuple[Path | None, str]:
+def pick_mapping(explicit: Path | None, store: str = "") -> tuple[Path | None, str]:
     """决定这次用哪份 SKU→商品 映射。
 
     优先用累积主表 data/mapping/master.csv。
     链接一编辑，SKU 归属就可能变，所以每次取数都会产生新的 sku_list_*.json；
     这里把比主表更新的那些合并进去（增量，幂等），再交主表去算。
     这样新商品当天就能算对，老 SKU 因为链接改过而消失的也不会丢归属。
+
+    店铺目录下的「商品SKU表」同样要归档进主表——那是每轮取数新导出来的，
+    在核算时是第一选择（见 loader.load_from_dirs），主表只负责兜底；
+    但换了电脑、或者那张表被清掉之后，能兜底的也就只有主表了。
     """
     if explicit:
         return explicit, "命令行指定"
@@ -158,6 +162,19 @@ def pick_mapping(explicit: Path | None) -> tuple[Path | None, str]:
         ]
     except Exception:
         fresh = []
+
+    # 各店铺的「商品SKU表」也一起归档
+    if store:
+        try:
+            d = paths.store_root(store) / "商品SKU表"
+            if d.is_dir():
+                for f in sorted(d.iterdir()):
+                    if (f.is_file() and f.suffix.lower() in (".xlsx", ".xls", ".csv")
+                            and not f.name.startswith("~$")
+                            and (not master.exists() or f.stat().st_mtime > master.stat().st_mtime)):
+                        fresh.append(f)
+        except Exception:  # noqa: BLE001
+            pass
 
     if fresh:
         try:
@@ -327,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"成本表：{costs_path.name}（{costs_note}）")
     else:
         print(f"⚠ {costs_note}，成本将按 0 计，净利会偏高")
-    map_path, map_note = pick_mapping(args.mapping)
+    map_path, map_note = pick_mapping(args.mapping, str(args.store or ""))
     if map_path:
         print(f"映射表：{map_path.name}（{map_note}）")
     else:

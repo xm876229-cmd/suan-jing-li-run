@@ -277,14 +277,21 @@ class SkuIndex:
         """某条链接的款式编码串：去重后用 / 连接。"""
         return "/".join(self.by_product_styles.get(to_str(product_id), []))
 
-    def merge(self, other: "SkuIndex") -> "SkuIndex":
-        """把 other 里本索引没有的条目补进来（self 优先）。
+    def merge(self, other: "SkuIndex", override: bool = False) -> "SkuIndex":
+        """合并另一份索引。
 
-        用途：累积主表 + 本次导出目录里的映射表合并使用。
-        主表保证老 SKU 不丢，目录表保证本次抓取完整——任一方缺失都不会算错。
+        override=False（默认）：self 优先，只补 self 没有的 —— 用于「主表垫底」。
+        override=True：other 优先，直接盖掉 —— 用于「越新的 SKU 表越算数」。
+
+        为什么两种都要：链接归属的第一选择是**这一轮刚导出的 SKU 表**，
+        累积主表只是查不到时的兜底。如果主表先合进来，同一个 SKU 在新的
+        SKU 表里已经改挂到新链接了，主表里的老归属会把它顶回去。
         """
         for sid, item in other.by_sku_id.items():
-            self.by_sku_id.setdefault(sid, item)
+            if override:
+                self.by_sku_id[sid] = item
+            else:
+                self.by_sku_id.setdefault(sid, item)
         for sku, items in other.by_seller_sku.items():
             bucket = self.by_seller_sku[sku]
             for it in items:
@@ -352,10 +359,11 @@ MULTIPACK_RE = re.compile(r"^(?P<base>.+?)[-\s](?P<n>\d+)\s*[Pp][Cc][Ss]$")
 #     V27-White-10Pcs      → V27
 #     V1【Set-LOVE】       → V1
 #     MY-J68-22cm+clip     → MY-J68
-# 规则：取第一个分隔符（- 【 （ ( 空格）之前的部分，
+#     M15*30pcs            → M15   （* 后面也是数量，不是编码的一部分）
+# 规则：取第一个分隔符（- * × 【 （ ( 空格）之前的部分，
 # 但「MY-J68」这种两段式要保留两段，所以先试「字母前缀-字母+数字」的整段。
-_STYLE_TWO_SEG = re.compile(r"^([A-Za-z]{1,3}-[A-Za-z]+\d*)(?=[-\[【（(\s]|$)")
-_STYLE_FIRST_SEG = re.compile(r"^([^\-\[【（(\s]+)")
+_STYLE_TWO_SEG = re.compile(r"^([A-Za-z]{1,3}-[A-Za-z]+\d*)(?=[\-*×\[【（(\s]|$)")
+_STYLE_FIRST_SEG = re.compile(r"^([^\-*×\[【（(\s]+)")
 
 
 def derive_style_code(seller_sku: str) -> str:
@@ -368,6 +376,19 @@ def derive_style_code(seller_sku: str) -> str:
         return m.group(1).strip()
     m = _STYLE_FIRST_SEG.match(s)
     return m.group(1).strip() if m else ""
+
+
+def derive_styles(seller_sku: str) -> list[str]:
+    """一个卖家编码里可能捆着好几个款式（MY-J33/J74/J28/J71-Beige）。
+
+    整串直接推会得到「MY」这种半截编码，所以先按 / 、 拆开再逐个推。
+    """
+    out: list[str] = []
+    for part in split_styles(seller_sku):
+        c = derive_style_code(part)
+        if c and c not in out:
+            out.append(c)
+    return out
 
 
 @dataclass
@@ -854,6 +875,16 @@ def resolve_cost(sku: str, costs: dict[str, float]) -> tuple[Optional[float], st
     return None, "miss"
 
 
+def split_styles(s: str) -> list[str]:
+    """把「款式编码」拆成单值。
+
+    卖家编码里有时一段就捆着好几个款式（MY-J33/J74/J28/J71-Beige），
+    直接被当成一个字符串用，报表上就会和别的行对不上——
+    同一条链接这行写 "MY-J33/J74/J28/J71"、那行只写 "J28"。
+    """
+    return [x for x in re.split(r"[/,，、;；]+", to_str(s)) if x]
+
+
 def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list[str]) -> None:
     unresolved = Counter()
     ambiguous_rows = 0
@@ -870,7 +901,7 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
             else:
                 unresolved[l.seller_sku or l.sku_id] += 1
         elif style:
-            styles_by_product[pid].add(style)
+            styles_by_product[pid].update(split_styles(style))
     # 卖家编码可以挂在多条链接下（用户明确说过：编码不唯一，只有 SKU ID 唯一），
     # 这种行无法靠编码判定归属，单独说明，不要混进「真的找不到」里。
     if sku_index.conflicts:
@@ -892,18 +923,29 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
         if l.product_id and not l.style_codes:
             l.style_codes = "/".join(sorted(styles_by_product.get(l.product_id, [])))
 
-    # 款式编码取「这条链接下全部 SKU」的，不是「本期出了单的那几个」。
+    # 款式编码：一条链接一个值，全链接的行必须拿到**同一串**编码。
     #
     # 模板《V1-净利》的算法是：
     #   TEXTJOIN("/", TRUE, UNIQUE(FILTER(链接资料!A:A, 链接资料!B:B=商品ID, "")))
-    # 它查的是链接资料表（该链接的全部 SKU），跟本期有没有出单无关。
-    # 少算了会让报表上的款式编码看着不对——用户一眼就能看出来。
+    # 也就是「这条链接下全部 SKU 的款式编码」，跟本期有没有出单无关。
+    #
+    # 以前这里只做了一半：能查到映射的行拿到的是整串列表，查不到的行走兜底
+    # 只留自己这一个编码，于是同一条链接里「这行写 MY-J33/J74/J28/J71、
+    # 那行只写 J28」，报表取第一行就成了随机结果。
+    # 现在把三处来源（映射里该链接的全部编码 / 本行映射编码 / 卖家编码推出的编码）
+    # 求并集，再回写给这个链接的每一行，结果跟行的先后无关。
     for l in lines:
         if not l.product_id:
             continue
-        full = sku_index.styles_of(l.product_id)
-        if full:
-            l.style_codes = full
+        codes = styles_by_product[l.product_id]
+        codes.update(split_styles(sku_index.styles_of(l.product_id)))
+        codes.update(derive_styles(l.seller_sku))
+    for l in lines:
+        if not l.product_id:
+            continue
+        codes = styles_by_product.get(l.product_id)
+        if codes:
+            l.style_codes = "/".join(sorted(codes))
 
     # 最后兜底：商品没认出来的行，款式编码直接从卖家编码推。
     #
@@ -913,7 +955,7 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
     # 看着像"程序没读到"，其实是顺序反了。
     for l in lines:
         if not l.style_codes:
-            derived = derive_style_code(l.seller_sku)
+            derived = "/".join(derive_styles(l.seller_sku))
             if derived:
                 l.style_codes = derived
 
@@ -1406,31 +1448,71 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
             f"（跳过：{'、'.join(skipped) if skipped else '无'}）"
         )
 
-    # ---- 映射：全部合并（主表优先），不挑一份 ----
+    # ---- 映射：本轮导出的 SKU 表是**第一选择**，累积主表只做兜底 ----
+    #
+    # 用户定的优先级，不能颠倒：
+    #   ① 这一轮取数刚导的「商品数据分析 → 按 SKU」表（区间对得上、最新）
+    #   ② 以前导过的 SKU 表 / 抓包 JSON（越新越优先）
+    #   ③ 累积主表 master.csv —— 只在 SKU 表里查不到这个 sku_id 时才用
+    #
+    # 以前是主表先合（self 优先），新表只能补缺；结果某个 SKU 改挂到新链接后，
+    # 主表里的老归属会把它顶回去，报表看着像"改了标题归属就乱了"。
     sku_index = SkuIndex()
     parts: list[str] = []
-    if mapping_file and Path(mapping_file).exists():
-        midx = parse_mapping(read_table(Path(mapping_file)), mapping_fields)
-        if len(midx):
-            sku_index.merge(midx)
-            parts.append(f"{Path(mapping_file).name}（累积主表）")
-        else:
-            issues.append(f"映射主表里没识别出 SKU ID / Product ID 列：{Path(mapping_file).name}")
-
+    fresh: list[tuple[float, str, SkuIndex]] = []
     for mf, mrows in buckets["mapping"]:
         tidx = parse_mapping(mrows, mapping_fields)
         if len(tidx):
-            sku_index.merge(tidx)
-            parts.append(mf.name)
+            try:
+                mt = mf.stat().st_mtime
+            except OSError:
+                mt = 0.0
+            fresh.append((mt, mf.name, tidx))
         else:
             issues.append(f"映射表里没识别出 SKU ID / Product ID 列：{mf.name}")
+    for jf, jidx in json_maps:
+        try:
+            jt = jf.stat().st_mtime
+        except OSError:
+            jt = 0.0
+        fresh.append((jt, jf.name, jidx))
 
-    for jf, jidx in sorted(json_maps, key=lambda x: x[0].stat().st_mtime):
-        sku_index.merge(jidx)
-        parts.append(jf.name)
+    if not fresh:
+        issues.append(
+            "本轮没有导到「商品SKU表」：订单行只能靠历史映射认链接，"
+            "新上架的 SKU 会归到「无ID」。取数时这一步不该被跳过"
+        )
+    for _mt, _name, _idx in sorted(fresh, key=lambda x: x[0]):
+        sku_index.merge(_idx, override=True)      # 越新越算数
+        parts.append(_name)
+
+    if mapping_file and Path(mapping_file).exists():
+        midx = parse_mapping(read_table(Path(mapping_file)), mapping_fields)
+        if len(midx):
+            sku_index.merge(midx)                 # 只补缺，绝不覆盖新表
+            parts.append(f"{Path(mapping_file).name}（兜底）")
+        else:
+            issues.append(f"映射主表里没识别出 SKU ID / Product ID 列：{Path(mapping_file).name}")
 
     if parts:
         sources["映射"] = " + ".join(parts)
+
+    # 这一轮的 SKU 表是不是新导的？拿它跟本轮订单表的修改时间比。
+    # 取数流程里 SKU 表是先导的，比订单表旧就说明这一步没跑成，
+    # 链接归属只能靠历史数据——新上架的 SKU 会整片归到「无ID」。
+    if fresh and buckets["order"]:
+        newest_map = max(x[0] for x in fresh)
+        times = []
+        for of, _r in buckets["order"]:
+            try:
+                times.append(of.stat().st_mtime)
+            except OSError:
+                pass
+        if times and newest_map < max(times) - 120:
+            issues.append(
+                "这次没有新导的「商品SKU表」（比订单表还旧），链接归属用的是历史数据；"
+                "本期新上架的 SKU 会归到「无ID」，重新取一次数即可"
+            )
 
     # ---- 成本 ----
     costs: dict[str, float] = {}
