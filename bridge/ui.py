@@ -775,6 +775,14 @@ _TEMPLATE = r"""<!DOCTYPE html>
             </label>
             <button class="danger" id="rep-del">删除勾选的</button>
           </div>
+          <div class="tools" style="margin:10px 0 0;gap:8px;align-items:center">
+            <span style="font-size:13px;color:var(--text-2)">保存到</span>
+            <input type="text" id="rep-dir" placeholder="留空 = 桌面"
+                   style="flex:1;min-width:260px;padding:7px 10px;font-size:13px;
+                          border:1px solid var(--line);border-radius:8px">
+            <button class="mini" id="rep-dir-pick">选择文件夹…</button>
+            <button class="mini" id="rep-dir-open">打开</button>
+          </div>
           <p class="muted" style="font-size:12.5px;margin:8px 0 12px">
             报表按店铺分目录存放（<span class="mono">报表\店名\</span>）。
             点「下载」会直接存到本机（设置里的「报表下载到哪儿」，没填就存桌面），
@@ -1851,10 +1859,55 @@ async function loadReports(){
             <button class="mini" data-dl-report="${esc(it.rel || it.name)}">下载</button></td></tr>`).join('') + '</tbody></table>';
     document.querySelectorAll('[data-view-report]').forEach(b =>
       b.onclick = () => viewReport(b.dataset.viewReport));
+    loadRepDir();
     document.querySelectorAll('[data-dl-report]').forEach(b =>
       b.onclick = () => saveReports([b.dataset.dlReport], b));
   }catch(e){ $('#rep-list').innerHTML = '<div class="empty">读取失败</div>'; }
 }
+
+/** 「保存到」：记住上次选的目录，存在设置里（report.download_dir） */
+async function loadRepDir(){
+  try{
+    const j = await (await fetch('/api/settings')).json();
+    const dir = ((j.settings || {}).report || {}).download_dir || '';
+    const el = document.getElementById('rep-dir');
+    if(el) el.value = dir;
+  }catch(e){ /* 读不到就留空，留空=桌面 */ }
+}
+
+async function saveRepDir(dir){
+  try{
+    await fetch('/api/settings', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({report: {download_dir: dir || ''}})});
+  }catch(e){ /* 存不上也不影响这次保存 */ }
+}
+
+const _repDirBtn = document.getElementById('rep-dir-pick');
+if(_repDirBtn) _repDirBtn.onclick = async () => {
+  const el = document.getElementById('rep-dir');
+  const cur = (el.value || '').trim();
+  const api = window.pywebview && window.pywebview.api;
+  if(api && api.pick_folder){
+    const picked = await api.pick_folder(cur);
+    if(picked){ el.value = picked; await saveRepDir(picked); toast('以后默认存到：' + picked); }
+  }else{
+    toast('浏览器里没有文件夹选择器，直接在上面输入路径即可');
+  }
+};
+const _repDirOpen = document.getElementById('rep-dir-open');
+if(_repDirOpen) _repDirOpen.onclick = async () => {
+  const el = document.getElementById('rep-dir');
+  const cur = (el.value || '').trim();
+  if(!cur){ toast('还没设置保存位置（留空 = 桌面）'); return; }
+  const api = window.pywebview && window.pywebview.api;
+  if(api && api.open_folder){
+    const ok = await api.open_folder(cur);
+    if(!ok) toast('打不开这个文件夹：' + cur);
+  }else{
+    toast('在这里输入路径即可');
+  }
+};
 
 /** 勾选中的报表（相对路径） */
 function repChecked(){
@@ -1909,16 +1962,18 @@ $('#rep-dl-all').onclick = (e) => {
 async function saveReports(names, btn){
   if(!names.length){ toast('先选报表'); return; }
   const wf = !!(document.getElementById('rep-formula') || {}).checked;
+  const dir = (document.getElementById('rep-dir') || {}).value || '';
   if(btn) btn.disabled = true;
   toast(wf ? '正在按原区间重算带公式版，稍等…' : '正在存…');
   try{
     const r = await fetch('/api/reports/save', {method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({names, with_formula: wf})});
+      body: JSON.stringify({names, with_formula: wf, dir: dir.trim()})});
     const j = await r.json();
     if(j.ok){
       toast('已存 ' + (j.saved||[]).length + ' 份到 ' + j.dir
             + ((j.failed||[]).length ? '；' + j.failed.length + ' 份没成功' : ''));
+      if(dir.trim()) saveRepDir(dir.trim());   // 记住这次用的目录
     }else{
       toast('没存成：' + (j.error || (j.failed||[]).join('；') || '未知原因'));
     }

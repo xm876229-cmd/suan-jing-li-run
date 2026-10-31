@@ -99,6 +99,48 @@ class NativeApi:
         except Exception:  # noqa: BLE001
             return ""
 
+    def pick_folder(self, default_dir: str = "") -> str:
+        """弹系统「选择文件夹」对话框，返回选中的路径（取消返回空字符串）。
+
+        报表页的「保存到」用它——窗口里不能靠浏览器的下载框，
+        但又得让人自己选存哪儿。
+        """
+        try:
+            import webview
+
+            w = webview.windows[0] if webview.windows else None
+            if w is None:
+                return ""
+            fd = getattr(webview, "FileDialog", None)
+            kind = getattr(fd, "FOLDER", None) if fd is not None else None
+            if kind is None:
+                kind = getattr(webview, "FOLDER_DIALOG", 20)
+            kw: dict = {}
+            if default_dir:
+                kw["directory"] = default_dir
+            try:
+                res = w.create_file_dialog(kind, **kw)
+            except TypeError:
+                res = w.create_file_dialog(kind)
+            if not res:
+                return ""
+            return res if isinstance(res, str) else (res[0] if res else "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def open_folder(self, path: str = "") -> bool:
+        """在资源管理器里打开一个文件夹（不存在就当失败）。"""
+        try:
+            from pathlib import Path as _P
+            d = _P(str(path or "")).expanduser()
+            if not d.is_dir():
+                return False
+            import os as _os
+            _os.startfile(str(d))  # noqa: S606  只在 Windows 桌面窗口里用
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
     def stop_bridge(self) -> bool:
         """关闭当前取数桥（含守护进程）。窗口进程本身不受影响。"""
         try:

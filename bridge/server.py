@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import json
+import tempfile
 import os
 import re
 import shutil
@@ -895,9 +896,14 @@ class Handler(BaseHTTPRequestHandler):
                 raw_dir = str(payload.get("dir") or stg.get("download_dir") or "").strip()
                 target = Path(raw_dir).expanduser() if raw_dir else Path.home() / "Desktop"
                 if not target.is_dir():
-                    target = Path.home() / "Desktop"
+                    try:
+                        # 用户可能手打一个新路径，先试着建出来，不要默默改存桌面
+                        target.mkdir(parents=True, exist_ok=True)
+                    except OSError:
+                        target = Path.home() / "Desktop"
                 saved: list[str] = []
                 failed: list[str] = []
+                tmp_dirs: list[Path] = []
                 for rel in names:
                     src = settings_api._find_report("", rel)
                     if src is None or not src.is_file():
@@ -911,7 +917,10 @@ class Handler(BaseHTTPRequestHandler):
                             continue
                         shop = rel.split("/")[0] if "/" in rel else ""
                         sid = _shop_id_by_name(shop)
-                        out = _report_out(shop or src.stem, m.group(1), m.group(2), "_带公式")
+                        # 重算的产物放临时目录：下完就删，别在「报表」页堆一堆 _带公式
+                        _tmp = Path(tempfile.mkdtemp(prefix="jingli_dl_"))
+                        tmp_dirs.append(_tmp)
+                        out = _tmp / f"{Path(rel).stem}_带公式.xlsx"
                         ok, msg = _run_calc_cmd(
                             _calc_cmd(sid, "", m.group(1), m.group(2), out, True))
                         if not ok:
@@ -921,6 +930,8 @@ class Handler(BaseHTTPRequestHandler):
                     dst = target / src.name
                     shutil.copy2(src, dst)
                     saved.append(str(dst))
+                for _d in tmp_dirs:
+                    shutil.rmtree(_d, ignore_errors=True)
                 _append_log(f"[报表] 存了 {len(saved)} 份到 {target}")
                 _json(self, {"ok": bool(saved), "dir": str(target),
                              "saved": saved, "failed": failed})
