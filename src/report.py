@@ -270,8 +270,48 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
                 h = f"{h}（{c}）"
         headers.append(h)
 
-    _title(ws, "净利润汇总（每条链接一行）", subtitle, span=max(8, len(headers)))
+    span_used = max(8, len(headers))
+    _title(ws, "净利润汇总（每条链接一行）", subtitle, span=span_used)
     _head(ws, headers)
+
+    # ── 汇总口径开关：含 / 不含 0 元样品单 ──
+    #
+    # 放在标题行右侧、合并区之外，横着滑也不会跑到看不见的地方。
+    # 带公式导出时是真开关（数据验证下拉），所有金额/订单数按它现算；
+    # 数值版没有明细辅助列可引，只能显示当前口径并提示怎么才能切。
+    # 辅助列（广告费/达人佣金）占 len(headers)+1、+2 且被隐藏，
+    # 开关必须排在它们右边，否则标签会被写进隐藏列，用户根本看不到。
+    ctl_col = max(span_used, len(headers) + (2 if with_formula else 0)) + 2
+    sw_col = ctl_col + 1
+    SW = f"${get_column_letter(sw_col)}$1"
+    cur_label = "不含样品" if res.exclude_zero_amount else "含样品"
+    _lbl = ws.cell(row=1, column=ctl_col,
+                   value="汇总口径" if with_formula else "汇总口径（导出带公式才能切）")
+    _lbl.font = Font(size=9, color="8A8A8A")
+    _lbl.alignment = Alignment(horizontal="right", vertical="center")
+    _sw = ws.cell(row=1, column=sw_col, value=cur_label)
+    _sw.font = Font(size=11, bold=True, color="8A5A00" if with_formula else "9A9A9A")
+    _sw.fill = PatternFill("solid", fgColor="FFE9A8" if with_formula else "F0F0F0")
+    _sw.alignment = Alignment(horizontal="center", vertical="center")
+    _sw.border = BORDER
+    ws.column_dimensions[get_column_letter(ctl_col)].width = 14 if with_formula else 30
+    ws.column_dimensions[get_column_letter(sw_col)].width = 12
+    if with_formula:
+        try:
+            from openpyxl.worksheet.datavalidation import DataValidation
+            _dv = DataValidation(type="list", formula1='"含样品,不含样品"',
+                                 allow_blank=False, showDropDown=False)
+            _dv.error = "只能选「含样品」或「不含样品」"
+            _dv.errorTitle = "汇总口径"
+            _dv.prompt = ("含样品：0 元样品单的发单费、成本、订单数都算进来；"
+                          "不含样品：整行剔除（纯正常订单口径）")
+            _dv.promptTitle = "切换汇总口径"
+            _dv.showInputMessage = True
+            _dv.showErrorMessage = True
+            ws.add_data_validation(_dv)
+            _dv.add(_sw)
+        except Exception:  # noqa: BLE001  下拉加不上也不能让报表出不来
+            pass
 
     # 行：合计 + 每条链接。合计行位置可配（顶部/底部）。
     t = res.total
@@ -306,28 +346,138 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
         ws.cell(row=2, column=ads_ci, value="广告费(辅助)")
         ws.cell(row=2, column=cm_ci, value="达人佣金(辅助)")
 
+    # 明细页辅助列的位置跟着表头定义走，别写死字母（列一加就全错）。
+    _db = len(DETAIL_HEADERS)
+    _c_sample = get_column_letter(_db + 2)     # 是否样品：1/0
+    _c_gmv = get_column_letter(_db + 3)        # 计入GMV
+    _c_ord = get_column_letter(_db + 4)        # 计入订单数
+    _c_item = get_column_letter(_db + 5)       # 计入件数
+    _c_paid = get_column_letter(_db + 6)       # 计入买家实付
+    _c_cost = get_column_letter(_db + 7)       # 计入成本 CNY
+    _c_netw = get_column_letter(_db + 8)       # 净利贡献（含样品）
+    _c_netwo = get_column_letter(_db + 9)      # 净利贡献（不含样品，样品行是 0）
+
+    # 费用按什么量计：从参数表里的 expr 认。
+    # 「本行订单数 * 发单费单价」按订单数，「本行GMV * 平台佣金率」按 GMV，
+    # 「广告花费」这种整期取数的没有单量基准，只能写成死数。
+    def _fee_base_of(fid: str) -> str:
+        for it in (res.cfg_with_sample or res.params_cfg or []):
+            if not isinstance(it, dict) or str(it.get("id") or "") != fid:
+                continue
+            e = str(it.get("expr") or "")
+            if "订单数" in e:
+                return "orders"
+            if "买家实付" in e:
+                return "paid"
+            if "GMV" in e:
+                return "gmv"
+            return "fixed"
+        return "gmv"
+
+    def _fee_counts_sample(fid: str) -> bool:
+        """这项费用原本算不算 0 元样品单（看含样品那套口径的 kinds）。
+
+        不算的那几项（订单服务费、交易手续费）切口径时就不该动；
+        一起按「含/不含样品」去缩放，会把它算多。
+        """
+        for it in (res.cfg_with_sample or []):
+            if not isinstance(it, dict) or str(it.get("id") or "") != fid:
+                continue
+            ks = it.get("kinds")
+            if not isinstance(ks, list):
+                return False              # 不看类别（广告/佣金），与口径无关
+            return "zero_amount" in ks
+        return True
+
+    def _fee_expr(fid: str, r: int, p) -> str | None:
+        """这一行的某项费用，按当前口径算（单位价 × 口径下的量）。"""
+        if p is None:
+            return None
+        if not _fee_counts_sample(fid):
+            # 这项本来就不含样品单，切口径不影响金额，直接给常数
+            return repr(float((p.fees or {}).get(fid, 0) or 0))
+        base = _fee_base_of(fid)
+        if base == "fixed":
+            return None                      # 广告/达人佣金跟订单无关，用原值
+        if base == "orders":
+            bval, bexpr = float(p.orders or 0), _scope(_c_ord, r)
+        elif base == "paid":
+            bval, bexpr = float(p.buyer_paid or 0), _scope(_c_paid, r)
+        else:
+            bval, bexpr = float(p.gmv or 0), _scope(_c_gmv, r)
+        if not bval:
+            # 按量计费的费用，量为 0 就是 0。这里以前返回 None 让上层退回
+            # 「导出时的死数」，于是口径切到「不含样品」、这条链接一单都不剩时，
+            # 发单费还挂着原值——合计会比正确的多出一截。
+            return "0.0"
+        unit = float((p.fees or {}).get(fid, 0) or 0) / bval
+        return f"({unit}*({bexpr}))"
+
+    def _sumifs(col: str, r: int, no_sample: bool = False) -> str:
+        cond = f",明细!${_c_sample}:${_c_sample},0" if no_sample else ""
+        return f"SUMIFS(明细!${col}:${col},明细!$C:$C,$C{r}{cond})"
+
+    def _scope(col: str, r: int, tail: str = "") -> str:
+        """按汇总口径取数：含样品取全部行，不含样品只取「是否样品=0」的行。"""
+        return (f'IF({SW}="不含样品",{_sumifs(col, r, True)},'
+                f'{_sumifs(col, r, False)}){tail}')
+
+    # 派生指标一律从明细列直算，**不引用同行可见单元格**。
+    # 因为用户能勾掉「成本」「净利」这些列，一勾掉引用就断，数就成 0 了。
+    A_L, M_L = get_column_letter(ads_ci), get_column_letter(cm_ci)
+
+    def _net_expr(r: int) -> str:
+        # 两套口径各有一列净利贡献，按开关取一列即可——
+        # 「不含样品」那列里样品行本身就是 0，不用再加条件。
+        return (f'IF({SW}="不含样品",'
+                f'{_sumifs(_c_netwo, r)},{_sumifs(_c_netw, r)})'
+                f'-${A_L}{r}-${M_L}{r}')
+
     def _f(key: str, r: int, pid_ok: bool, p=None) -> str | None:
         if not with_formula or not pid_ok:
             return None
         c = f"$C{r}"
         if key == "gmv":
-            return f"=SUMIFS(明细!$S:$S,明细!$C:$C,{c})"
+            return f"={_scope(_c_gmv, r)}"
         if key == "orders":
-            return f"=SUMIFS(明细!$T:$T,明细!$C:$C,{c})"
+            return f"={_scope(_c_ord, r)}"
         if key in ("net", "net_cny"):
-            base = f"SUMIFS(明细!$V:$V,明细!$C:$C,{c})"
-            if p is not None:
-                a = float((p.fees or {}).get(ads_fid, 0) or 0) if ads_fid else 0.0
-                m = float((p.fees or {}).get(cm_fid, 0) or 0) if cm_fid else 0.0
-                ws.cell(row=r, column=ads_ci, value=a)
-                ws.cell(row=r, column=cm_ci, value=m)
-                A, M = get_column_letter(ads_ci), get_column_letter(cm_ci)
-                base = f"({base}-${A}{r}-${M}{r})"
-            return f"={base}" if key == "net" else f"={base}/{fx}"
+            base = _net_expr(r)
+            return f"=({base})" if key == "net" else f"=({base})/{fx}"
         if key == "cost":
-            return f"=SUMIFS(明细!$U:$U,明细!$C:$C,{c})*{fx}"
+            return f"={_scope(_c_cost, r, f'*{fx}')}"
         if key == "items":
-            return f"=SUMIFS(明细!$H:$H,明细!$C:$C,{c})"
+            return f"={_scope(_c_item, r)}"
+        if key == "aov":
+            return f'=IFERROR({_scope(_c_gmv, r)}/{_scope(_c_ord, r)},0)'
+        if key == "gross_profit":
+            return f"={_scope(_c_gmv, r)}-{_scope(_c_cost, r, f'*{fx}')}"
+        if key == "gross_margin":
+            g = _scope(_c_gmv, r)
+            k = _scope(_c_cost, r, f"*{fx}")
+            return f"=IFERROR(({g}-{k})/({g}),0)"
+        if key == "net_rate":
+            return f"=IFERROR(({_net_expr(r)})/({_scope(_c_gmv, r)}),0)"
+        if key == "fee_total":
+            if p is None:
+                return None
+            parts: list[str] = []
+            for fid, _nm in fees:
+                e = _fee_expr(fid, r, p)
+                # 广告、达人佣金是整期取数，跟订单口径无关，直接当常数参与相加。
+                # 以前遇到这种就整列退回死数，导致合计行切了口径也不动。
+                parts.append(e if e else
+                             repr(float((p.fees or {}).get(fid, 0) or 0)))
+            return "=" + "+".join(parts) if parts else None
+        if key.startswith("fee:") or key.startswith("ratio:"):
+            fid = key.split(":", 1)[1]
+            e = _fee_expr(fid, r, p)
+            if e is None:
+                return None
+            if key.startswith("fee:"):
+                return f"={e}"
+            return f"=IFERROR({e}/({_scope(_c_gmv, r)}),0)"
+        return None
         if key == "aov" and "gmv" in col_of and "orders" in col_of:
             g = get_column_letter(col_of["gmv"])
             o = get_column_letter(col_of["orders"])
@@ -357,6 +507,13 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
             pid = str(getattr(res.products[idx], "product_id", "")) if idx < len(res.products) else ""
         pid_ok = bool(pid) and pid in det_pids
         prod = None if is_total else (res.products[idx] if idx < len(res.products) else None)
+        if with_formula and prod is not None:
+            # 广告费 / 达人佣金摊不到订单行上，单放两列给净利公式扣。
+            # 不管用户有没有勾「净利」列都要写，否则净利率那边引用到空值。
+            ws.cell(row=row, column=ads_ci,
+                    value=float((prod.fees or {}).get(ads_fid, 0) or 0) if ads_fid else 0.0)
+            ws.cell(row=row, column=cm_ci,
+                    value=float((prod.fees or {}).get(cm_fid, 0) or 0) if cm_fid else 0.0)
         for ci, (s, v) in enumerate(zip(specs, vals), 1):
             f = _f(s["key"], row, pid_ok, prod)
             cell = ws.cell(row=row, column=ci, value=v if f is None else f)
@@ -375,18 +532,46 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
                              if (s["neg"] and isinstance(v, (int, float)) and v < 0)
                              else Font(bold=True))
         if is_total and with_formula:
-            # 合计用 SUM 把上面几行加起来：哪几行带公式、哪几行是数值，都能算对
+            # 合计行也写成公式：能加的直接 SUM，派生列用合计之间的比值。
+            # 不然一切口径，明细和各行都变了、合计还是导出时那组数。
             span_end = row - 1
-            for key in ("gmv", "orders", "cost", "net", "net_cny", "items"):
-                ci = col_of.get(key)
-                if not ci or span_end < 3:
-                    continue
-                L = get_column_letter(ci)
-                ws.cell(row=row, column=ci, value=f"=SUM({L}3:{L}{span_end})")
-                ws.cell(row=row, column=ci).number_format = (
-                    MONEY if key != "orders" else INT)
-                ws.cell(row=row, column=ci).font = Font(bold=True)
-                ws.cell(row=row, column=ci).fill = TOTAL_FILL
+            if span_end >= 3:
+                def _cl(k):
+                    ci = col_of.get(k)
+                    return get_column_letter(ci) if ci else None
+
+                def _s(k):
+                    L = _cl(k)
+                    return f"SUM({L}3:{L}{span_end})" if L else None
+
+                _SUMMABLE = {"gmv", "orders", "items", "cost", "net", "net_cny",
+                             "fee_total", "buyer_paid"}
+                for ci2, sp in enumerate(specs, 1):
+                    key = sp["key"]
+                    f = None
+                    if key in _SUMMABLE or key.startswith("fee:"):
+                        e = _s(key)
+                        f = f"={e}" if e else None
+                    elif key == "aov" and _cl("gmv") and _cl("orders"):
+                        f = f"=IFERROR({_s('gmv')}/{_s('orders')},0)"
+                    elif key == "gross_profit" and _cl("gmv") and _cl("cost"):
+                        f = f"={_s('gmv')}-{_s('cost')}"
+                    elif key == "gross_margin" and _cl("gmv") and _cl("cost"):
+                        f = f"=IFERROR(({_s('gmv')}-{_s('cost')})/{_s('gmv')},0)"
+                    elif key == "net_rate" and _cl("gmv") and _cl("net"):
+                        f = f"=IFERROR({_s('net')}/{_s('gmv')},0)"
+                    elif key.startswith("ratio:"):
+                        fid = key.split(":", 1)[1]
+                        if _cl("fee:" + fid) and _cl("gmv"):
+                            f = f"=IFERROR({_s('fee:' + fid)}/{_s('gmv')},0)"
+                    if not f:
+                        continue
+                    tc = ws.cell(row=row, column=ci2, value=f)
+                    tc.number_format = {"money": MONEY, "pct": PCT, "int": INT}.get(
+                        sp["kind"], MONEY)
+                    tc.font = Font(bold=True)
+                    tc.fill = TOTAL_FILL
+                    tc.border = BORDER
         if is_total:
             ws.cell(row=row, column=1).border = TOP_BORDER
         row += 1
@@ -656,9 +841,14 @@ DETAIL_HEADERS = [
 # 「带公式导出」时追加到明细页末尾的辅助列。
 # 有了这几列，Excel 里就能用 SUMIFS 按「含样品 / 去样品」两套口径重算，
 # 不用回程序再跑一遍。列顺序：类别 / 是否样品 / 净利(含) / 净利(去)
+# 明细页最右边这 7 列是给「带公式」版本的汇总页用的：
+#   口径开关 = 含样品时，汇总取 S/T/U/V 列；= 不含样品时，取 W 列（样品行在这里是 0）。
+# 所以 S/T/U 一律按**含样品**口径写值，不要在导出时就把样品行清零，
+# 否则那个开关切过去是一半是数、一半是 0。
 DETAIL_AUX_HEADERS = ["订单类别", "是否样品",
-                      "计入GMV", "计入订单数", "计入成本(CNY)",
-                      "净利贡献(含样品)", "净利贡献(去样品)"]
+                      "计入GMV", "计入订单数", "计入件数", "计入买家实付",
+                      "计入成本(CNY)",
+                      "净利贡献(含样品)", "净利贡献(不含样品)"]
 
 
 def _role_kinds(cfg: list[dict], role: str) -> list[str] | None:
@@ -726,6 +916,16 @@ def _detail(ws: Worksheet, lines: list[OrderLine], res: CalcResult,
     _head(ws, heads)
     row = 3
     kw = tuple(res.refund_keywords or ())
+    # 固定两套口径：一套含 0 元样品单，一套不含。跟当前全局开关无关，
+    # 否则开关一打开，「含样品」那套就全成 0 了，汇总页的口径切不回去。
+    _cfg_w = res.cfg_with_sample or res.params_cfg
+    _cfg_wo = res.cfg_without_sample or res.compare_params_cfg
+    _g = _role_kinds(_cfg_w, "gmv")
+    _o = _role_kinds(_cfg_w, "order_count")
+    _i = _role_kinds(_cfg_w, "items")
+    _p = _role_kinds(_cfg_w, "buyer_paid")
+    _c = _role_kinds(_cfg_w, "cost")
+    _fx = float(res.params.cny_to_local or 1) or 1.0
     for l in lines:
         vals = [
             l.order_id, l.created, l.product_id or "无ID", l.style_codes,
@@ -736,24 +936,24 @@ def _detail(ws: Worksheet, lines: list[OrderLine], res: CalcResult,
         if with_formula:
             k = _kind_of(l, kw)
             is_sample = 1 if k == "zero_amount" else 0
-            dead = bool(res.exclude_zero_amount) and k == "zero_amount"
-            _g, _o, _c = _role_kinds(res.params_cfg, "gmv"), \
-                _role_kinds(res.params_cfg, "order_count"), \
-                _role_kinds(res.params_cfg, "cost")
-            gmv_in = 0.0 if (dead or (_g is not None and k not in _g)) else l.gmv
-            ord_in = 0.0 if (dead or (_o is not None and k not in _o)) else l.allocated_orders
-            if dead or l.cost_total_cny is None or (_c is not None and k not in _c):
+            gmv_in = 0.0 if (_g is not None and k not in _g) else l.gmv
+            ord_in = 0.0 if (_o is not None and k not in _o) else l.allocated_orders
+            item_in = 0.0 if (_i is not None and k not in _i) else l.qty
+            paid_in = 0.0 if (_p is not None and k not in _p) else l.allocated_paid
+            if l.cost_total_cny is None or (_c is not None and k not in _c):
                 cost_in = 0.0
             else:
-                cost_in = l.cost_total_cny * res.params.cny_to_local
-            vals += [k, is_sample, gmv_in, ord_in, cost_in,
-                     _row_net(l, k, res.params, res.params_cfg),
-                     _row_net(l, k, res.params, res.compare_params_cfg)]
+                # 列名写着 CNY，就得是 CNY。以前这里乘了汇率，
+                # 汇总页公式再乘一次 → 成本整整多出一个汇率的倍数。
+                cost_in = l.cost_total_cny
+            vals += [k, is_sample, gmv_in, ord_in, item_in, paid_in, cost_in,
+                     _row_net(l, k, res.params, _cfg_w),
+                     _row_net(l, k, res.params, _cfg_wo)]
         for c, v in enumerate(vals, 1):
             ws.cell(row=row, column=c, value=v).border = BORDER
         _fmt_row(ws, row,
-                 [9, 10, 13, 14] + ([19, 21, 22, 23] if with_formula else []),
-                 [], [8, 12] + ([18, 20] if with_formula else []))
+                 [9, 10, 13, 14] + ([19, 22, 23, 24, 25] if with_formula else []),
+                 [], [8, 12] + ([18, 20, 21] if with_formula else []))
         row += 1
     ws.freeze_panes = "A3"
     last_col = get_column_letter(len(heads))
@@ -765,7 +965,7 @@ def _detail(ws: Worksheet, lines: list[OrderLine], res: CalcResult,
 # ---------------- 口径 ----------------
 
 def _meta(ws: Worksheet, res: CalcResult, params: Params, switches: Switches,
-          subtitle: str, extra: dict[str, str]) -> None:
+          subtitle: str, extra: dict[str, str], with_formula: bool = False) -> None:
     _title(ws, "口径与参数快照", subtitle, span=4)
     _head(ws, ["项目", "值", "说明", ""])
 
@@ -795,12 +995,18 @@ def _meta(ws: Worksheet, res: CalcResult, params: Params, switches: Switches,
     ]
 
     # 总开关：报表上必须写明，否则事后看数会以为样品单被漏掉了
+    if with_formula:
+        _sw_hint = ("汇总页右上角有「汇总口径」下拉：切成「不含样品」整表立刻换成"
+                    "纯正常订单口径，切成「含样品」又换回来，不用重新跑一遍")
+    else:
+        _sw_hint = "导出时勾「导出带公式」，汇总页右上角就能现场切换含/不含样品"
     rows.append((
         "0 元样品单",
         "整表剔除（已打开「去除 0 元样品订单」）" if res.exclude_zero_amount else "按各参数自己的勾选",
-        ("发单费、商品成本、订单数、件数都不含样品单，算出来的是纯正常订单（含退货退款）的净利"
+        ("发单费、商品成本、订单数、件数都不含样品单，算出来的是纯正常订单（含退货退款）的净利。"
          if res.exclude_zero_amount else
-         "在「计算参数」页可一键打开「去除 0 元样品订单」"),
+         "在「计算参数」页可一键打开「去除 0 元样品订单」。")
+        + _sw_hint,
     ))
 
     # ── 参数表：这次每个参数算的是哪些订单类别 ──
@@ -901,7 +1107,8 @@ def build_report(res: CalcResult, lines: list[OrderLine], out_path: Path,
     if with_compare and res.compare_total is not None:
         _sample_compare(wb.create_sheet("样品对比"), res, subtitle)
     _meta(wb.create_sheet("口径"), res, res.params, switches, subtitle,
-          extra or {"生成时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+          extra or {"生成时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+          with_formula=with_formula)
 
     wb.properties.title = "净利润报表"
     wb.properties.creator = "算净利润引擎"

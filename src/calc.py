@@ -359,6 +359,10 @@ class CalcResult:
     # 对比口径下生效的参数表（样子跟 params_cfg 一样，只是样品单那格相反）。
     # 「带公式导出」要按它算另一套行级分摊值，所以得留在结果里。
     compare_params_cfg: list = field(default_factory=list)
+    # 「含 0 元样品单」和「不含」两套参数表，**固定**不受当前开关影响。
+    # 报表汇总页的口径开关靠它们算两套行级数值，切一下就能换口径。
+    cfg_with_sample: list = field(default_factory=list)
+    cfg_without_sample: list = field(default_factory=list)
 
     @property
     def total(self) -> ProductMetrics:
@@ -527,6 +531,17 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
 
     # 这个国家生效的一套：参数表、订单表字段标题、成本表列标题、净利公式。
     cc = formula.country_config(fcfg, params.country)
+
+    # 固定算两套参数表：一套含 0 元样品单、一套不含。
+    # 报表汇总页的「口径」开关要在这两套之间切，所以不能跟着当前开关走——
+    # 否则全局开关一开，「含样品」那套就永远是空的了。
+    _cfg_with = json.loads(json.dumps(fcfg)) if fcfg else {}
+    _cfg_with["exclude_zero_amount"] = False
+    _cfg_wo = json.loads(json.dumps(fcfg)) if fcfg else {}
+    _cfg_wo["exclude_zero_amount"] = True
+    cfg_with_sample = formula.country_config(_cfg_with, params.country)["params"]
+    cfg_without_sample = formula.country_config(_cfg_wo, params.country)["params"]
+
     order_aliases = merged_aliases(cc["order_fields"])
     # 把「订单表识别」里的字段 → 备胎标题 摊平成 {归一化标题: [归一化备胎...]}，
     # 公式里写 [折扣前小计] 这类主标题时，程序据此去找真正的列。
@@ -855,7 +870,9 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
                       refund_keywords=refund_kw,
                       params_cfg=[it for it in param_cfg if isinstance(it, dict)],
                       kind_labels=dict(fcfg.get("kinds") or KIND_LABELS),
-                      exclude_zero_amount=bool(cc.get("exclude_zero_amount")))
+                      exclude_zero_amount=bool(cc.get("exclude_zero_amount")),
+                      cfg_with_sample=cfg_with_sample,
+                      cfg_without_sample=cfg_without_sample)
 
 
 def compute(data: RawData, params: Params, switches: Switches,
