@@ -52,12 +52,32 @@ INBOX = paths.INBOX
 FIELDS = ["sku_id", "product_id", "seller_sku", "product_name", "style_code", "updated_at"]
 
 
+def _best_master() -> Path:
+    """实际该读哪份主表。
+
+    主表被别的程序占着（Excel/WPS 后台进程、预览窗口都算）时替换不掉，
+    那一轮的结果会落在 master.new.csv。**读的时候要认得它**，
+    否则就会出现「明明合并成功了，报表还是用老归属」——而且毫无提示。
+
+    两份都在的时候，谁的修改时间新用谁。
+    """
+    pending = MAPPING_DIR / "master.new.csv"
+    try:
+        if pending.exists():
+            if not MASTER.exists() or pending.stat().st_mtime >= MASTER.stat().st_mtime:
+                return pending
+    except OSError:
+        pass
+    return MASTER
+
+
 def load_master() -> dict[str, dict]:
     _promote_pending()
-    if not MASTER.exists():
+    src = _best_master()
+    if not src.exists():
         return {}
     out: dict[str, dict] = {}
-    with MASTER.open("r", encoding="utf-8-sig", newline="") as f:
+    with src.open("r", encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             sid = (row.get("sku_id") or "").strip()
             if not sid:

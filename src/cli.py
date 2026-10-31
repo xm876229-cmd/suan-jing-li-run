@@ -150,16 +150,25 @@ def pick_mapping(explicit: Path | None, store: str = "") -> tuple[Path | None, s
     refresh_link_info()
 
     master = MAPPING_DIR / "master.csv"
+    pending = MAPPING_DIR / "master.new.csv"
+
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    # 判断「有没有更新」要跟**实际在用的那份**比。
+    # 主表被占用时新数据都在 master.new.csv，还拿老主表的时间戳去比，
+    # 每轮都会把同一批文件重新合并一遍（大店要好几秒）。
+    base_mt = max(_mtime(master), _mtime(pending))
 
     # 候选文件的判断统一交给 import_mapping，避免两处规则不一致
     # （扩展可能产出 sku_list_*.json，也可能产出 sku_export_*.xlsx）
     fresh: list[Path] = []
     try:
         from scripts.import_mapping import find_sources
-        fresh = [
-            f for f in find_sources()
-            if not master.exists() or f.stat().st_mtime > master.stat().st_mtime
-        ]
+        fresh = [f for f in find_sources() if _mtime(f) > base_mt]
     except Exception:
         fresh = []
 
@@ -171,7 +180,7 @@ def pick_mapping(explicit: Path | None, store: str = "") -> tuple[Path | None, s
                 for f in sorted(d.iterdir()):
                     if (f.is_file() and f.suffix.lower() in (".xlsx", ".xls", ".csv")
                             and not f.name.startswith("~$")
-                            and (not master.exists() or f.stat().st_mtime > master.stat().st_mtime)):
+                            and _mtime(f) > base_mt):
                         fresh.append(f)
         except Exception:  # noqa: BLE001
             pass
@@ -184,13 +193,27 @@ def pick_mapping(explicit: Path | None, store: str = "") -> tuple[Path | None, s
         except Exception as e:
             print(f"⚠ 映射合并失败：{e}")
 
-    if master.exists():
+    # 主表可能被 Excel/WPS 占着替换不掉，那一轮的结果落在 master.new.csv。
+    # 读的时候要认得它，否则「合并成功了但报表还用老归属」，而且没有任何提示。
+    use = master
+    try:
+        if pending.exists() and master.exists() and pending.stat().st_mtime >= master.stat().st_mtime:
+            use = pending
+        elif pending.exists() and not master.exists():
+            use = pending
+    except OSError:
+        pass
+
+    if use.exists():
         try:
-            with master.open("r", encoding="utf-8-sig") as f:
+            with use.open("r", encoding="utf-8-sig") as f:
                 n = max(0, sum(1 for _ in f) - 1)
         except OSError:
             n = 0
-        return master, f"累积主表（{n} 条）"
+        note = f"累积主表（{n} 条）"
+        if use.name != "master.csv":
+            note += "，主表被占用，用的是待写入的那份"
+        return use, note
     return None, "未建累积主表（本次用导出目录里的映射表，链接改过后可能缺老 SKU 归属）"
 
 
