@@ -374,9 +374,27 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as _e:  # noqa: BLE001
             print(f"⚠ 广告表转换跳过：{_e}")
 
-        if snap_dirs:
-            # 多份快照合并：跨目录去重后再汇总
-            data = load_from_dirs(snap_dirs, costs_path, params.usd_to_local, map_path,
+        # 目录清单 = 本次要算的数据（快照或 inbox），再补上「店铺根目录的 SKU 表」。
+        #
+        # 为什么要补：订单表里**没有链接 ID**，只有 Seller SKU 和 SKU ID；
+        # 链接 ID 要靠 SKU ID 去「商品SKU表」里查。而那张表存在
+        # `stores/<店>/商品SKU表/`，不在 inbox 里，以前压根没被扫到，
+        # 于是新店铺整列「商品ID / 款式编码」都是空的。
+        base_dirs = list(snap_dirs) if snap_dirs else [args.dir]
+        _sku_tables = None
+        try:
+            if args.store:
+                from src import paths as _paths
+                _cand = _paths.store_root(str(args.store)) / "商品SKU表"
+                if _cand.is_dir():
+                    _sku_tables = _cand
+                    base_dirs = base_dirs + [_cand]
+        except Exception:  # noqa: BLE001
+            _sku_tables = None
+
+        if snap_dirs or _sku_tables:
+            # 多目录合并：跨目录去重后再汇总（SKU 表只贡献映射，不贡献订单）
+            data = load_from_dirs(base_dirs, costs_path, params.usd_to_local, map_path,
                                   order_fields=order_fields, cost_fields=cost_fields,
                                   ads_fields=ads_fields, affiliate_fields=affiliate_fields,
                                   mapping_fields=mapping_fields)
