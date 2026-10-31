@@ -394,10 +394,15 @@ def main(argv: list[str] | None = None) -> int:
 
         if snap_dirs or _sku_tables:
             # 多目录合并：跨目录去重后再汇总（SKU 表只贡献映射，不贡献订单）
+            # window 告诉加载器这次算哪一段：广告/佣金表是整段汇总的，
+            # 同时存在「9月」「9月~10月」两份时要挑最贴合的那份，否则费用串月。
+            _win = None
+            if args.dfrom and args.dto:
+                _win = (args.dfrom.isoformat(), args.dto.isoformat())
             data = load_from_dirs(base_dirs, costs_path, params.usd_to_local, map_path,
                                   order_fields=order_fields, cost_fields=cost_fields,
                                   ads_fields=ads_fields, affiliate_fields=affiliate_fields,
-                                  mapping_fields=mapping_fields)
+                                  mapping_fields=mapping_fields, window=_win)
         else:
             if not args.dir.exists():
                 print(f"找不到目录：{args.dir}")

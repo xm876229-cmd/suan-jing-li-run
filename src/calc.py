@@ -30,7 +30,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from . import formula, paths
 from .loader import OrderLine, RawData, merged_aliases
@@ -160,19 +160,61 @@ def load_rates(path: Path) -> tuple[dict[str, Params], Switches]:
 
 # ---------------- 日期过滤 ----------------
 
-_DATE_PATTERNS = (
-    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
-    "%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d",
-    "%m/%d/%Y %H:%M:%S", "%m/%d/%Y",
+# 两种写法都要认，而且**顺序不能反着猜**：
+#   马来站导出  08/10/2026 23:58:53      → 日/月/年
+#   菲律宾站导出 09/30/2026 11:35:45 PM  → 月/日/年 + 12 小时制
+# 以前只认「日/月/年」且不带 AM/PM，菲律宾店的日期一条都解析不出来，
+# 于是日期过滤整个失效——要 10 月的数据，实际把整份文件都算进去了，
+# 报表还只在异常页轻描淡写提一句。
+_ISO_PATTERNS = (
+    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d",
+)
+_DMY_PATTERNS = (
+    "%d/%m/%Y %I:%M:%S %p", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+)
+_MDY_PATTERNS = (
+    "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y",
 )
 
 
-def parse_dt(s: str) -> Optional[datetime]:
+def date_order(samples: Iterable[str]) -> str:
+    """判断这批日期是「日/月/年」还是「月/日/年」。
+
+    单看一行分不出来（08/10 两种读法都成立），但一整个月的导出必然有
+    日 > 12 的行：看到 30/09 就是日在前，看到 09/30 就是月在前。
+    两边的证据都没有就按日在前（马来站是主站，历史上也是这么读的）。
+    """
+    dmy = mdy = 0
+    for s in samples:
+        m = re.match(r"\s*(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", str(s or ""))
+        if not m:
+            continue
+        a, b = int(m.group(1)), int(m.group(2))
+        if a > 12 >= b:
+            dmy += 1
+        elif b > 12 >= a:
+            mdy += 1
+    return "mdy" if mdy > dmy else "dmy"
+
+
+def parse_dt(s: str, order: str = "") -> Optional[datetime]:
     s = (s or "").strip()
     if not s:
         return None
     s = s.replace("T", " ")
-    for p in _DATE_PATTERNS:
+    s = re.sub(r"\s+", " ", s)
+    for p in _ISO_PATTERNS:
+        try:
+            return datetime.strptime(s, p)
+        except ValueError:
+            continue
+    first, second = (_MDY_PATTERNS, _DMY_PATTERNS) if order == "mdy" else (_DMY_PATTERNS, _MDY_PATTERNS)
+    for p in first:
+        try:
+            return datetime.strptime(s, p)
+        except ValueError:
+            continue
+    for p in second:
         try:
             return datetime.strptime(s, p)
         except ValueError:
@@ -190,9 +232,12 @@ def filter_by_date(lines: list[OrderLine], dfrom: Optional[date], dto: Optional[
                    field: str = "created") -> list[OrderLine]:
     if not dfrom and not dto:
         return lines
+    # 先拿前 300 行判断这批数据是「日/月」还是「月/日」，再统一按那个顺序解析。
+    # 逐行各猜各的会把 08/10 拆成两个月份，报表就错得没边了。
+    order = date_order((l.created if field == "created" else l.paid) for l in lines[:300])
     out = []
     for l in lines:
-        dt = parse_dt(l.created if field == "created" else l.paid)
+        dt = parse_dt(l.created if field == "created" else l.paid, order)
         if dt is None:
             # 没有时间字段的行不丢弃，留给异常页提示
             out.append(l)
@@ -506,27 +551,24 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
     no_pid = 0
     missing_cost_lines = 0
     untimed = 0
-
-    # 有没有任何一行拿到了商品ID？
-    # 一条都没有，说明「商品映射表」是空的（SKU 取数失败 / 手工没导）。
-    # 这种情况下所有订单会挤成「无ID」一行，报表等于看不出是哪条链接赚的。
-    # 退一步：按「商品名称」归并——订单表里本来就有商品标题，同一链接的不同
-    # 变体标题相同，拆出来的粒度跟按商品ID基本一致。
-    has_any_pid = any(bool(l.product_id) for l in lines)
-    name_fallback = 0
+    # 这批订单的日期是「日/月」还是「月/日」，跟 filter_by_date 用同一套判断，
+    # 否则会出现「按日/月筛选了，但缺时间的行按另一套算」的错位。
+    _dorder = date_order((l.created if date_field == "created" else l.paid) for l in lines[:300])
 
     for l in lines:
-        if parse_dt(l.created if date_field == "created" else l.paid) is None:
+        if parse_dt(l.created if date_field == "created" else l.paid, _dorder) is None:
             untimed += 1
 
-        # 找不到商品ID 的行不丢弃、也不算异常：按「无ID」单独成组照常计入合计。
-        # 这类行通常是没有映射的新商品，不影响整体净利。
+        # 分组键只有一个：链接（商品ID）。订单表里没有商品ID 很正常，
+        # 商品ID 是靠订单行的「SKU ID」去商品SKU表里查出来的（SKU ID 唯一）。
+        #
+        # 以前这里有个兜底：一条商品ID都没有时，按「商品名称」归并。
+        # 已经删掉——标题会被改，同一条链接在订单里会出现好几个标题，
+        # 按标题归并会把一条链接拆成好几行（Chroma Home 实测 101 条链接里
+        # 有 7 条被拆过），而广告费只认商品ID、挂不到这些拆出来的行上，
+        # 于是「每条链接的 GMV / 净利」全是错的，表面还很正常。
+        # 宁可如实归进「无ID」，也不能给一份对不上的链接表。
         pid = l.product_id
-        if not pid and not has_any_pid:
-            nm = re.sub(r"\s+", " ", (l.product_name or "")).strip()
-            if nm:
-                pid = nm                     # 按商品名兜底归并
-                name_fallback += 1
         if not pid:
             pid = "无ID"
             no_pid += 1
@@ -536,7 +578,9 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
             buckets[pid] = m
         if l.style_codes and not m.style_codes:
             m.style_codes = l.style_codes
-        if l.product_name and pid not in names:
+        # 商品名只用来显示，不参与归并。
+        # 后来出现的覆盖前面的：链接标题被改过时，报表上显示最近一次的叫法。
+        if l.product_name:
             names[pid] = l.product_name
 
         m.lines += 1
@@ -737,17 +781,19 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
 
     products = sorted(buckets.values(), key=lambda x: x.gmv, reverse=True)
 
-    if name_fallback:
-        issues.append(
-            f"这次一份商品映射表都没拿到，{name_fallback} 行订单已按「商品名称」归并成链接"
-            f"（拆出的粒度跟按商品ID基本一样，但同名商品会被合并）。"
-            f"要按商品ID精确归并，请在「导入数据」页传一张商品映射表（Product ID + SKU ID）"
-        )
     if no_pid:
-        issues.append(
-            f"{no_pid} 行订单在所有映射来源里都找不到商品归属，已归入「无ID」照常计入合计。"
-            f"处理办法：更新主工作簿的「链接资料」表（覆盖当前全量），或重跑一次商品SKU取数"
-        )
+        if no_pid >= len(lines):
+            issues.append(
+                "整批订单都定位不到链接ID，报表只能给出一行「无ID」汇总。"
+                "原因是没有商品SKU表：链接ID 只能靠「SKU ID → 商品ID」查出来。"
+                "处理办法：让扩展取一次商品数据（后台「商品数据分析 → 按 SKU → 导出」，"
+                "程序会自动存到店铺目录下的「商品SKU表」），再重算"
+            )
+        else:
+            issues.append(
+                f"{no_pid} 行订单的 SKU ID 在商品SKU表里查不到对应链接，已归入「无ID」照常计入合计。"
+                f"处理办法：重新取一次商品数据（商品SKU表），新上架的 SKU 才会进映射"
+            )
     if missing_cost_lines:
         issues.append(f"{missing_cost_lines} 行订单缺成本，按 0 计，这些行的净利会偏高")
     if untimed:
@@ -755,6 +801,26 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
     if orphans:
         cost = sum(data.ads.get(p, 0) + data.commissions.get(p, 0) for p in orphans)
         issues.append(f"{len(orphans)} 个商品本期无订单但有广告/佣金支出（合计 {cost:.2f}），已单列，净利为负")
+
+    # 广告 / 佣金是「整段一个数」的表（没有日期列），只能整段计入。
+    # 一旦导出区间和报表区间对不上，那段日子的费用就被错算进这一期了——
+    # 这件事没法自动修，但必须让人看见，否则净利率会莫名其妙偏低。
+    for label, (a, b) in (getattr(data, "ranges", None) or {}).items():
+        lo = dfrom.isoformat() if dfrom else ""
+        hi = dto.isoformat() if dto else ""
+        if not lo and not hi:
+            continue
+        out = []
+        if lo and a < lo:
+            out.append(f"{a}~{lo} 早于报表起始日")
+        if hi and b > hi:
+            out.append(f"{hi}~{b} 晚于报表结束日")
+        if out:
+            issues.append(
+                f"{label}覆盖 {a}~{b}，报表区间是 {lo or '不限'}~{hi or '不限'}"
+                f"（{'、'.join(out)}）。这张表没有日期列，费用只能整段计入，"
+                f"这一项的净利会偏；建议按报表区间重新导一次"
+            )
 
     order_ids = {l.order_id for l in lines if l.order_id}
     return CalcResult(params=params, products=products, issues=issues,

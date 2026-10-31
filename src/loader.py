@@ -18,6 +18,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from numbers import Number
 from pathlib import Path
 from typing import Iterable, Optional
@@ -446,6 +447,10 @@ class RawData:
     sources: dict[str, str] = field(default_factory=dict)
     # 订单表的原始表头。计算参数里裸写标题时靠它匹配。
     order_titles: list[str] = field(default_factory=list)
+    # 各类表覆盖的导出区间 {「广告」: (起, 止)}。
+    # 广告 / 佣金表没有日期列，费用是按整段计入的；
+    # 报表区间和导出区间对不上时，净利会偏，得让人看得见。
+    ranges: dict = field(default_factory=dict)
 
 
 # ---------------- 文件读取 ----------------
@@ -1125,6 +1130,176 @@ def _merge_same_kind(items: list[tuple[Path, list[tuple]]],
     return [header] + merged, dropped, same_pid_diff
 
 
+_RANGE_RE = re.compile(
+    r"(\d{4})[-_./]?(\d{2})[-_./]?(\d{2}).{0,12}?(\d{4})[-_./]?(\d{2})[-_./]?(\d{2})"
+)
+
+
+def _d(iso: str) -> date:
+    """'2026-09-30' → date，用来比区间宽窄。"""
+    return datetime.strptime(iso, "%Y-%m-%d").date()
+
+
+def table_range(path: Path, rows: list[tuple]) -> tuple[str, str] | None:
+    """读出这份导出覆盖的日期区间（'20260901_20261028' / '2026-09-01 00 ~ 2026-09-30 23'）。
+
+    平台把区间写在文件名里，有的还写在第一行标题里，两处都翻一遍。
+    读不出来返回 None——那种老文件只能靠“同一商品以最后一份为准”兜底。
+    """
+    texts: list[str] = [Path(path).name]
+    for r in rows[:3]:
+        for c in r:
+            if isinstance(c, str) and 0 < len(c) < 160:
+                texts.append(c)
+    for t in texts:
+        for m in _RANGE_RE.finditer(t):
+            y1, m1, d1, y2, m2, d2 = (int(x) for x in m.groups())
+            if not (2000 <= y1 <= 2100 and 2000 <= y2 <= 2100):
+                continue
+            if not (1 <= m1 <= 12 and 1 <= m2 <= 12 and 1 <= d1 <= 31 and 1 <= d2 <= 31):
+                continue
+            a = f"{y1:04d}-{m1:02d}-{d1:02d}"
+            b = f"{y2:04d}-{m2:02d}-{d2:02d}"
+            if b < a:
+                a, b = b, a
+            return a, b
+    return None
+
+
+def _merge_aggregate(items: list[tuple[Path, list[tuple]]], label: str,
+                     window: tuple[str, str] | None = None
+                     ) -> tuple[list[tuple], int, int, list[str], tuple[str, str] | None]:
+    """合并**按区间汇总**的表（广告 / 联盟佣金）。
+
+    这类表没有日期列，一行就是一个商品在整个导出区间的合计。
+    两份区间有重叠的表直接相加，等于把同一个月算两遍——
+    实测 Chroma Home 就是这样：9/1~9/30 和 9/1~10/28 两份并存，
+    广告费从 71,170 变成 105,224，每条链接的净利全部偏低。
+
+    所以先看导出区间（文件名 / 首行标题里都写着）：
+      · 区间被另一份完全包住 → 整份丢掉（9 月那份被 9/1~10/28 包住）
+      · 区间不重叠 → 相加（9 月一份 + 10 月一份，本来就该加）
+      · 部分重叠 → 保留，但明确提示可能重复计入
+    读不出区间、又有多份的，退化成「同一商品以最后一份为准」——宁可少算不重复算。
+
+    返回 (合并后的行, 去掉的重复行数, 同商品不同值的行数, 提示, 这次用的区间)。
+    """
+    issues: list[str] = []
+    if not items:
+        return [], 0, 0, issues, None
+
+    # ① 多份快照里常常是同一个文件，内容一模一样，先按内容去重
+    uniq: list[tuple[Path, list[tuple]]] = []
+    seen_sig: set = set()
+    for path, rows in sorted(items, key=lambda x: x[0].stat().st_mtime):
+        sig = tuple(tuple(to_str(c) for c in r) for r in rows)
+        if sig in seen_sig:
+            continue
+        seen_sig.add(sig)
+        uniq.append((path, rows))
+
+    # ② 先按本次核算区间挑：刚好盖住这一段的那份优先
+    #
+    # 比如同时有「9/1~9/30」和「9/1~10/28」两份，算 9 月就该用前者，
+    # 用后者的结果是把 10 月的广告也摊进 9 月，净利凭空变低。
+    # 这一步必须排在「区间被包住就丢掉」之前——否则小的那份先被丢掉，
+    # 就再也挑不到它了。
+    ranges = [table_range(p, r) for p, r in uniq]
+    keep: list[int] = list(range(len(uniq)))
+    skipped: list[str] = []
+    if window:
+        lo, hi = window
+        covering = [i for i, r in enumerate(ranges) if r and r[0] <= lo and r[1] >= hi]
+        if covering:
+            def _span(i: int) -> int:
+                a, b = ranges[i]
+                return (_d(b) - _d(a)).days
+
+            best = min(covering, key=_span)
+            others = [uniq[j][0].name for j in range(len(uniq)) if j != best]
+            keep = [best]
+            if others:
+                issues.append(f"{label}：按报表区间 {lo}~{hi} 选用了 {uniq[best][0].name}，"
+                              f"另有 {len(others)} 份区间不同的表未参与")
+
+    # ②' 没有指定区间（或没有一份能盖住整段）时，按区间包含关系去重
+    if len(keep) > 1:
+        rest: list[int] = []
+        for i in keep:
+            ri = ranges[i]
+            p = uniq[i][0]
+            out = False
+            if ri:
+                for j in keep:
+                    if i == j or not ranges[j]:
+                        continue
+                    q, rj = uniq[j][0], ranges[j]
+                    if rj[0] <= ri[0] and rj[1] >= ri[1]:
+                        if rj != ri or q.stat().st_mtime > p.stat().st_mtime:
+                            out = True
+                            break
+            if out:
+                skipped.append(f"{p.name}（{ri[0]}~{ri[1]} 已被更大区间覆盖）")
+            else:
+                rest.append(i)
+        if rest:
+            keep = rest
+    if skipped:
+        issues.append(f"{label}：跳过了 {len(skipped)} 份区间被覆盖的旧表，避免重复计入——"
+                      + "、".join(skipped[:3]))
+
+    kept = [uniq[i] for i in keep]
+    kept_ranges = [ranges[i] for i in keep]
+
+    # ③ 部分重叠（谁也不包含谁）没法自动判断该算哪段，如实提示
+    overlap = []
+    for i in range(len(kept_ranges)):
+        for j in range(i + 1, len(kept_ranges)):
+            a, b = kept_ranges[i], kept_ranges[j]
+            if a and b and a[0] <= b[1] and b[0] <= a[1]:
+                overlap.append(f"{a[0]}~{a[1]} 与 {b[0]}~{b[1]}")
+    if overlap:
+        issues.append(f"{label}：有 {len(overlap)} 组导出区间部分重叠（{'、'.join(overlap[:2])}），"
+                      f"重叠那几天的费用可能被算了两遍；建议每次只导一个区间")
+
+    # ④ 行级合并：完全相同的行只留一条
+    merged: list[tuple] = []
+    seen: set = set()
+    dropped = 0
+    same_pid_diff = 0
+    pid_seen: dict[str, set] = {}
+    header: list[tuple] | None = None
+    for path, rows in kept:
+        hidx, cm = find_header_row(rows, ("product_id",))
+        if hidx < 0:
+            continue
+        if header is None:
+            header = rows[hidx]
+        pid_col = cm.get("product_id", -1)
+        dcol = _find_date_col(header)
+        for r in rows[hidx + 1:]:
+            vals = tuple(to_str(x) for x in r)
+            if vals in seen:
+                dropped += 1
+                continue
+            seen.add(vals)
+            merged.append(r)
+            pid = to_str(r[pid_col]) if 0 <= pid_col < len(r) else ""
+            dv = to_str(r[dcol]) if 0 <= dcol < len(r) else ""
+            sig = (pid, dv)
+            if pid in pid_seen and sig not in pid_seen[pid]:
+                same_pid_diff += 1
+            pid_seen.setdefault(pid, set()).add(sig)
+
+    used = None
+    _rs = [r for r in kept_ranges if r]
+    if _rs:
+        used = (min(r[0] for r in _rs), max(r[1] for r in _rs))
+    if header is None:
+        return [], dropped, same_pid_diff, issues, used
+    return [header] + merged, dropped, same_pid_diff, issues, used
+
+
 def _merge_orders(items: list[tuple[Path, list[tuple]]],
                   order_fields: dict | None) -> tuple[list[OrderLine], int, list[str]]:
     """多份订单表合并。
@@ -1184,10 +1359,14 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
                    cost_fields: dict | None = None,
                    ads_fields: dict | None = None,
                    affiliate_fields: dict | None = None,
-                   mapping_fields: dict | None = None) -> RawData:
+                   mapping_fields: dict | None = None,
+                   window: tuple[str, str] | None = None) -> RawData:
     """从**多个**目录一起读数据，跨目录合并去重。
 
     folders 按「从旧到新」排序传入。单个目录时行为和从前一样。
+    window 是这次要核算的日期区间（ISO 字符串），用来在几份广告/佣金表里
+    挑出最贴合的那一份——这类表是整段汇总的，选错一份就等于把别的月份
+    的费用也算进来了。
     """
     folders = [Path(f) for f in folders if Path(f) and Path(f).is_dir()]
     if not folders:
@@ -1208,6 +1387,8 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
     issues: list[str] = []
     sources: dict[str, str] = {}
     titles: list[str] = []
+    # 广告 / 佣金实际用的是哪一段区间（这类表没有日期列，只能整段计入）
+    ranges: dict = {}
 
     # ---- 订单：多份合并去重 ----
     orders: list[OrderLine] = []
@@ -1276,10 +1457,13 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
     # ---- 广告 / 联盟：多份合并去重后汇总 ----
     ads: dict[str, float] = {}
     if buckets["ads"]:
-        mrows, dropped, diff = _merge_same_kind(buckets["ads"], "ads")
+        mrows, dropped, diff, agg_issues, used = _merge_aggregate(buckets["ads"], "广告表", window)
+        issues += agg_issues
         ads, ad_issues = parse_ads(mrows, usd_to_local, ads_fields)
         issues += ad_issues
         sources["广告"] = " + ".join(p.name for p, _ in buckets["ads"])
+        if used:
+            ranges["广告表"] = used
         if len(buckets["ads"]) > 1:
             issues.append(f"广告表合并：{len(buckets['ads'])} 份快照，去重 {dropped} 行")
             if diff:
@@ -1288,10 +1472,14 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
 
     commissions: dict[str, float] = {}
     if buckets["affiliate"]:
-        mrows, dropped, diff = _merge_same_kind(buckets["affiliate"], "affiliate")
+        mrows, dropped, diff, agg_issues, used = _merge_aggregate(
+            buckets["affiliate"], "联盟佣金表", window)
+        issues += agg_issues
         commissions, com_issues = parse_commissions(mrows, affiliate_fields)
         issues += com_issues
         sources["联盟佣金"] = " + ".join(p.name for p, _ in buckets["affiliate"])
+        if used:
+            ranges["联盟佣金表"] = used
         if len(buckets["affiliate"]) > 1:
             issues.append(f"联盟佣金表合并：{len(buckets['affiliate'])} 份快照，去重 {dropped} 行")
 
@@ -1300,7 +1488,14 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
             continue
         # 映射表现在是全局主表（数据/mapping/master.csv），不放在店目录里，
         # 所以「店目录没有映射表」是正常的——只要已经有 SKU→商品 数据就不该报警。
-        if kind == "mapping" and len(getattr(sku_index, "by_sku_id", {}) or {}):
+        if kind == "mapping":
+            if len(getattr(sku_index, "by_sku_id", {}) or {}):
+                continue
+            issues.append(
+                "没有商品SKU表（SKU ID → 商品ID）：订单表里本来就没有链接ID，"
+                "少了这张表所有订单只能归到「无ID」，看不出哪条链接赚了钱。"
+                "扩展取商品数据时会自动导出这张表，存到店铺目录下的「商品SKU表」"
+            )
             continue
         issues.append(f"目录里没识别出{label}，相关字段按 0 计")
 
@@ -1309,7 +1504,7 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
 
     return RawData(orders=orders, costs=costs, sku_index=sku_index, ads=ads,
                    commissions=commissions, issues=issues, sources=sources,
-                   order_titles=titles)
+                   order_titles=titles, ranges=ranges)
 
 
 def load_from_dir(folder: Path, costs_file: Optional[Path] = None,

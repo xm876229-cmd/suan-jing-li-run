@@ -49,6 +49,7 @@ FIELDS = ["sku_id", "product_id", "seller_sku", "product_name", "style_code", "u
 
 
 def load_master() -> dict[str, dict]:
+    _promote_pending()
     if not MASTER.exists():
         return {}
     out: dict[str, dict] = {}
@@ -61,13 +62,57 @@ def load_master() -> dict[str, dict]:
     return out
 
 
-def write_master(data: dict[str, dict]) -> None:
+def _promote_pending() -> None:
+    """把上次没能写进主表的结果补写进去。
+
+    主表被 Excel / WPS 打开着的时候是替换不掉的（Windows 锁文件），
+    那一轮的结果会先存成 master.new.csv；下次启动先把它顶上去，
+    就不会出现「每次都重新合并一遍、主表永远停在旧版本」。
+    """
+    pending = MAPPING_DIR / "master.new.csv"
+    if not pending.exists():
+        return
+    try:
+        os.replace(pending, MASTER)
+    except OSError:
+        pass
+
+
+def write_master(data: dict[str, dict]) -> bool:
+    """写主表：先写临时文件再原子替换。
+
+    直接 open("w") 写着写着失败（磁盘满 / 被占用），主表就成了写了一半的
+    半张表，下次读进来 SKU 归属整片丢失，而且报错还看不出来。
+    所以一律走「临时文件 + os.replace」。
+
+    返回 False 表示主表被占用、没替换成功——结果已留在 master.new.csv，
+    下次启动会自动顶上去，不会丢。
+    """
     MAPPING_DIR.mkdir(parents=True, exist_ok=True)
-    with MASTER.open("w", encoding="utf-8", newline="") as f:
+    tmp = MAPPING_DIR / "master.csv.tmp"
+    with tmp.open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
         w.writeheader()
         for sid in sorted(data):
             w.writerow(data[sid])
+
+    for _ in range(3):
+        try:
+            os.replace(tmp, MASTER)
+            return True
+        except PermissionError:
+            time.sleep(0.4)
+        except OSError:
+            break
+
+    pending = MAPPING_DIR / "master.new.csv"
+    try:
+        os.replace(tmp, pending)
+    except OSError:
+        pending = tmp
+    print(f"⚠ 主表被占用（可能在 Excel/WPS 里开着），这一轮结果已存到 {pending.name}，"
+          f"下次启动会自动顶上去")
+    return False
 
 
 SUFFIXES = (".json", ".xlsx", ".xls", ".csv")
@@ -321,8 +366,8 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
         total[2] += same
         print(f"  {src.name}：新增 {added}｜改绑 {rebound}｜未变 {same}")
 
-    write_master(master)
-    if events:
+    ok = write_master(master)
+    if events and ok:
         MAPPING_DIR.mkdir(parents=True, exist_ok=True)
         with HISTORY.open("a", encoding="utf-8") as f:
             for e in events:

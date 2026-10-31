@@ -419,9 +419,11 @@ def _fee_breakdown(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
 # ---------------- 日趋势 ----------------
 
 def _daily(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: str) -> None:
-    from .calc import order_kind, parse_dt
+    from .calc import date_order, order_kind, parse_dt
     _title(ws, "日趋势", subtitle, span=6)
     _head(ws, ["日期", "GMV", "订单数", "买家实付", "净利(本地)", "净利率"])
+    # 日期是「日/月」还是「月/日」按整批判断，不能逐行猜
+    dorder = date_order(l.created for l in lines[:300])
 
     day_gmv: dict[str, float] = {}
     day_paid: dict[str, float] = {}
@@ -434,7 +436,7 @@ def _daily(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: str
             continue
         if drop_zero and order_kind(l, refund_kw) == "zero_amount":
             continue
-        dt = parse_dt(l.created)
+        dt = parse_dt(l.created, dorder)
         key = dt.date().isoformat() if dt else "无日期"
         day_gmv[key] = day_gmv.get(key, 0) + l.gmv
         day_paid[key] = day_paid.get(key, 0) + l.allocated_paid
