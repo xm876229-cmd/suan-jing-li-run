@@ -239,8 +239,9 @@ def filter_by_date(lines: list[OrderLine], dfrom: Optional[date], dto: Optional[
     for l in lines:
         dt = parse_dt(l.created if field == "created" else l.paid, order)
         if dt is None:
-            # 没有时间字段的行不丢弃，留给异常页提示
-            out.append(l)
+            # 选了区间就必须守住区间：时间读不出来的行**不**计入，
+            # 只在异常页报数量。以前是「留下照算」，一旦遇上没见过的日期格式，
+            # 整份文件会被算进每一个月份，而报表上只轻描淡写提一句。
             continue
         d = dt.date()
         if dfrom and d < dfrom:
@@ -550,15 +551,16 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
     names: dict[str, str] = {}
     no_pid = 0
     missing_cost_lines = 0
-    untimed = 0
     # 这批订单的日期是「日/月」还是「月/日」，跟 filter_by_date 用同一套判断，
     # 否则会出现「按日/月筛选了，但缺时间的行按另一套算」的错位。
     _dorder = date_order((l.created if date_field == "created" else l.paid) for l in lines[:300])
+    # 时间读不出来的行：选了区间时已经被 filter_by_date 排除，这里只统计给人看
+    untimed = sum(
+        1 for l in data.orders
+        if parse_dt(l.created if date_field == "created" else l.paid, _dorder) is None
+    )
 
     for l in lines:
-        if parse_dt(l.created if date_field == "created" else l.paid, _dorder) is None:
-            untimed += 1
-
         # 分组键只有一个：链接（商品ID）。订单表里没有商品ID 很正常，
         # 商品ID 是靠订单行的「SKU ID」去商品SKU表里查出来的（SKU ID 唯一）。
         #
@@ -797,7 +799,13 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
     if missing_cost_lines:
         issues.append(f"{missing_cost_lines} 行订单缺成本，按 0 计，这些行的净利会偏高")
     if untimed:
-        issues.append(f"{untimed} 行订单缺少可解析的时间字段，未按日期过滤，已全部计入")
+        if dfrom or dto:
+            issues.append(
+                f"{untimed} 行订单的日期读不出来（格式没见过），已排除、不计入任何区间。"
+                f"这是为了避免它们被算进每一个月；把这份订单表的日期列样子反馈一下就能加上"
+            )
+        else:
+            issues.append(f"{untimed} 行订单缺少可解析的时间字段，本次没选区间，已全部计入")
     if orphans:
         cost = sum(data.ads.get(p, 0) + data.commissions.get(p, 0) for p in orphans)
         issues.append(f"{len(orphans)} 个商品本期无订单但有广告/佣金支出（合计 {cost:.2f}），已单列，净利为负")
