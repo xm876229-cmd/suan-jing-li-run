@@ -142,6 +142,10 @@ def run(cmd: list[str], **kw) -> None:
         raise SystemExit(f"命令失败（退出码 {r.returncode}）")
 
 
+_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".DS_Store",
+                                 "Thumbs.db", "*.log")
+
+
 def pyinstaller(args: list[str]) -> None:
     run([sys.executable, "-m", "PyInstaller"] + PYI_BASE + args)
 
@@ -228,14 +232,17 @@ def build_app() -> Path:
             _copy_missing_tree(src, out / CN_DIRS[name])
         elif name in CN_DIRS:
             # 顶层用中文名：浏览器扩展 / 文档（程序文件，随版本更新覆盖）
-            shutil.copytree(src, out / CN_DIRS[name], dirs_exist_ok=True)
+            shutil.copytree(src, out / CN_DIRS[name], dirs_exist_ok=True, ignore=_IGNORE)
             if name == "extension":
                 _stamp_ext_version(out / CN_DIRS[name])
         elif name in INNER_DIRS:
-            # 代码副本收进 _internal/源码/，顶层清爽点
-            shutil.copytree(src, out / "_internal" / "源码" / name, dirs_exist_ok=True)
+            # 代码副本收进 _internal/源码/，顶层清爽点。
+            # 一定要排掉 __pycache__：发布包里带 .pyc 既占体积，
+            # 又可能盖不过源码的时间戳而加载到旧字节码。
+            shutil.copytree(src, out / "_internal" / "源码" / name,
+                            dirs_exist_ok=True, ignore=_IGNORE)
         else:
-            shutil.copytree(src, out / name, dirs_exist_ok=True)
+            shutil.copytree(src, out / name, dirs_exist_ok=True, ignore=_IGNORE)
     for name in RESOURCE_FILES:
         src = ROOT / name
         if src.exists():

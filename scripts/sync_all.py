@@ -138,6 +138,14 @@ def sync(build: bool) -> int:
                 except OSError:
                     pass
 
+    # 安装版平时跑的就是 exe / 顶层源码：只同步扩展不改程序，
+    # 会出现「界面是新的、算出来的数是旧的」。这一步不能省。
+    try:
+        from scripts import sync_installed
+        sync_installed.sync(verbose=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  安装版程序同步失败（忽略）：{e}")
+
     print("\n完成。浏览器里还要点一次扩展的「刷新」才会用上新代码。")
     return 0
 
