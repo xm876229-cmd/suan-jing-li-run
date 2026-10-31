@@ -1,0 +1,25 @@
+{
+  "id": "20261030-1710-18f5dc11",
+  "at": "2026-10-30 17:10:27",
+  "created_at": "2026-10-30 17:10:27",
+  "shop_id": "7495938282526575046",
+  "store_name": "Your-Self Home",
+  "range": {
+    "from": "2026-10-01",
+    "to": "2026-10-29"
+  },
+  "files": [
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261029.csv",
+      "bytes": 11116,
+      "rows": 125,
+      "kind": "other",
+      "mtime": "2026-10-30 17:10"
+    }
+  ],
+  "kinds": {
+    "other": 125
+  },
+  "signature": "18f5dc11addf",
+  "note": ""
+}

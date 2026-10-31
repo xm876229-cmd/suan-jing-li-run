@@ -900,6 +900,18 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
         if full:
             l.style_codes = full
 
+    # 最后兜底：商品没认出来的行，款式编码直接从卖家编码推。
+    #
+    # 款式编码本来就写在卖家 SKU 里（V27-White-10Pcs → V27，
+    # M15-RoseRed-100P → M15），不需要映射表也不需要商品 ID。
+    # 以前这条只在映射里查到商品时才顺带带上，新店铺没有映射就整列空着，
+    # 看着像"程序没读到"，其实是顺序反了。
+    for l in lines:
+        if not l.style_codes:
+            derived = derive_style_code(l.seller_sku)
+            if derived:
+                l.style_codes = derived
+
 
 def attach_costs(lines: list[OrderLine], costs: dict[str, float], issues: list[str]) -> None:
     missing = Counter()

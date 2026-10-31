@@ -1,0 +1,62 @@
+{
+  "id": "20261031-1349-54aff754",
+  "at": "2026-10-31 13:49:55",
+  "created_at": "2026-10-31 13:49:55",
+  "shop_id": "7495895952415426722",
+  "store_name": "Chroma Home",
+  "range": {
+    "from": "2026-10-01",
+    "to": "2026-10-30"
+  },
+  "files": [
+    {
+      "name": "creative data for product campaigns (2026-10-01 00 ~ 2026-10-30 23) (2).csv",
+      "bytes": 18465,
+      "rows": 201,
+      "kind": "ads",
+      "mtime": "2026-10-31 12:09"
+    },
+    {
+      "name": "creative data for product campaigns (2026-10-01 00 ~ 2026-10-30 23).csv",
+      "bytes": 17902,
+      "rows": 201,
+      "kind": "ads",
+      "mtime": "2026-10-31 10:49"
+    },
+    {
+      "name": "Product campaign data 2026-10-01 - 2026-10-30.xlsx",
+      "bytes": 68589,
+      "rows": 0,
+      "kind": "other",
+      "mtime": "2026-10-31 13:40"
+    },
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261030 (2).csv",
+      "bytes": 24826,
+      "rows": 255,
+      "kind": "affiliate",
+      "mtime": "2026-10-31 12:09"
+    },
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261030 (3).csv",
+      "bytes": 24826,
+      "rows": 255,
+      "kind": "affiliate",
+      "mtime": "2026-10-31 13:40"
+    },
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261030.csv",
+      "bytes": 24826,
+      "rows": 255,
+      "kind": "affiliate",
+      "mtime": "2026-10-31 10:49"
+    }
+  ],
+  "kinds": {
+    "ads": 402,
+    "other": 0,
+    "affiliate": 765
+  },
+  "signature": "54aff75494aa",
+  "note": ""
+}

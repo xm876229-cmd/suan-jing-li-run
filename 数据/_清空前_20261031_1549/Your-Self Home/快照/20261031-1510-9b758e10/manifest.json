@@ -1,0 +1,119 @@
+{
+  "id": "20261031-1510-9b758e10",
+  "at": "2026-10-31 15:10:41",
+  "created_at": "2026-10-31 15:10:41",
+  "shop_id": "7495938282526575046",
+  "store_name": "Your-Self Home",
+  "range": {
+    "from": "2026-10-01",
+    "to": "2026-10-30"
+  },
+  "files": [
+    {
+      "name": "creative data for product campaigns (2026-10-01_2026-10-29).csv",
+      "bytes": 1643,
+      "rows": 47,
+      "kind": "ads",
+      "mtime": "2026-10-31 15:01"
+    },
+    {
+      "name": "creative data for product campaigns (2026-10-01_2026-10-30).csv",
+      "bytes": 1643,
+      "rows": 47,
+      "kind": "ads",
+      "mtime": "2026-10-31 15:01"
+    },
+    {
+      "name": "Product campaign data 2026-10-01 - 2026-10-29.xlsx",
+      "bytes": 25320,
+      "rows": 0,
+      "kind": "other",
+      "mtime": "2026-10-30 18:51"
+    },
+    {
+      "name": "Product campaign data 2026-10-01 - 2026-10-30 (2).xlsx",
+      "bytes": 27121,
+      "rows": 0,
+      "kind": "other",
+      "mtime": "2026-10-31 15:09"
+    },
+    {
+      "name": "Product campaign data 2026-10-01 - 2026-10-30.xlsx",
+      "bytes": 25320,
+      "rows": 0,
+      "kind": "other",
+      "mtime": "2026-10-31 10:45"
+    },
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261029 (2).csv",
+      "bytes": 11116,
+      "rows": 125,
+      "kind": "affiliate",
+      "mtime": "2026-10-30 17:27"
+    },
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261029.csv",
+      "bytes": 11116,
+      "rows": 125,
+      "kind": "affiliate",
+      "mtime": "2026-10-30 17:10"
+    },
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261030 (2).csv",
+      "bytes": 11294,
+      "rows": 127,
+      "kind": "affiliate",
+      "mtime": "2026-10-31 15:08"
+    },
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261030.csv",
+      "bytes": 11254,
+      "rows": 127,
+      "kind": "affiliate",
+      "mtime": "2026-10-31 10:45"
+    },
+    {
+      "name": "全部 笔订单-2026-10-30-17_22.csv",
+      "bytes": 11054437,
+      "rows": 15271,
+      "kind": "orders",
+      "mtime": "2026-10-30 17:22"
+    },
+    {
+      "name": "全部 笔订单-2026-10-30-17_27.csv",
+      "bytes": 11054570,
+      "rows": 15271,
+      "kind": "orders",
+      "mtime": "2026-10-30 17:27"
+    },
+    {
+      "name": "全部 笔订单-2026-10-30-19_04.csv",
+      "bytes": 11056356,
+      "rows": 15271,
+      "kind": "orders",
+      "mtime": "2026-10-30 19:04"
+    },
+    {
+      "name": "全部 笔订单-2026-10-31-10_44.csv",
+      "bytes": 11425887,
+      "rows": 15824,
+      "kind": "orders",
+      "mtime": "2026-10-31 10:44"
+    },
+    {
+      "name": "全部 笔订单-20260930-20261030-2026-10-31-15_07.csv",
+      "bytes": 11434895,
+      "rows": 15824,
+      "kind": "orders",
+      "mtime": "2026-10-31 15:10"
+    }
+  ],
+  "kinds": {
+    "ads": 94,
+    "other": 0,
+    "affiliate": 504,
+    "orders": 77461
+  },
+  "signature": "9b758e105ae6",
+  "note": ""
+}

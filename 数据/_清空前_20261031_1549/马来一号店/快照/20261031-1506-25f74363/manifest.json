@@ -1,0 +1,90 @@
+{
+  "id": "20261031-1506-25f74363",
+  "at": "2026-10-31 15:06:37",
+  "created_at": "2026-10-31 15:06:37",
+  "shop_id": "7496027585645218321",
+  "store_name": "Party Pop Hub",
+  "range": {
+    "from": "2026-10-01",
+    "to": "2026-10-30"
+  },
+  "files": [
+    {
+      "name": "creative data for product campaigns (2026-10-01 00 ~ 2026-10-29 23) (2).csv",
+      "bytes": 15511,
+      "rows": 193,
+      "kind": "ads",
+      "mtime": "2026-10-30 17:05"
+    },
+    {
+      "name": "creative data for product campaigns (2026-10-01 00 ~ 2026-10-29 23).csv",
+      "bytes": 15511,
+      "rows": 193,
+      "kind": "ads",
+      "mtime": "2026-10-30 16:46"
+    },
+    {
+      "name": "creative data for product campaigns (2026-10-01 00 ~ 2026-10-30 23).csv",
+      "bytes": 15510,
+      "rows": 193,
+      "kind": "ads",
+      "mtime": "2026-10-31 10:41"
+    },
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261029 (2).csv",
+      "bytes": 14525,
+      "rows": 167,
+      "kind": "affiliate",
+      "mtime": "2026-10-30 17:05"
+    },
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261029.csv",
+      "bytes": 14525,
+      "rows": 167,
+      "kind": "affiliate",
+      "mtime": "2026-10-30 16:46"
+    },
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261030.csv",
+      "bytes": 14534,
+      "rows": 167,
+      "kind": "affiliate",
+      "mtime": "2026-10-31 10:41"
+    },
+    {
+      "name": "全部 笔订单-2026-10-30-16_46.csv",
+      "bytes": 2198099,
+      "rows": 3042,
+      "kind": "orders",
+      "mtime": "2026-10-30 16:46"
+    },
+    {
+      "name": "全部 笔订单-2026-10-30-17_04.csv",
+      "bytes": 2198388,
+      "rows": 3042,
+      "kind": "orders",
+      "mtime": "2026-10-30 17:04"
+    },
+    {
+      "name": "全部 笔订单-2026-10-31-10_41.csv",
+      "bytes": 2342676,
+      "rows": 3245,
+      "kind": "orders",
+      "mtime": "2026-10-31 10:41"
+    },
+    {
+      "name": "全部 笔订单-20260930-20261030-2026-10-31-15_06.csv",
+      "bytes": 2346765,
+      "rows": 3245,
+      "kind": "orders",
+      "mtime": "2026-10-31 15:06"
+    }
+  ],
+  "kinds": {
+    "ads": 579,
+    "affiliate": 501,
+    "orders": 12574
+  },
+  "signature": "25f743636240",
+  "note": ""
+}

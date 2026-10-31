@@ -1,0 +1,41 @@
+{
+  "id": "20261031-1545-b5cfd4ab",
+  "at": "2026-10-31 15:45:27",
+  "created_at": "2026-10-31 15:45:27",
+  "shop_id": "7495894812882470955",
+  "store_name": "LR Home.MY",
+  "range": {
+    "from": "2026-10-01",
+    "to": "2026-10-30"
+  },
+  "files": [
+    {
+      "name": "Product campaign data 2026-10-01 - 2026-10-30.xlsx",
+      "bytes": 37655,
+      "rows": 0,
+      "kind": "other",
+      "mtime": "2026-10-31 11:53"
+    },
+    {
+      "name": "Transaction_Analysis_Product_List_20261001_20261030.csv",
+      "bytes": 19770,
+      "rows": 217,
+      "kind": "affiliate",
+      "mtime": "2026-10-31 10:43"
+    },
+    {
+      "name": "全部 笔订单-2026-10-31-10_42.csv",
+      "bytes": 8406932,
+      "rows": 11943,
+      "kind": "orders",
+      "mtime": "2026-10-31 10:42"
+    }
+  ],
+  "kinds": {
+    "other": 0,
+    "affiliate": 217,
+    "orders": 11943
+  },
+  "signature": "b5cfd4abe741",
+  "note": ""
+}
