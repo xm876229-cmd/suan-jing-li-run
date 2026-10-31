@@ -1632,8 +1632,10 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
         sources["映射"] = " + ".join(parts)
 
     # 这一轮的 SKU 表是不是新导的？拿它跟本轮订单表的修改时间比。
-    # 取数流程里 SKU 表是先导的，比订单表旧就说明这一步没跑成，
-    # 链接归属只能靠历史数据——新上架的 SKU 会整片归到「无ID」。
+    #
+    # 注意时间差要给足：取数顺序是先导 SKU 表、再导订单，而大店订单在平台
+    # 生成要 8 分钟（Chroma 实测），所以订单表天生比 SKU 表"新"好几分钟。
+    # 阈值只用来抓「这一天压根没取 SKU 表」的情况，2 小时足够。
     if fresh and buckets["order"]:
         map_times: list[float] = []
         for _mf, _r in buckets["mapping"]:
@@ -1652,7 +1654,7 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
                 times.append(of.stat().st_mtime)
             except OSError:
                 pass
-        if times and map_times and max(map_times) < max(times) - 120:
+        if times and map_times and max(map_times) < max(times) - 7200:
             issues.append(
                 "这次没有新导的「商品SKU表」（比订单表还旧），链接归属用的是历史数据；"
                 "本期新上架的 SKU 会归到「无ID」，重新取一次数即可"

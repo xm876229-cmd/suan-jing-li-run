@@ -5378,12 +5378,16 @@ async function runTaskThenCalc(task, range, log, opts = {}) {
   // 拿到就直接接着算，用户不用再点第二次。
   const ordErr = (r && r.orders && r.orders.error) ? String(r.orders.error) : "";
   if (/排队/.test(ordErr)) {
-    log("订单还在平台排队，等它生成好再算（最多 4 分钟）…");
-    for (let i = 0; i < 12; i++) {
+    // 大店订单导出要多久？实测 Chroma Home（5.7 万单 / 39MB）约 8 分钟。
+    // 以前只等 4 分钟，到点就「没有订单表」失败——文件 3 分钟后才到，
+    // 用户还得自己再点一次核算。等够 12 分钟，把这条鸿沟盖住。
+    const rounds = 36;           // 36 × 20s = 12 分钟
+    log("订单还在平台排队，等它生成好再算（最多 12 分钟，可以先干别的）…");
+    for (let i = 0; i < rounds; i++) {
       await sleep(20000);
       const got = await harvestPendingOrders(log, CURRENT_SHOP.shop_id).catch(() => 0);
       if (got > 0) { log("订单已到，继续核算"); break; }
-      if (i % 3 === 2) log(`   还在等订单…（${(i + 1) * 20} 秒）`);
+      if (i % 3 === 2) log(`   还在等订单…（${Math.round((i + 1) * 20 / 60)} 分钟）`);
     }
   }
   try {
