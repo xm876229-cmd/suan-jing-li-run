@@ -38,6 +38,157 @@ from src import paths  # noqa: E402
 
 ROOT = paths.ROOT
 CAPTURE_DIR = paths.CAPTURE
+
+# 没能算成的「待补算」清单：订单还在平台生成时记一条，
+# 文件一落地就自动补算——不用人再点一次。
+PENDING_RUNS = paths.DATA / "pending_runs.json"
+_PENDING_LOCK = threading.Lock()
+
+
+def _pending_load() -> dict:
+    try:
+        if PENDING_RUNS.is_file():
+            return json.loads(PENDING_RUNS.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+def _pending_save(d: dict) -> None:
+    try:
+        PENDING_RUNS.parent.mkdir(parents=True, exist_ok=True)
+        PENDING_RUNS.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _pending_add(key: str, info: dict) -> None:
+    with _PENDING_LOCK:
+        d = _pending_load()
+        d[key] = info
+        _pending_save(d)
+
+
+def _pending_drop(key: str) -> None:
+    with _PENDING_LOCK:
+        d = _pending_load()
+        if d.pop(key, None) is not None:
+            _pending_save(d)
+
+
+def _calc_cmd(shop_id: str, country: str, dfrom: str, dto: str,
+              out: Path, with_formula: bool) -> list[str]:
+    """拼出核算子进程的命令（和界面点「核算」走的是同一条路）。"""
+    base = [sys.executable, "run"] if paths.is_frozen() else [sys.executable, "-m", "src.cli"]
+    cmd = base + ["--dir", str(paths.store_dir(shop_id))]
+    cmd += ["--store", shop_id] if shop_id else ["--country", country or "马来西亚"]
+    cmd += ["--out", str(out), "--json"]
+    if with_formula:
+        cmd.append("--with-formula")
+    if dfrom:
+        cmd += ["--from", dfrom]
+    if dto:
+        cmd += ["--to", dto]
+    return cmd
+
+
+def _run_calc_cmd(cmd: list[str], timeout: int = 900) -> tuple[bool, str]:
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(ROOT), capture_output=True, env=env, timeout=timeout,
+            creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                           if os.name == "nt" else 0))
+    except subprocess.TimeoutExpired:
+        return False, f"核算超过 {timeout} 秒没结束"
+    raw = proc.stdout or b""
+    text = ""
+    for enc in ("utf-8", "gbk"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if proc.returncode != 0:
+        err = (proc.stderr or b"").decode("utf-8", "replace")
+        return False, (err or text or "")[-500:]
+    return True, text
+
+
+def _report_out(store_name: str, dfrom: str, dto: str, suffix: str = "") -> Path:
+    safe = re.sub(r'[\\/:*?"<>|]', "_", store_name or "未命名店铺")
+    out_dir = paths.OUTPUT / safe
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base = f"{store_name}_{dfrom or '全量'}_{dto or '全量'}{suffix}"
+    p = out_dir / f"{base}.xlsx"
+    i = 2
+    while p.exists():
+        p = out_dir / f"{base} ({i}).xlsx"
+        i += 1
+    return p
+
+
+def _shop_id_by_name(name: str) -> str:
+    """按店铺目录名反查 shop_id（报表是按店铺名分目录放的）。"""
+    try:
+        root = paths.store_root("")
+        for d in root.parent.iterdir():
+            meta = d / "meta.json"
+            if d.is_dir() and meta.is_file() and d.name == name:
+                try:
+                    return str(json.loads(meta.read_text(encoding="utf-8")).get("shop_id") or "")
+                except Exception:  # noqa: BLE001
+                    return ""
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _pending_tick() -> None:
+    """后台每分钟看一眼：之前因为「订单没到」没算成的，现在能算了吗。"""
+    d = _pending_load()
+    if not d:
+        return
+    now = time.time()
+    for key, info in list(d.items()):
+        if now - float(info.get("at") or 0) > 3 * 3600:
+            _pending_drop(key)
+            continue
+        shop_id = str(info.get("shop_id") or "")
+        try:
+            from src import loader as _ld
+            if not _ld.has_orders_table(paths.store_dir(shop_id)):
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        store_name = str(info.get("store_name") or shop_id)
+        dfrom = str(info.get("from") or "")
+        dto = str(info.get("to") or "")
+        out = _report_out(store_name, dfrom, dto)
+        _append_log(f"[auto] 订单已到，自动补算：{store_name} {dfrom}~{dto}")
+        try:
+            ok, msg = _run_calc_cmd(_calc_cmd(shop_id, str(info.get("country") or ""),
+                                              dfrom, dto, out,
+                                              bool(info.get("with_formula"))))
+        except Exception as e:  # noqa: BLE001
+            ok, msg = False, str(e)
+        _pending_drop(key)
+        if ok:
+            _append_log(f"[auto] 补算完成：{out}")
+        else:
+            _append_log(f"[auto] 补算失败：{str(msg)[-300:]}")
+
+
+def _pending_runner() -> None:
+    time.sleep(20)
+    while True:
+        try:
+            _pending_tick()
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(60)
 INBOX_DIR = paths.INBOX
 MAPPING_DIR = paths.MAPPING
 LOG_FILE = paths.CAPTURE / "task.log"
@@ -728,6 +879,53 @@ class Handler(BaseHTTPRequestHandler):
                 _json(self, r)
             except Exception as e:  # noqa: BLE001
                 _json(self, {"ok": False, "error": f"删除失败：{e}"}, 500)
+        elif self.path.startswith("/api/reports/save"):
+            # 「下载」不再靠浏览器跳链接（窗口里不弹下载框，点了没反应），
+            # 改成由桥直接存盘，然后告诉界面存到哪了。
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                names = [str(x) for x in (payload.get("names") or []) if str(x).strip()]
+                if not names:
+                    _json(self, {"ok": False, "error": "没选中报表"}, 400)
+                    return
+                from bridge import settings_api
+                from src import settings as cfg_settings
+                stg = cfg_settings.load().get("report", {})
+                raw_dir = str(payload.get("dir") or stg.get("download_dir") or "").strip()
+                target = Path(raw_dir).expanduser() if raw_dir else Path.home() / "Desktop"
+                if not target.is_dir():
+                    target = Path.home() / "Desktop"
+                saved: list[str] = []
+                failed: list[str] = []
+                for rel in names:
+                    src = settings_api._find_report("", rel)
+                    if src is None or not src.is_file():
+                        failed.append(f"{rel}（找不到文件）")
+                        continue
+                    if payload.get("with_formula"):
+                        # 带公式版要按原区间重算一次：文件名里带着区间
+                        m = re.search(r"(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})", src.name)
+                        if not m:
+                            failed.append(f"{rel}（名字里认不出区间）")
+                            continue
+                        shop = rel.split("/")[0] if "/" in rel else ""
+                        sid = _shop_id_by_name(shop)
+                        out = _report_out(shop or src.stem, m.group(1), m.group(2), "_带公式")
+                        ok, msg = _run_calc_cmd(
+                            _calc_cmd(sid, "", m.group(1), m.group(2), out, True))
+                        if not ok:
+                            failed.append(f"{rel}（{str(msg)[-80:]}）")
+                            continue
+                        src = out
+                    dst = target / src.name
+                    shutil.copy2(src, dst)
+                    saved.append(str(dst))
+                _append_log(f"[报表] 存了 {len(saved)} 份到 {target}")
+                _json(self, {"ok": bool(saved), "dir": str(target),
+                             "saved": saved, "failed": failed})
+            except Exception as e:  # noqa: BLE001
+                _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
         elif self.path.startswith("/api/mapping"):
             self._post_mapping()
         elif self.path.startswith("/store_profile"):
@@ -1632,10 +1830,21 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 _has_order = True
             if not _has_order:
-                _json(self, {"ok": False,
-                             "error": f"店铺「{store_name}」没有订单表，无法核算。"
-                                      f"先在扩展里点一次「立即运行」把订单取回来；"
-                                      f"如果订单一直取不到，多半是该时段没有订单。"})
+                # 大店订单在平台要生成好几分钟，取数那边常常是"已排队、还没落地"。
+                # 记一条待补算：文件一落地后台自己算，不用人再点第二次。
+                try:
+                    _pending_add(str(shop_id or store_name), {
+                        "shop_id": shop_id, "store_name": store_name,
+                        "country": country, "from": dfrom or "", "to": dto or "",
+                        "with_formula": bool(payload.get("with_formula")),
+                        "at": time.time(),
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
+                _json(self, {"ok": False, "pending": True,
+                             "error": f"店铺「{store_name}」的订单还在平台生成，还没落到本地。"
+                                      f"已记下这次核算——订单一落地程序会自动补算，不用再点。"
+                                      f"报表会出现在「报表」页。"})
                 return
 
             # 报表放到该店铺自己的子目录，文件名按设置里的模板生成
@@ -2061,6 +2270,10 @@ def main() -> int:
         threading.Thread(target=_auto_runner, daemon=True).start()
     except Exception as e:  # noqa: BLE001
         print(f"自动运行未启用（忽略）：{e}")
+    try:
+        threading.Thread(target=_pending_runner, daemon=True).start()
+    except Exception as e:  # noqa: BLE001
+        print(f"待补算看守未启用（忽略）：{e}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

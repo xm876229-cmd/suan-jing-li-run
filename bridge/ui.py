@@ -770,11 +770,15 @@ _TEMPLATE = r"""<!DOCTYPE html>
             <button class="mini" id="rep-none">取消全选</button>
             <button class="primary" id="rep-dl">下载勾选的</button>
             <button id="rep-dl-all">下载这个店铺的全部</button>
+            <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text-2);margin-left:6px">
+              <input type="checkbox" id="rep-formula"> 导出带公式
+            </label>
             <button class="danger" id="rep-del">删除勾选的</button>
           </div>
           <p class="muted" style="font-size:12.5px;margin:8px 0 12px">
-            报表按店铺分目录存放（<span class="mono">output\店名\</span>）。
-            勾几份就下载几份，打成一个 zip，解压后仍按店铺分着。
+            报表按店铺分目录存放（<span class="mono">报表\店名\</span>）。
+            点「下载」会直接存到本机（设置里的「报表下载到哪儿」，没填就存桌面），
+            存完会告诉你路径。勾上「导出带公式」会按原区间重算一份带 SUMIFS 的版本。
             删除只是挪进 <span class="mono">报表\_已删除\</span>，删错了能找回来。
           </p>
         </div>
@@ -1844,10 +1848,11 @@ async function loadReports(){
           <td>${esc(it.name)}</td><td class="muted">${esc(it.group || '—')}</td>
           <td class="muted">${it.size_mb} MB</td><td class="muted">${it.at}</td>
           <td><button class="mini" data-view-report="${esc(it.rel || it.name)}">查看</button>
-            <a href="/report?name=${encodeURIComponent(it.name)}" style="text-decoration:none">
-            <button class="mini">下载</button></a></td></tr>`).join('') + '</tbody></table>';
+            <button class="mini" data-dl-report="${esc(it.rel || it.name)}">下载</button></td></tr>`).join('') + '</tbody></table>';
     document.querySelectorAll('[data-view-report]').forEach(b =>
       b.onclick = () => viewReport(b.dataset.viewReport));
+    document.querySelectorAll('[data-dl-report]').forEach(b =>
+      b.onclick = () => saveReports([b.dataset.dlReport], b));
   }catch(e){ $('#rep-list').innerHTML = '<div class="empty">读取失败</div>'; }
 }
 
@@ -1884,19 +1889,41 @@ $('#rep-del').onclick = async () => {
   }catch(e){ toast('删除出错：' + e.message); }
   btn.disabled = false;
 };
-$('#rep-dl').onclick = () => {
+$('#rep-dl').onclick = (e) => {
   const names = repChecked();
   if(!names.length){ toast('先勾几份报表'); return; }
-  downloadReports(names);
+  saveReports(names, e.currentTarget);
 };
-$('#rep-dl-all').onclick = () => {
+$('#rep-dl-all').onclick = (e) => {
   const items = repStore ? repAll.filter(x => (x.group||'') === repStore) : repAll;
   if(!items.length){ toast('这里没有报表'); return; }
-  downloadReports(items.map(x => x.rel || x.name));
+  saveReports(items.map(x => x.rel || x.name), e.currentTarget);
 };
 
-function downloadReports(names){
-  location.href = '/api/reports/zip?names=' + encodeURIComponent(names.join('||'));
+/**
+ * 下载 = 由桥直接存盘，然后告诉你存哪了。
+ *
+ * 以前是 location.href = '/report?name=…' 让浏览器自己下载——在桌面窗口里
+ * 根本不弹保存框，点了就跟没点一样。现在走 /api/reports/save。
+ */
+async function saveReports(names, btn){
+  if(!names.length){ toast('先选报表'); return; }
+  const wf = !!(document.getElementById('rep-formula') || {}).checked;
+  if(btn) btn.disabled = true;
+  toast(wf ? '正在按原区间重算带公式版，稍等…' : '正在存…');
+  try{
+    const r = await fetch('/api/reports/save', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({names, with_formula: wf})});
+    const j = await r.json();
+    if(j.ok){
+      toast('已存 ' + (j.saved||[]).length + ' 份到 ' + j.dir
+            + ((j.failed||[]).length ? '；' + j.failed.length + ' 份没成功' : ''));
+    }else{
+      toast('没存成：' + (j.error || (j.failed||[]).join('；') || '未知原因'));
+    }
+  }catch(e){ toast('存盘出错：' + e.message); }
+  if(btn) btn.disabled = false;
 }
 
 async function viewReport(name){
