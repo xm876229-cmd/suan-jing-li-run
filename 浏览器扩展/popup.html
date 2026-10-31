@@ -8,11 +8,18 @@
   header h1 { margin: 0; font-size: 14px; font-weight: 600; }
   header p { margin: 3px 0 0; font-size: 11px; opacity: .75; }
   main { padding: 9px 16px 14px; }
-  .row { display: flex; justify-content: space-between; padding: 2px 0; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 2px 0; }
+  /* 行内小按钮：不要撑满整行（button 默认 width:100%） */
+  button.mini { width: auto; margin: 0; padding: 2px 8px; font-size: 11px;
+                background: #EDF2F7; color: #44576B; border-radius: 4px; flex: none; }
   .k { color: #6B7B8C; }
   .v { font-weight: 600; }
   .ok { color: #2E7D32; }
   .bad { color: #C0392B; }
+  .banner { display: flex; gap: 8px; align-items: center; justify-content: space-between;
+            background: #FDECEA; border: 1px solid #F5C6C0; color: #9C3D1E;
+            border-radius: 6px; padding: 6px 8px; font-size: 11.5px; margin-bottom: 8px; }
+  .banner.hidden { display: none; }
   hr { border: 0; border-top: 1px solid #EDF2F7; margin: 8px 0; }
   .dates { display: flex; gap: 8px; }
   .dates > div { flex: 1; }
@@ -73,10 +80,17 @@
   <p>在店铺登录态里取数，回传给本地核算程序</p>
 </header>
 <main>
+  <!-- 扩展版本对不上时才会显示：文件更新了但扩展没重新加载，
+       界面上版本号是新的、跑的还是旧代码，这种情况最难查 -->
+  <div id="vermiss" class="banner hidden">
+    <div>扩展没重载：跑的是 <b id="vm-run">—</b>，磁盘已到 <b id="vm-disk">—</b></div>
+    <button id="vm-reload" class="mini">立即重载</button>
+  </div>
   <div class="row"><span class="k">记录状态</span><span class="v" id="enabled">—</span></div>
   <div class="row"><span class="k">已抓接口</span><span class="v" id="captured">0</span></div>
   <div class="row"><span class="k">本地程序</span><span class="v" id="bridge">—</span></div>
-  <div class="row"><span class="k">已识别店铺</span><span class="v" id="hosts" style="font-size:11px">—</span></div>
+  <div class="row"><span class="k">已识别店铺</span><span class="v" id="hosts" style="font-size:11px">—</span>
+    <button id="reident" class="mini" title="重新识别当前页面登录的店铺">识别</button></div>
 
   <hr />
   <div class="dates">
@@ -85,7 +99,7 @@
   </div>
   <div class="dates" style="margin-top:6px">
     <div><label>店铺</label><select id="store"></select></div>
-    <div><label>国家</label><input type="text" id="country" placeholder="马来西亚" /></div>
+    <div><label>国家</label><select id="country"></select></div>
   </div>
   <div style="margin-top:5px">
     <button id="calcOnly" class="ghost" style="margin:0;padding:6px;font-size:12px;width:100%">只算净利（不取数）</button>
@@ -105,8 +119,8 @@
     <button class="ghost" data-task="sku">商品 SKU + 链接资料</button>
     <button class="ghost" data-task="link">链接资料（款式编码）</button>
     <button class="ghost" data-task="affiliate">联盟佣金</button>
-    <button class="ghost" data-task="ads">广告（下载已完成的）</button>
-    <button class="ghost" id="capAds" style="grid-column:1 / -1">① 先点我，再去广告页点一次「导出」</button>
+    <button class="ghost" data-task="ads">广告</button>
+    <button class="ghost" data-task="manualAds">广告（我自己点导出）</button>
   </div>
 
   <div class="manual">

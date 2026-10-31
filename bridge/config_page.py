@@ -52,6 +52,9 @@ def read_config() -> dict:
         "kinds": cfg.get("kinds") or dict(KINDS),
         # 报表「汇总」页要展示哪些列（列键列表）、合计行放哪（top/bottom）、列标题怎么命名
         "report_columns": cfg.get("report_columns") or [],
+        # 列的顺序：直接从文件读（load_config 只回它认识的键，容易漏掉新加字段）
+        "report_column_order": (doc.get("report_column_order")
+                                or cfg.get("report_column_order") or []),
         "report_total_position": str(cfg.get("report_total_position") or "bottom").strip()
         or "bottom",
         "report_titles": cfg.get("report_titles") or {},
@@ -103,6 +106,7 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
                 cost_fields: dict | None = None,
                 exclude_zero_amount: bool | None = None,
                 report_columns: list | None = None,
+                report_column_order: list | None = None,
                 report_total_position: str | None = None,
                 report_titles: dict | None = None,
                 ads_fields: dict | None = None,
@@ -143,6 +147,7 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
                     or v.get("mapping_fields")
                     or "exclude_zero_amount" in v
                     or (v.get("report_columns") and len(v["report_columns"]))
+                    or (v.get("report_column_order") and len(v["report_column_order"]))
                     or str(v.get("report_total_position") or "").strip() in ("top", "bottom")
                     or (v.get("report_titles") and len(v["report_titles"]))):
                 clean[k] = v
@@ -158,6 +163,15 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
             pass  # 清空时不写键，配置更干净
     elif "report_columns" in old:
         out["report_columns"] = old["report_columns"]
+    # 列的顺序（包含没勾的列），界面靠它稳定排列，拖动才不会被重渲染打回原样
+    if report_column_order is not None:
+        order = [str(x).strip() for x in report_column_order if str(x).strip()]
+        if order:
+            out["report_column_order"] = order
+        elif "report_column_order" in old:
+            pass
+    elif "report_column_order" in old:
+        out["report_column_order"] = old["report_column_order"]
     if report_total_position is not None:
         pos = str(report_total_position).strip()
         if pos in ("top", "bottom"):

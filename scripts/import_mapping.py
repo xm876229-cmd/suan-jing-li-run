@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -239,7 +241,57 @@ def merge_file(path: Path, master: dict[str, dict], events: list[dict], now: str
     return added, rebound, same
 
 
+def _acquire_merge_lock(timeout: float = 90.0):
+    """跨进程互斥：两家店同时核算时，主表只能由一个进程写。
+
+    没有锁的时候，两个核算子进程会各读一份主表、各写一遍——
+    后写的把先写的覆盖掉（少一批 SKU），或者读到写了一半的文件（整个表废掉）。
+    锁文件放在 mapping 目录里，进程崩了超过 10 分钟自动作废，不会永远卡住。
+    """
+    lock = MAPPING_DIR / ".merge.lock"
+    try:
+        MAPPING_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    t0 = time.time()
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return lock
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > 600:
+                    lock.unlink()
+                    continue
+            except OSError:
+                pass
+            if time.time() - t0 > timeout:
+                return None
+            time.sleep(0.3)
+        except OSError:
+            return None
+
+
+def _release_merge_lock(lock) -> None:
+    if lock is None:
+        return
+    try:
+        lock.unlink()
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    lock = _acquire_merge_lock()
+    try:
+        return _main_unlocked(argv)
+    finally:
+        _release_merge_lock(lock)
+
+
+def _main_unlocked(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     sources = [Path(a) for a in argv] if argv else find_sources()
 

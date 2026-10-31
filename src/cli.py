@@ -233,14 +233,28 @@ def main(argv: list[str] | None = None) -> int:
     country = args.country
     store_note = ""
     if args.store:
-        for s in stores_cfg.get("stores", []):
-            if s.get("id") == args.store:
-                country = country or s.get("country")
-                store_note = f"{s.get('name', '')}（{s.get('id')}）"
-                break
+        hit = next((s for s in stores_cfg.get("stores", [])
+                    if s.get("id") == args.store), None)
+        if hit:
+            country = country or hit.get("country")
+            store_note = f"{hit.get('name', '')}（{hit.get('id')}）"
         else:
-            print(f"config/stores.json 里没有 id 为 {args.store} 的店铺")
-            return 2
+            # 扩展自动识别出来的店铺只写了 stores/<店名>/meta.json，
+            # 未必在 stores.json 里。以前这里直接报错退出，新店第一次核算就卡死。
+            # 按 meta 认（店名 + 国家都在里面），认不出来才真的报错。
+            _meta: dict = {}
+            try:
+                _mf = paths.store_meta_file(args.store)
+                if _mf.is_file():
+                    _meta = json.loads(_mf.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                _meta = {}
+            if str(_meta.get("shop_id") or "") != str(args.store):
+                print(f"config/stores.json 里没有 id 为 {args.store} 的店铺，"
+                      f"也没有对应的数据目录（stores/…/meta.json）")
+                return 2
+            country = country or _meta.get("country") or ""
+            store_note = f"{_meta.get('shop_name') or args.store}（{args.store}）"
     country = country or stores_cfg.get("defaults", {}).get("country") or "马来西亚"
 
     rates, switches = load_rates(args.rates)
@@ -351,6 +365,15 @@ def main(argv: list[str] | None = None) -> int:
                                mapping_fields=mapping_fields)
         source = "、".join(data.sources.values()) or args.orders.name
     else:
+        # 广告表如果是新版后台的「计划维度」导出（没有商品ID），先转成按商品，
+        # 否则广告费进不了报表。老版后台直接给商品维度，这一步会自动跳过。
+        try:
+            from scripts.import_ads_campaign import autoconvert_in_store
+            for _n in autoconvert_in_store(str(args.store or "")):
+                print(f"广告表转换：{_n}")
+        except Exception as _e:  # noqa: BLE001
+            print(f"⚠ 广告表转换跳过：{_e}")
+
         if snap_dirs:
             # 多份快照合并：跨目录去重后再汇总
             data = load_from_dirs(snap_dirs, costs_path, params.usd_to_local, map_path,

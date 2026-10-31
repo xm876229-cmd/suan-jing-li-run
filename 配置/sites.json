@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "站点档案：各站点之间的差异集中放在这里，加新店不用改代码。",
+    "region  : 平台站点代码，和域名 seller-<region>.tiktok.com 对应",
+    "country : 中文国家名，必须和 rates.json 里的键一致",
+    "ads_spec: 「商品维度花费」规格接口这家站能不能用。false = 直接走页面导出，不浪费一轮请求",
+    "download_retry: 导出文件「列表里有了、下载还被拒」时要重试几次（慢站点调大）",
+    "备注：新站点不用登记，程序会从域名推 region、从接口拿 shop_id，第一次取数时自动建档。",
+    "这里只放「实测过的站点特性」，没登记的一律按默认（先试规格接口，失败自动兜底）。"
+  ],
+  "sites": {
+    "my": { "region": "MY", "country": "马来西亚" },
+    "ph": { "region": "PH", "country": "菲律宾", "ads_spec": false, "download_retry": 4 },
+    "th": { "region": "TH", "country": "泰国" },
+    "vn": { "region": "VN", "country": "越南" },
+    "sg": { "region": "SG", "country": "新加坡" },
+    "id": { "region": "ID", "country": "印尼" },
+    "us": { "region": "US", "country": "美国" },
+    "gb": { "region": "GB", "country": "英国" },
+    "uk": { "region": "GB", "country": "英国" },
+    "de": { "region": "DE", "country": "德国" },
+    "fr": { "region": "FR", "country": "法国" },
+    "it": { "region": "IT", "country": "意大利" },
+    "es": { "region": "ES", "country": "西班牙" }
+  },
+  "defaults": {
+    "ads_spec": true,
+    "download_retry": 4,
+    "download_retry_gap": 6000
+  }
+}

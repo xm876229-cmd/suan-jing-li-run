@@ -17,6 +17,23 @@ from pathlib import Path
 
 from src import paths
 
+
+def _app_version() -> str:
+    """页脚显示的版本号，直接读扩展的 manifest。
+
+    以前这里写死 "0.21.44"，一路升到 0.21.8x 页脚还停在旧版本，
+    用户看着以为没更新——版本号只有一个来源，别再手抄一遍。
+    """
+    for name in ("manifest.json",):
+        f = paths.EXTENSION / name
+        try:
+            v = json.loads(f.read_text(encoding="utf-8")).get("version")
+            if v:
+                return str(v)
+        except Exception:  # noqa: BLE001
+            pass
+    return "—"
+
 STATE: dict = {"running": False, "last_run": None}
 
 
@@ -81,6 +98,9 @@ def _all_reports() -> list[dict]:
     out: list[dict] = []
     try:
         for p in paths.OUTPUT.rglob("*.xlsx"):
+            # 回收站里的不算「已有报表」，否则删完还在列表里，看着像没删掉
+            if "_已删除" in p.parts:
+                continue
             st = p.stat()
             rel = p.relative_to(paths.OUTPUT)
             out.append({
@@ -239,8 +259,58 @@ def find_report(name: str) -> Path | None:
     return None
 
 
+def _resolve_report(rel: str) -> Path | None:
+    """把「店铺/文件.xlsx」这种相对路径安全地解析成 OUTPUT 下的真实文件。
+
+    列表里的勾选值带店铺子目录，而 find_report 只收纯文件名——直接拿它
+    去删会一个都删不掉，所以这里单独解析，并且只允许落在 OUTPUT 里面。
+    """
+    raw = str(rel or "").strip().replace("\\", "/").lstrip("/")
+    if not raw or raw.lower().endswith("/"):
+        return None
+    if any(part in ("..", "") for part in raw.split("/")[:-1]):
+        return None
+    base = paths.OUTPUT.resolve()
+    try:
+        p = (base / raw).resolve()
+        p.relative_to(base)
+    except Exception:  # noqa: BLE001
+        return None
+    if p.is_file() and p.suffix.lower() == ".xlsx":
+        return p
+    return None
+
+
+def delete_reports(names: list[str]) -> dict:
+    """删除报表——不是真删，是挪到 `报表/_已删除/` 里。
+
+    为什么要留这一手：报表是算出来的，删了还能重跑；但万一删错的是
+    「已经对完账、客户签过字」那份，重跑不出来（数据可能已经变了）。
+    挪走可恢复，代价只是占点硬盘。
+    """
+    moved, missing = [], []
+    trash = paths.OUTPUT / "_已删除"
+    for name in names or []:
+        raw = str(name).strip()
+        f = _resolve_report(raw) or find_report(raw)
+        if not f:
+            missing.append(name)
+            continue
+        try:
+            trash.mkdir(parents=True, exist_ok=True)
+            dst = trash / f"{f.stem}_{datetime.now():%Y%m%d_%H%M%S}{f.suffix}"
+            f.replace(dst)
+            moved.append(f.name)
+        except OSError as e:
+            missing.append(f"{name}（{e}）")
+    return {"ok": True, "moved": moved, "missing": missing,
+            "trash": str(trash)}
+
+
 def render_html() -> str:
-    return _TEMPLATE.replace("__STAMP__", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    html = _TEMPLATE.replace("__STAMP__", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    # 版本号每次渲染时从扩展 manifest 读，避免页脚写着旧版本让人以为没更新
+    return html.replace("{APP_VERSION}", _app_version())
 
 
 # ---------------- 页面 ----------------
@@ -396,6 +466,17 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .kcell{text-align:center}
   .kcell label{display:inline-flex;padding:3px;cursor:pointer}
   .kcell input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;display:block}
+  .kcell button.mini{padding:2px 6px;font-size:11.5px;line-height:1.2;margin:0 1px}
+  .kcell button.mini:disabled{opacity:.28;cursor:default}
+  .drag-handle{cursor:grab;user-select:none}
+  .drag-handle:active{cursor:grabbing}
+  .drag-handle .grip{color:var(--text-3);font-size:13px;margin-right:2px;letter-spacing:-1px}
+  tr.dragging{opacity:.45;background:var(--accent-soft)}
+  /* 危险操作（删除）单独一个视觉：红边框，不要跟「下载」长得一样 */
+  button.danger{background:var(--warn-soft);border:1px solid #e6c2b4;color:var(--warn);
+    padding:6px 13px;border-radius:9px;font-size:13px;cursor:pointer}
+  button.danger:hover{background:#f7e0d6}
+  button.danger:disabled{opacity:.5;cursor:default}
   .pid{font-size:11px;color:var(--text-3);margin-top:3px;font-family:ui-monospace,Consolas,monospace}
   .tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;
     background:var(--accent-soft);color:var(--accent);margin-left:6px;vertical-align:1px}
@@ -550,7 +631,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>0.21.44</span></div>
+      <div class="row"><span>版本</span><span>{APP_VERSION}</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -689,10 +770,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
             <button class="mini" id="rep-none">取消全选</button>
             <button class="primary" id="rep-dl">下载勾选的</button>
             <button id="rep-dl-all">下载这个店铺的全部</button>
+            <button class="danger" id="rep-del">删除勾选的</button>
           </div>
           <p class="muted" style="font-size:12.5px;margin:8px 0 12px">
             报表按店铺分目录存放（<span class="mono">output\店名\</span>）。
             勾几份就下载几份，打成一个 zip，解压后仍按店铺分着。
+            删除只是挪进 <span class="mono">报表\_已删除\</span>，删错了能找回来。
           </p>
         </div>
         <div class="body tight" id="rep-list"><div class="empty">加载中…</div></div>
@@ -874,6 +957,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <div class="tbl-wrap">
             <table class="cfg-tbl" id="rcoltbl"><thead><tr>
               <th style="width:54px">展示</th>
+              <th style="width:104px">顺序（可拖）</th>
               <th style="width:160px">默认标题</th>
               <th>自定义标题（留空=用默认，如 毛利率 → 链接毛利率）</th>
               <th style="width:84px">类型</th>
@@ -1778,6 +1862,28 @@ $('#rep-all').onclick = () => {
 $('#rep-none').onclick = () => {
   document.querySelectorAll('#rep-list [data-rep]').forEach(x => x.checked = false);
 };
+
+// 删除勾选的报表：先确认，再挪进 报表/_已删除（不真删）
+$('#rep-del').onclick = async () => {
+  const names = repChecked();
+  if(!names.length){ toast('先勾选要删除的报表'); return; }
+  if(!confirm('删除 ' + names.length + ' 份报表？\n\n不会真删，会挪到 报表\\_已删除\\ 里，随时能找回。')) return;
+  const btn = $('#rep-del');
+  btn.disabled = true;
+  try{
+    const r = await fetch('/api/reports/delete', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({names})});
+    const j = await r.json();
+    if(j.ok){
+      toast('已删除 ' + (j.moved || []).length + ' 份（在 报表\\_已删除 里可找回）'
+            + ((j.missing || []).length ? '；' + j.missing.length + ' 份没找到' : ''));
+      loadReports();
+    }else{
+      toast('删除失败：' + (j.error || '未知原因'));
+    }
+  }catch(e){ toast('删除出错：' + e.message); }
+  btn.disabled = false;
+};
 $('#rep-dl').onclick = () => {
   const names = repChecked();
   if(!names.length){ toast('先勾几份报表'); return; }
@@ -1833,7 +1939,7 @@ async function loadStores(){
     }
     let html = '<table><thead><tr><th style="width:210px">名字（可改）</th>'
       + '<th style="width:170px">店铺 ID</th><th style="width:110px">国家</th>'
-      + '<th style="width:80px">数据</th><th style="width:110px"></th></tr></thead><tbody>';
+      + '<th style="width:80px">数据</th><th style="width:190px"></th></tr></thead><tbody>';
     storesCache.forEach(s => {
       html += `<tr>
         <td><input type="text" value="${esc(s.name || '')}" data-sid="${esc(s.id)}"
@@ -1841,11 +1947,17 @@ async function loadStores(){
         <td class="mono muted" style="font-size:11.5px">${esc(s.id)}</td>
         <td class="muted">${esc(s.country || '—')}${s.auto ? ' <span class="tag">自动</span>' : ''}</td>
         <td class="muted">${s.inbox_count !== undefined ? s.inbox_count + ' 个' : '—'}</td>
-        <td><button class="mini" data-rename="${esc(s.id)}">保存名字</button></td></tr>`;
+        <td style="white-space:nowrap">
+          <button class="mini" data-rename="${esc(s.id)}">保存名字</button>
+          <button class="mini" data-del-store="${esc(s.id)}"
+            data-store-name="${esc(s.name || s.id)}">移除</button>
+        </td></tr>`;
     });
     $('#store-list').innerHTML = html + '</tbody></table>';
     document.querySelectorAll('[data-rename]').forEach(b =>
       b.onclick = () => renameStore(b.dataset.rename, b));
+    document.querySelectorAll('[data-del-store]').forEach(b =>
+      b.onclick = () => removeStore(b.dataset.delStore, b.dataset.storeName, b));
   }catch(e){ $('#store-list').innerHTML = '<div class="empty">读取失败</div>'; }
 }
 
@@ -1860,6 +1972,22 @@ async function renameStore(shopId, btn){
     const j = await r.json();
     toast(j.ok ? '已保存：' + name : ('保存失败：' + j.error));
     if(j.ok){ loadStores(); loadStatus(); }
+  }catch(e){ toast('出错：' + e.message); }
+  btn.disabled = false;
+}
+
+/* 移除店铺：只从列表拿掉，店目录挪进 数据/stores/_已删除（数据不丢）。
+   不真删是因为里面的历史订单/快照平台不一定还能补回来。 */
+async function removeStore(shopId, name, btn){
+  if(!confirm('从列表移除「' + name + '」？\n\n店里的数据不会删，会挪到 数据\\stores\\_已删除\\ 里；'
+    + '以后在浏览器里重新登录这家店，它会自动回来。')) return;
+  btn.disabled = true;
+  try{
+    const r = await fetch('/api/stores/remove', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: shopId})});
+    const j = await r.json();
+    toast(j.ok ? ('已移除「' + name + '」，数据在 _已删除 里') : ('移除失败：' + j.error));
+    if(j.ok){ loadStores(); loadStatus(); loadReports(); }
   }catch(e){ toast('出错：' + e.message); }
   btn.disabled = false;
 }
@@ -2040,6 +2168,10 @@ async function loadParams(){
       mapping_fields: clone(j.mapping_fields || {}),
       exclude_zero_amount: !!j.exclude_zero_amount,
       report_columns: (j.report_columns && j.report_columns.length) ? j.report_columns : null,
+      // 列顺序也要读回来：只存不读的话，一刷新就退回默认顺序，
+      // 表现就是「拖完切个页面再回来又变回去了」
+      report_column_order: (j.report_column_order && j.report_column_order.length)
+        ? j.report_column_order : null,
       report_titles: j.report_titles || {},
       report_total_position: j.report_total_position || 'bottom'
     }};
@@ -2056,6 +2188,8 @@ async function loadParams(){
         exclude_zero_amount: ('exclude_zero_amount' in v)
           ? !!v.exclude_zero_amount : !!scopeData[""].exclude_zero_amount,
         report_columns: (v.report_columns && v.report_columns.length) ? v.report_columns : null,
+        report_column_order: (v.report_column_order && v.report_column_order.length)
+          ? v.report_column_order : (scopeData[""].report_column_order || null),
         report_titles: v.report_titles || {},
         report_total_position: v.report_total_position || 'bottom'
       };
@@ -2599,21 +2733,41 @@ function reportColumnCatalog(){
 }
 
 /* 报表列配置卡片：勾选要展示的列 + 自定义标题 + 合计行位置 */
+/* 当前列表顺序：优先按保存过的 report_column_order，
+   没存过就按目录默认顺序。新加的列（升级后多出来的）接在最后。 */
+function reportColumnOrder(cat, c){
+  const saved = Array.isArray(c.report_column_order) ? c.report_column_order : [];
+  const byKey = new Map(cat.map(x => [x.key, x]));
+  const out = [];
+  for(const k of saved){ if(byKey.has(k)){ out.push(byKey.get(k)); byKey.delete(k); } }
+  for(const x of cat){ if(byKey.has(x.key)) out.push(x); }
+  return out;
+}
+
 function renderReportColumns(){
   const box = $('#rcols-body');
   if(!box) return;
   const cat = reportColumnCatalog();
   const c = cur();
+  const ordered = reportColumnOrder(cat, c);
   // 显式数组（含空数组）= 按它来；null/undefined = 默认全选。
   // 关键：空数组要当成「全不选」，不能又回退成全选（否则取消全选没反应）。
   const sel = Array.isArray(c.report_columns) ? new Set(c.report_columns) : null;
   const titles = c.report_titles || {};
   const total = c.report_total_position === 'top' ? 'top' : 'bottom';
-  box.innerHTML = cat.map(col => {
+  box.innerHTML = ordered.map((col, i) => {
     const on = !sel || sel.has(col.key);
     const title = titles[col.key] || '';
+    const up = i === 0 ? 'disabled' : '';
+    const dn = i === ordered.length - 1 ? 'disabled' : '';
     return `<tr data-rk="${esc(col.key)}">
       <td class="kcell"><input type="checkbox" data-rcol="${esc(col.key)}" ${on ? 'checked' : ''}></td>
+      <td class="kcell drag-handle" draggable="true" data-handle="${esc(col.key)}"
+          title="按住这里上下拖，就能调整顺序">
+        <span class="grip">⠿</span>
+        <button class="mini" data-move="${esc(col.key)}" data-dir="-1" ${up} title="上移一格">↑</button>
+        <button class="mini" data-move="${esc(col.key)}" data-dir="1" ${dn} title="下移一格">↓</button>
+      </td>
       <td>${esc(col.header)}<div class="pid">${esc(col.key)}</div></td>
       <td><input type="text" data-rtitle="${esc(col.key)}" value="${esc(title)}" placeholder="留空用默认"></td>
       <td class="muted" style="font-size:12px">${REPORT_KIND_CN[col.kind] || col.kind}</td>
@@ -2623,7 +2777,7 @@ function renderReportColumns(){
   // 合计行位置
   document.querySelectorAll('input[name="rcol-total"]').forEach(r => {
     r.checked = (r.value === total);
-    r.onchange = () => { c.report_total_position = r.value; };
+    r.onchange = () => { c.report_total_position = r.value; autoSaveSoon(); };
   });
 
   // 全选开关：点一下全选 / 再点一下全部取消。
@@ -2635,17 +2789,66 @@ function renderReportColumns(){
     c.report_columns = on ? cat.map(x => x.key) : [];
     box.querySelectorAll('[data-rcol]').forEach(cb => cb.checked = on);
     renderReportColumns();
+    autoSaveSoon();
   };
   box.querySelectorAll('[data-rcol]').forEach(cb => cb.onchange = () => {
     const keys = [...box.querySelectorAll('[data-rcol]')]
       .filter(x => x.checked).map(x => x.dataset.rcol);
     c.report_columns = keys;
     allCb.checked = keys.length >= cat.length;
+    autoSaveSoon();
   });
+  // 拖拽排序：按住「顺序」格上下拖，松手即存。
+  // 比一个个点箭头快得多，箭头保留做微调。
+  let dragKey = '';
+  const rowsNow = () => [...box.querySelectorAll('tr[data-rk]')];
+  box.querySelectorAll('[data-handle]').forEach(h => {
+    h.addEventListener('dragstart', (ev) => {
+      dragKey = h.dataset.handle;
+      h.closest('tr').classList.add('dragging');
+      try { ev.dataTransfer.effectAllowed = 'move'; } catch(_) {}
+      try { ev.dataTransfer.setData('text/plain', dragKey); } catch(_) {}
+    });
+    h.addEventListener('dragend', () => {
+      const tr = h.closest('tr');
+      if(tr) tr.classList.remove('dragging');
+      dragKey = '';
+      c.report_column_order = rowsNow().map(x => x.dataset.rk);
+      autoSaveSoon();
+    });
+  });
+  rowsNow().forEach(tr => {
+    tr.addEventListener('dragover', (ev) => {
+      if(!dragKey) return;
+      ev.preventDefault();
+      const from = box.querySelector('tr[data-rk="' + CSS.escape(dragKey) + '"]');
+      if(!from || from === tr) return;
+      const r = tr.getBoundingClientRect();
+      const before = (ev.clientY - r.top) < r.height / 2;
+      tr.parentNode.insertBefore(from, before ? tr : tr.nextSibling);
+    });
+  });
+
+  // 上移 / 下移：改的是**整张表的顺序**（含没勾的列），
+  // 这样勾选状态一变，行的位置也不会跳。
+  box.querySelectorAll('[data-move]').forEach(btn => btn.onclick = (ev) => {
+    ev.preventDefault();
+    const key = btn.dataset.move;
+    const dir = Number(btn.dataset.dir);
+    const list = reportColumnOrder(reportColumnCatalog(), c).map(x => x.key);
+    const i = list.indexOf(key), j = i + dir;
+    if(i < 0 || j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    c.report_column_order = list;
+    renderReportColumns();
+    autoSaveSoon();
+  });
+
   box.querySelectorAll('[data-rtitle]').forEach(inp => inp.oninput = () => {
     const k = inp.dataset.rtitle;
     const v = inp.value.trim();
     if(!v) delete titles[k]; else titles[k] = v;
+    autoSaveSoon();
   });
 }
 
@@ -2769,6 +2972,7 @@ function collectByCountry(){
     if(!!v.exclude_zero_amount !== rootFlag) one.exclude_zero_amount = !!v.exclude_zero_amount;
     // 报表列配置：列勾选 / 自定义标题 / 合计位置，各国独立（和参数表一样）
     if(v.report_columns && v.report_columns.length) one.report_columns = v.report_columns;
+    if(v.report_column_order && v.report_column_order.length) one.report_column_order = v.report_column_order;
     if(v.report_titles && Object.keys(v.report_titles).length) one.report_titles = v.report_titles;
     if(v.report_total_position) one.report_total_position = v.report_total_position;
     out[k] = one;
@@ -2823,36 +3027,62 @@ $('#btn-preview').onclick = async () => {
   }catch(e){ body.innerHTML = '<div class="empty">试算出错：' + esc(e.message) + '</div>'; }
 };
 
-$('#btn-save').onclick = async () => {
+/* 保存配置：抽成一个函数，手动保存和「改了自动存」共用同一份 payload。
+   注意 payload 必须是**完整**的一份（参数表 + 公式 + 各国…）：这个接口是整体覆盖，
+   只传部分字段会把没传的当空，冲掉参数表和公式。 */
+function buildSavePayload(){
+  const g = scopeData[""] || {params: [], order_fields: {}, cost_fields: {}};
+  // 把「报表列」卡片当前的勾选 / 自定义标题 / 合计位置写回当前作用域
+  const rc = cur();
+  rc.report_columns = [...document.querySelectorAll('#rcols-body [data-rcol]')]
+    .filter(x => x.checked).map(x => x.dataset.rcol);
+  rc.report_titles = {};
+  document.querySelectorAll('#rcols-body [data-rtitle]').forEach(x => {
+    const v = x.value.trim(); if(v) rc.report_titles[x.dataset.rtitle] = v;
+  });
+  rc.report_total_position = (document.querySelector('input[name="rcol-total"]:checked') || {}).value || 'bottom';
+  // 整张表的行顺序（含没勾的列）
+  rc.report_column_order = [...document.querySelectorAll('#rcols-body [data-rk]')]
+    .map(x => x.dataset.rk);
+  return {params: g.params, by_country: collectByCountry(),
+          formulas: fmls, order_fields: g.order_fields,
+          cost_fields: g.cost_fields,
+          ads_fields: g.ads_fields, affiliate_fields: g.affiliate_fields,
+          mapping_fields: g.mapping_fields,
+          exclude_zero_amount: !!g.exclude_zero_amount,
+          report_columns: g.report_columns || [],
+          report_column_order: g.report_column_order || [],
+          report_titles: g.report_titles || {},
+          report_total_position: g.report_total_position || 'bottom'};
+}
+
+async function saveConfig(silent){
   try{
-    const g = scopeData[""] || {params: [], order_fields: {}, cost_fields: {}};
-    // 把「报表列」卡片当前的勾选 / 自定义标题 / 合计位置写回当前作用域
-    const rc = cur();
-    rc.report_columns = [...document.querySelectorAll('#rcols-body [data-rcol]')]
-      .filter(x => x.checked).map(x => x.dataset.rcol);
-    rc.report_titles = {};
-    document.querySelectorAll('#rcols-body [data-rtitle]').forEach(x => {
-      const v = x.value.trim(); if(v) rc.report_titles[x.dataset.rtitle] = v;
-    });
-    rc.report_total_position = (document.querySelector('input[name="rcol-total"]:checked') || {}).value || 'bottom';
+    const payload = buildSavePayload();
     const r = await fetch('/api/config/save', {method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({params: g.params, by_country: collectByCountry(),
-                            formulas: fmls, order_fields: g.order_fields,
-                            cost_fields: g.cost_fields,
-                            ads_fields: g.ads_fields, affiliate_fields: g.affiliate_fields,
-                            mapping_fields: g.mapping_fields,
-                            exclude_zero_amount: !!g.exclude_zero_amount,
-                            report_columns: g.report_columns || [],
-                            report_titles: g.report_titles || {},
-                            report_total_position: g.report_total_position || 'bottom'})});
+      body: JSON.stringify(payload)});
     const j = await r.json();
-    const n = Object.keys(collectByCountry()).length;
     if(j.ok) paramsLoaded = false;
-    toast(j.ok ? ('已保存（通用 + ' + n + ' 个国家的单独设置），下次核算立即生效')
-               : ('保存失败：' + j.error));
-  }catch(e){ toast('保存出错：' + e.message); }
-};
+    if(!silent){
+      const n = Object.keys(payload.by_country || {}).length;
+      toast(j.ok ? ('已保存（通用 + ' + n + ' 个国家的单独设置），下次核算立即生效')
+                 : ('保存失败：' + j.error));
+    } else if(!j.ok){
+      toast('自动保存失败：' + j.error);
+    }
+  }catch(e){ if(!silent) toast('保存出错：' + e.message); }
+}
+
+/* 改了「报表列」就自动存：勾选本来就是最后一锤子的事，
+   让人再回头点一次「保存配置」纯属多余，忘了点就会以为没保存成功。 */
+let _autoSaveTimer = 0;
+function autoSaveSoon(){
+  clearTimeout(_autoSaveTimer);
+  _autoSaveTimer = setTimeout(() => saveConfig(true), 700);
+}
+
+$('#btn-save').onclick = () => saveConfig(false);
 
 /* ---------- 成本表 ---------- */
 let costItems = [], costFiltered = [], costPageNo = 0;

@@ -60,9 +60,15 @@ function render(state) {
   $("enabled").className = "v " + (state.enabled ? "ok" : "bad");
   $("captured").textContent = state.stats?.captured ?? 0;
   $("toggle").textContent = state.enabled ? "暂停记录" : "开始记录";
+  // 「已识别店铺」这一行由 identifyCurrent 负责写（那是店铺身份，不是域名数量）。
+  // 这里只在还没识别出来时给个占位，别把店名覆盖成「N 个域名」。
   const hosts = state.learnedHosts || [];
-  $("hosts").textContent = hosts.length ? hosts.length + " 个域名" : "还没学到";
-  $("hosts").title = hosts.join("\n");
+  if ($("hosts") && !$("hosts").dataset.shop) {
+    $("hosts").textContent = hosts.length ? "未识别" : "还没识别";
+  }
+  if ($("hosts")) {
+    $("hosts").title = hosts.length ? "已学到的域名：\n" + hosts.join("\n") : "还没学到域名";
+  }
 
   renderResult(state);
 }
@@ -102,6 +108,10 @@ function renderResult(state) {
       (calc.stale && calc.stale.length
         ? `<br><span style="color:#C0392B">⚠ 有数据文件是旧的，结果可能偏离：</span><br>` +
           calc.stale.map((x) => `<span style="color:#C0392B">${escapeHtml(x)}</span>`).join("<br>")
+        : "") +
+      (calc.missing && calc.missing.length
+        ? `<br><span style="color:#C0392B">⚠ 本轮没有${escapeHtml(calc.missing.join("、"))}数据，` +
+          `这部分按 0 计，净利偏高</span>`
         : "");
     box.title = calc.file || "";
     return;
@@ -111,7 +121,8 @@ function renderResult(state) {
 }
 
 function taskName(t) {
-  return ({ all: "取数+核算", orders: "订单取数", sku: "商品SKU", affiliate: "联盟佣金", ads: "广告", calc: "核算" })[t] || t;
+  return ({ all: "取数+核算", orders: "订单取数", sku: "商品SKU", affiliate: "联盟佣金",
+            ads: "广告", manualAds: "广告（手动导出）", calc: "核算" })[t] || t;
 }
 
 function fmtNum(v) {
@@ -126,8 +137,41 @@ function checkBridge() {
   const el = $("bridge");
   fetch("http://127.0.0.1:8765/health")
     .then((r) => r.json())
-    .then((d) => { el.textContent = d.ok ? "已连接" : "无响应"; el.className = "v " + (d.ok ? "ok" : "bad"); })
+    .then((d) => {
+      el.textContent = d.ok ? "已连接" : "无响应";
+      el.className = "v " + (d.ok ? "ok" : "bad");
+      checkExtVersion(d && d.extVersion);
+    })
     .catch(() => { el.textContent = "未启动"; el.className = "v bad"; });
+}
+
+/**
+ * 扩展"内存里跑的版本" vs "磁盘上的版本"。
+ *
+ * 为什么需要：改完代码只刷新页面、没点扩展的「重新加载」时，
+ * 扩展页上显示的版本号已经是新的（读的是磁盘 manifest），
+ * 但跑的还是旧代码——日志里就会冒出 old 版本号，看着像"多个版本混跑"。
+ * 这个横幅直接把差异摆出来，点一下自己重载。
+ */
+function checkExtVersion(diskVer) {
+  const box = $("vermiss");
+  if (!box) return;
+  const runVer = (chrome.runtime.getManifest() || {}).version || "";
+  if (!diskVer || !runVer || diskVer === runVer) {
+    box.classList.add("hidden");
+    return;
+  }
+  $("vm-run").textContent = runVer;
+  $("vm-disk").textContent = diskVer;
+  box.classList.remove("hidden");
+  const btn = $("vm-reload");
+  if (btn && !btn.dataset.bound) {
+    btn.dataset.bound = "1";
+    btn.onclick = () => {
+      chrome.runtime.reload();
+      window.close();
+    };
+  }
 }
 
 function fmt(d) {
@@ -307,6 +351,12 @@ async function loadStores() {
     data = null;
   }
 
+  // 站点档案顺手存一份：后台按它决定「这家站要不要跳过规格接口」。
+  // 存在扩展存储里，后台随时能读到，不用每次都问本地程序。
+  if (data && data.sites) {
+    chrome.storage.local.set({ sites: data.sites });
+  }
+
   const hasStores = !!(data && data.ok && data.stores && data.stores.length);
   sel.innerHTML = "";
   const blank = document.createElement("option");
@@ -324,25 +374,135 @@ async function loadStores() {
     }
   }
 
-  chrome.storage.local.get({ settings: {} }, (st) => {
-    const set = st.settings || {};
-    if (set.store && [...sel.options].some((o) => o.value === set.store)) {
-      sel.value = set.store;
-      syncCountryFromStore();
-    } else if (set.country) {
-      $("country").value = set.country;
-    } else if (data && data.default) {
-      $("country").value = data.default;
+  // 国家做成下拉：本地程序认得的站点是固定的，手打容易打错一个字，
+  // 而国家错 = 费率、汇率、佣金比例全错，算出来的净利看着正常其实是错的。
+  const cs = $("country");
+  if (cs && cs.tagName === "SELECT") {
+    const list = (data && data.countries && data.countries.length)
+      ? data.countries.slice()
+      : ["马来西亚", "菲律宾", "泰国", "越南", "新加坡", "印尼",
+         "美国", "英国", "德国", "法国", "意大利", "西班牙"];
+    const keep = cs.value;
+    cs.innerHTML = "";
+    for (const c of list) {
+      const o = document.createElement("option");
+      o.value = c;
+      o.textContent = c;
+      cs.appendChild(o);
     }
+    // 存下来的国家如果不在清单里（老配置/手填过），也保留，别把它的值弄丢
+    if (keep && !list.includes(keep)) {
+      const o = document.createElement("option");
+      o.value = keep;
+      o.textContent = keep;
+      cs.appendChild(o);
+    }
+    if (keep) cs.value = keep;
+  }
+
+  // 必须等这个回调跑完再返回：它会把上次记住的国家填回输入框，
+  // 如果不等就返回，调用方刚设好的「识别出来的国家」会被它覆盖成旧值。
+  await new Promise((resolve) => {
+    chrome.storage.local.get({ settings: {} }, (st) => {
+      const set = st.settings || {};
+      if (set.store && [...sel.options].some((o) => o.value === set.store)) {
+        sel.value = set.store;
+        syncCountryFromStore();
+      } else if (set.country) {
+        $("country").value = set.country;
+      } else if (data && data.default) {
+        $("country").value = data.default;
+      }
+      resolve();
+    });
   });
 }
+
+/**
+ * 问后台「现在这个浏览器登的是哪家店」。
+ *
+ * 为什么要自动问：店铺清单来自本地程序里已经建档的店铺，
+ * 一家新店从没取过数，就永远不在下拉里——用户会觉得「又得手工加一次」。
+ * 这里打开面板就识别，认出来就地建档、带出国家、补进下拉。
+ */
+async function identifyCurrent(silent) {
+  const row = $("hosts");
+  if (!row) return null;
+  if (!silent) row.textContent = "识别中…";
+  const resp = await new Promise((resolve) => {
+    const ok = safeSend({ type: "identifyNow" }, (r) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(r || { ok: false, error: "后台没响应" });
+    });
+    if (!ok) resolve({ ok: false, error: "面板已过期" });
+  });
+
+  if (resp && resp.ok && resp.shop && resp.shop.shop_id) {
+    const s = resp.shop;
+    const c = resp.country || "";
+    row.textContent = `${s.shop_name || s.shop_id}${c ? "·" + c : ""}`;
+    row.className = "v ok";
+    row.dataset.shop = s.shop_id;
+    row.title = `shop_id：${s.shop_id}\n站点：${s.region || "?"}\n${c ? "国家：" + c : ""}`;
+    // 顺序很关键：先刷店铺清单（新店这时才进下拉），
+    // 再选店 + 填国家，最后一起存起来。
+    // 反过来的话，loadStores 里回填的旧国家会把刚识别出的国家盖掉——
+    // 菲律宾的店就会顶着「马来西亚」的费率去算。
+    await loadStores();
+    const sel = $("store");
+    if (sel && [...sel.options].some((o) => o.value === s.shop_id)) {
+      sel.value = s.shop_id;
+    }
+    if (c && $("country")) {
+      $("country").value = c;
+    } else {
+      syncCountryFromStore();
+    }
+    saveStore();
+    return s;
+  }
+
+  row.textContent = "未识别";
+  row.className = "v bad";
+  delete row.dataset.shop;
+  row.title = (resp && resp.error) || "";
+  // 无论是不是静默识别，都把原因写进日志：面板只显示"未识别"，
+  // 没有原因就只能靠猜（以前只有手动点「重新识别」时才记）。
+  if (resp && resp.error) log(`店铺识别失败：${resp.error}`);
+  return null;
+}
+
+$("reident") && $("reident").addEventListener("click", () => identifyCurrent(false));
 
 $("store") && $("store").addEventListener("change", () => {
   syncCountryFromStore();
   saveStore();
 });
 $("country") && $("country").addEventListener("change", saveStore);
-loadStores();
+// 面板一打开就先把"上次识别到的店铺"画出来，不等任何请求。
+// 之后再问一次（后台若有更新会覆盖），体感就是"秒出店名"。
+try {
+  chrome.storage.local.get({ currentShop: null }, ({ currentShop }) => {
+    const row = $("hosts");
+    if (!row || !currentShop || !currentShop.shop_id) return;
+    const c = currentShop.country || "";
+    row.textContent = `${currentShop.shop_name || currentShop.shop_id}${c ? "·" + c : ""}`;
+    row.className = "v ok";
+    row.dataset.shop = currentShop.shop_id;
+    row.title = `shop_id：${currentShop.shop_id}\n站点：${currentShop.region || "?"}`;
+    const sel = $("store");
+    if (sel && [...sel.options].some((o) => o.value === currentShop.shop_id)) {
+      sel.value = currentShop.shop_id;
+    }
+  });
+} catch (e) { /* 忽略 */ }
+
+// 先拉店铺清单，再问一次「现在这家店是谁」：
+// 新店就是靠这一步自动建档的，用户不需要先手工加店铺
+loadStores().then(() => identifyCurrent(true));
 
 $("calcOnly") && $("calcOnly").addEventListener("click", (e) => {
   const range = buildRange();

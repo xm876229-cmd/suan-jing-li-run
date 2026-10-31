@@ -184,6 +184,30 @@ def _load_store_names() -> dict[str, str]:
     return _STORE_NAMES
 
 
+def store_display_name(shop_id: str) -> str:
+    """这家店对外该叫什么：stores.json 里的别名 → 平台店名 → 店铺 ID。
+
+    别名优先，是因为用户会在程序里把店改成自己认得的名（「马来一号店」），
+    平台原名（「Party Pop Hub」）反而认不出来。
+    """
+    sid = (shop_id or "").strip()
+    if not sid:
+        return "未识别店铺"
+    name = _load_store_names().get(sid, "")
+    if name:
+        return name
+    try:
+        meta = store_root(sid) / "meta.json"
+        if meta.is_file():
+            m = json.loads(meta.read_text(encoding="utf-8"))
+            n = str(m.get("shop_name") or "").strip()
+            if n:
+                return n
+    except Exception:  # noqa: BLE001
+        pass
+    return sid
+
+
 def store_root(shop_id: str) -> Path:
     """某家店的根目录（里面有 inbox 订单表 等分类目录）。
 

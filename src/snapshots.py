@@ -97,8 +97,12 @@ def restore_inbox(shop_id: str) -> int:
     for f in snap.iterdir():
         if not f.is_file() or f.name == "manifest.json":
             continue
-        kind = kinds.get(f.name, "orders")
-        sub = paths.KIND_DIR_CN.get(kind, "订单表")
+        # 认不出类型的文件不要往「订单表」里塞：
+        # 佣金表被当成订单补进去，核算时会被读两遍，佣金白白翻倍。
+        kind = kinds.get(f.name, "")
+        if kind not in paths.KIND_DIR_CN:
+            continue
+        sub = paths.KIND_DIR_CN[kind]
         d = inbox / sub
         try:
             d.mkdir(parents=True, exist_ok=True)
@@ -165,9 +169,12 @@ def _kind_of_file(name: str) -> str:
     n = name.lower()
     if "订单" in n or "order" in n:
         return "orders"
-    if "ads" in n or "广告" in n:
+    # 广告导出叫 "creative data for product campaigns"，名字里没有 ads
+    if "ads" in n or "广告" in n or "creative" in n:
         return "ads"
-    if "affiliate" in n or "联盟" in n or "commission" in n:
+    # 佣金导出叫 "Transaction_Analysis_Product_List_…"，名字里也没有 affiliate
+    if ("affiliate" in n or "联盟" in n or "commission" in n
+            or "transaction" in n):
         return "affiliate"
     if "sku" in n or "mapping" in n or "链接" in n:
         return "mapping"

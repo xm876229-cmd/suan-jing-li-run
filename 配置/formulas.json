@@ -177,9 +177,98 @@
       ]
     }
   },
-  "ads_fields": {},
-  "affiliate_fields": {},
-  "mapping_fields": {},
+  "ads_fields": {
+    "product_id": {
+      "label": "商品ID",
+      "titles": [
+        "Product ID",
+        "商品ID"
+      ]
+    },
+    "ad_cost": {
+      "label": "广告花费",
+      "titles": [
+        "Cost",
+        "成本",
+        "Spend",
+        "花费",
+        "广告花费"
+      ]
+    },
+    "ad_currency": {
+      "label": "货币",
+      "titles": [
+        "Currency",
+        "货币"
+      ]
+    }
+  },
+  "affiliate_fields": {
+    "product_id": {
+      "label": "商品ID",
+      "titles": [
+        "Product ID",
+        "商品ID"
+      ]
+    },
+    "commission": {
+      "label": "预估佣金",
+      "titles": [
+        "Est. Commission",
+        "Est Commission",
+        "预估佣金",
+        "佣金"
+      ]
+    },
+    "commission_refund": {
+      "label": "退款",
+      "titles": [
+        "Refunds",
+        "退款"
+      ]
+    }
+  },
+  "mapping_fields": {
+    "style_code": {
+      "label": "款式编码",
+      "titles": [
+        "款式编码",
+        "款式",
+        "Style Code",
+        "这列常态保留",
+        "常态保留",
+        "勿删和覆盖"
+      ]
+    },
+    "product_id": {
+      "label": "商品ID",
+      "titles": [
+        "Product ID",
+        "商品ID"
+      ]
+    },
+    "sku_id": {
+      "label": "SKU ID",
+      "titles": [
+        "SKU ID"
+      ]
+    },
+    "seller_sku": {
+      "label": "卖家编码",
+      "titles": [
+        "Seller SKU",
+        "卖家SKU",
+        "商家SKU"
+      ]
+    },
+    "product_name": {
+      "label": "商品名称",
+      "titles": [
+        "Product Name",
+        "商品名称"
+      ]
+    }
+  },
   "params": [
     {
       "id": "gmv",
@@ -296,5 +385,48 @@
     "total_fees": "发单费 + 平台佣金 + 交易手续费 + 奖金返现 + 广告花费 + 达人佣金 + 订单服务费",
     "net": "GMV - 商品成本 - 发单费 - 平台佣金 - 交易手续费 - 奖金返现 - 广告花费 - 达人佣金 - 订单服务费",
     "net_rate": "净利 / GMV"
-  }
+  },
+  "report_columns": [
+    "style",
+    "product",
+    "gmv",
+    "orders",
+    "aov",
+    "gross_margin",
+    "ratio:dispatch",
+    "ratio:ads",
+    "net_rate",
+    "net",
+    "net_cny"
+  ],
+  "report_column_order": [
+    "rank",
+    "style",
+    "product",
+    "gmv",
+    "orders",
+    "aov",
+    "gross_margin",
+    "ratio:dispatch",
+    "ratio:ads",
+    "net_rate",
+    "net",
+    "net_cny",
+    "name",
+    "items",
+    "buyer_paid",
+    "cost",
+    "gross_profit",
+    "fee:dispatch",
+    "fee:platform_commission",
+    "fee:tx_fee",
+    "fee:ads",
+    "fee:affiliate",
+    "fee:cashback",
+    "fee:order_service",
+    "fee_total",
+    "alt_net",
+    "alt_diff"
+  ],
+  "report_total_position": "bottom"
 }

@@ -337,7 +337,9 @@ def write_result(name: str, content: str, out_dir: Path | None = None) -> Path:
         while p.exists():
             p = d / f"{stem} ({i}){suf}"
             i += 1
-    p.write_text(content, encoding="utf-8-sig")
+    # build_csv 已经在首行写了 BOM；再按 utf-8-sig 写一遍就是两个 BOM，
+    # Excel 打开表头会变成 "﻿﻿Product ID"，程序按表头认表也会认不出。
+    p.write_text(content.lstrip("\ufeff"), encoding="utf-8-sig")
     return p
 
 

@@ -498,7 +498,7 @@ async function ensureHost(hint, log, force = false) {
 
 // ---------------- 请求封装 ----------------
 
-async function apiPost(url, body) {
+async function apiPost(url, body, extraHeaders) {
   let host = "";
   try { host = new URL(url).hostname; } catch (e) { /* 忽略 */ }
   const { [HEADER_KEY]: hp = {} } = await skGet({ [HEADER_KEY]: {} });
@@ -507,6 +507,10 @@ async function apiPost(url, body) {
   for (const [k, v] of Object.entries(learned)) {
     if (k.startsWith("_")) continue;
     headers[k] = v;
+  }
+  // 广告接口有的站点要求显式带账户 ID（报错原文：req adv id missing）
+  for (const [k, v] of Object.entries(extraHeaders || {})) {
+    if (v) headers[k] = String(v);
   }
 
   const resp = await fetch(url, {
@@ -520,7 +524,10 @@ async function apiPost(url, body) {
   try { json = JSON.parse(text); } catch (e) { json = { raw: text.slice(0, 300) }; }
   if (!resp.ok) throw new Error(`HTTP ${resp.status} ${text.slice(0, 200)}`);
   if (json && json.code !== undefined && json.code !== 0) {
-    throw new Error(`接口返回 code=${json.code} ${json.message || json.msg || ""}`);
+    // 平台经常只回一个 code、不给人话，带上 extra 才能知道是哪一步被拒
+    const extra = json.extra ? `｜${JSON.stringify(json.extra).slice(0, 240)}` : "";
+    const raw = (json.message || json.msg) ? "" : `｜${text.slice(0, 200)}`;
+    throw new Error(`接口返回 code=${json.code} ${json.message || json.msg || ""}${extra}${raw}`);
   }
   return json;
 }
@@ -560,31 +567,159 @@ function skSet(obj) {
 // 不猜、不解析 DOM，直接问接口。
 let CURRENT_SHOP = { shop_id: "", shop_name: "", shop_code: "", region: "" };
 
+// 后台脚本每次被唤醒（MV3 会被回收）内存都是空的，但"这家店是谁"没变。
+// 以前只把识别结果写进 storage、启动时不读，于是每次唤醒都要重新识别一遍——
+// 面板一打开就"识别中…"好几秒，越用越慢。
+try {
+  chrome.storage.local.get({ currentShop: null }).then(({ currentShop }) => {
+    if (currentShop && currentShop.shop_id && !CURRENT_SHOP.shop_id) {
+      CURRENT_SHOP = currentShop;
+    }
+  }).catch(() => {});
+} catch (e) { /* 忽略 */ }
+
 // 当前这一轮取数的区间。上传文件时带给桥，桥拿它给快照打标签，
 // 这样界面上「用哪次数据」列表能显示每份快照对应哪个区间。
 let CURRENT_RANGE = null;
 
-async function identifyShop(host, log) {
-  if (CURRENT_SHOP.shop_id) return CURRENT_SHOP;
+// 店铺身份可能的来源。按「最像店铺资料」的顺序试，第一个给出 shop_id 的算数。
+// 只试一个接口是不行的：联盟接口在没开通联盟的店上会 404/10000，
+// 换个国家的新店就识别不出来——而用户不该为了加一家店去「教」程序。
+const IDENTIFY_PATHS = [
+  "/api/v1/affiliate/account/info_v2",
+  "/api/v1/affiliate/account/all_sellers/get",
+  "/api/v1/shop/get_shop_info",
+  "/api/v1/seller/shop/info",
+  "/api/v1/shop/info",
+];
+
+// 域名后缀 → 站点国家。接口全挂时至少还能把国家填对。
+const HOST_REGION = [
+  ["seller-my", "MY"], ["seller-ph", "PH"], ["seller-th", "TH"], ["seller-vn", "VN"],
+  ["seller-sg", "SG"], ["seller-id", "ID"], ["seller-us", "US"], ["seller-uk", "GB"],
+  ["seller-gb", "GB"], ["seller-de", "DE"], ["seller-fr", "FR"], ["seller-it", "IT"],
+  ["seller-es", "ES"], ["seller-mx", "MX"], ["seller-br", "BR"], ["seller-jp", "JP"],
+  ["seller-kr", "KR"],
+];
+
+function regionFromHost(host) {
+  const h = String(host || "").toLowerCase();
+  for (const [k, v] of HOST_REGION) if (h.includes(k)) return v;
+  return "";
+}
+
+/**
+ * 这家站点有什么脾气。数据来自本地程序的 配置/sites.json，
+ * 面板每次打开都会同步一份到扩展存储里。
+ *
+ * 为什么不在扩展里写死：站点差异（广告规格接口能不能用、下载要重试几次）
+ * 以后只会越来越多，写死在 JS 里就意味着「加一个新站点要重新发一版扩展」。
+ */
+async function siteProfile(host) {
+  const { sites } = await skGet({ sites: null });
+  const h = String(host || "").toLowerCase();
+  const m = h.match(/^seller-([a-z]{2})\./);
+  const key = m ? m[1] : "";
+  const table = (sites && sites.sites) || {};
+  const def = (sites && sites.defaults) || {};
+  return { key, region: regionFromHost(host), ...def, ...(table[key] || {}) };
+}
+
+// 给面板看：上一次识别失败的原因（面板上直接显示，不用去翻日志）
+let SHOP_ERROR = "";
+
+async function identifyShop(host, log, opts = {}) {
+  const force = !!opts.force;
+  if (CURRENT_SHOP.shop_id && !force) return CURRENT_SHOP;
   try {
-    const url = await buildUrl(host, "/api/v1/affiliate/account/info_v2");
-    const r = await runInPage(host, async (u) => {
-      const resp = await fetch(u, { credentials: "include" });
-      return await resp.text();
-    }, [url]);
+    const urls = [];
+    for (const p of IDENTIFY_PATHS) {
+      try { urls.push(await buildUrl(host, p)); } catch (e) { /* 这个接口拼不出来就跳过 */ }
+    }
+    const r = await runInPage(host, async (list) => {
+      // 在返回的 JSON 里往下翻，找第一个像店铺的对象。
+      // 各站点返回结构不一样（data.shop / data.list[] / data.sellers[]），
+      // 按字段名认比按固定路径取活得久。
+      const dig = (obj, depth) => {
+        if (!obj || depth > 6) return null;
+        if (Array.isArray(obj)) {
+          for (const it of obj) { const f = dig(it, depth + 1); if (f) return f; }
+          return null;
+        }
+        if (typeof obj !== "object") return null;
+        const id = obj.shop_id || obj.shopId;
+        if (id && /^\d{6,}$/.test(String(id))) {
+          return {
+            shop_id: String(id),
+            shop_name: String(obj.shop_name || obj.shopName || obj.shop_title || ""),
+            shop_code: String(obj.shop_code || obj.shopCode || ""),
+            region: String(obj.region || obj.shop_region || obj.region_code || ""),
+          };
+        }
+        for (const k of Object.keys(obj)) { const f = dig(obj[k], depth + 1); if (f) return f; }
+        return null;
+      };
+      const tried = [];
+      for (const u of list) {
+        try {
+          const resp = await fetch(u, { credentials: "include" });
+          const t = await resp.text();
+          if (!t || t.trim()[0] !== "{") { tried.push(`${u.split("?")[0]} 非 JSON`); continue; }
+          const f = dig(JSON.parse(t), 0);
+          if (f) return { shop: f, source: u.split("?")[0], tried };
+          tried.push(`${u.split("?")[0]} 无 shop_id`);
+        } catch (e) {
+          tried.push(`${u.split("?")[0]} ${String(e && e.message || e).slice(0, 40)}`);
+        }
+      }
+      // 接口全不行：从页面自己的状态里捞一个 shop_id 兜底。
+      // 页面把初始状态直接内联进 HTML，正反两种转义都试（有些站点是 \" 转义过的）。
+      try {
+        const html = document.documentElement ? document.documentElement.innerHTML : "";
+        const pats = [
+          /"shop_?[Ii]d"\s*:\s*"?(\d{6,})"?/,
+          /\\"shop_?[Ii]d\\"\s*:\s*\\?"?(\d{6,})/,
+        ];
+        for (const re of pats) {
+          const m = html.match(re);
+          if (m) return { shop: { shop_id: m[1] }, source: "页面状态", tried };
+        }
+        // 最后看 cookie / localStorage：有些站点把 shop_id 放在登录态里
+        try {
+          const ck = String(document.cookie || "");
+          const mc = ck.match(/shop_?id=(\d{6,})/i);
+          if (mc) return { shop: { shop_id: mc[1] }, source: "cookie", tried };
+        } catch (e) { /* 忽略 */ }
+        try {
+          for (let i = 0; i < localStorage.length; i++) {
+            const v = String(localStorage.getItem(localStorage.key(i)) || "");
+            const m2 = v.match(/"shop_?[Ii]d"\s*:\s*"?(\d{6,})"?/);
+            if (m2) return { shop: { shop_id: m2[1] }, source: "localStorage", tried };
+          }
+        } catch (e) { /* 忽略 */ }
+      } catch (e) { /* 忽略 */ }
+      return { shop: null, tries: tried };
+    }, [urls]);
     if (r.missingTab) throw new Error("没有开着的店铺页面");
     if (r.error) throw new Error(r.error);
-    const j = JSON.parse(r.result);
-    const shop = (j && j.data && j.data.shop) || {};
-    const id = String(shop.shop_id || shop.shopId || "").trim();
-    if (!id) throw new Error("接口没返回 shop_id");
+    const got = r.result || {};
+    const shop = got.shop || {};
+    const id = String(shop.shop_id || "").trim();
+    if (!id) {
+      throw new Error(`几个店铺信息接口都没返回 shop_id（${(got.tries || []).join("；")}）`);
+    }
 
+    const region = String(shop.region || "").toUpperCase() || regionFromHost(host);
     CURRENT_SHOP = {
       shop_id: id,
-      shop_name: String(shop.shop_name || shop.shopName || ""),
+      shop_name: String(shop.shop_name || ""),
       shop_code: String(shop.shop_code || ""),
-      region: String(shop.region || "").toUpperCase(),
+      region: region,
+      _at: Date.now(),
     };
+    SHOP_ERROR = "";
+    log(`店铺已识别：${CURRENT_SHOP.shop_name || id}（${CURRENT_SHOP.region || "?"}）` +
+        (got.source ? `　来源：${got.source}` : ""));
     log(`店铺已识别：${CURRENT_SHOP.shop_name || id}（${CURRENT_SHOP.region || "?"}）`);
 
     // 告诉本地程序：这家店是谁。它会记住，并把后续数据存到这家店自己的目录。
@@ -602,14 +737,21 @@ async function identifyShop(host, log) {
     } catch (e) { /* 桥不在也不影响识别本身 */ }
 
     try { await chrome.storage.local.set({ currentShop: CURRENT_SHOP }); } catch (e) {}
+    // 顺手把这家店的基本档案落盘（站点代码/区域）。这些是"这家店的身份证"，
+    // 换电脑拷数据时一起带过去，不用重新摸一遍。
+    try {
+      const _prof = await siteProfile(host);
+      await saveStoreProfile({ host, site_key: _prof.key || "" });
+    } catch (e) { /* 档案写不了不影响取数 */ }
     return CURRENT_SHOP;
   } catch (e) {
-    log(`店铺识别失败：${(e && e.message) || e}（数据会存到公共目录）`);
+    SHOP_ERROR = String((e && e.message) || e);
+    log(`店铺识别失败：${SHOP_ERROR}（数据会存到公共目录）`);
     return CURRENT_SHOP;
   }
 }
 
-async function uploadToBridge(name, arrayBuffer, dir) {
+async function uploadToBridge(name, arrayBuffer, dir, shopOverride) {
   // 分块 base64，避免一次拼串把内存打爆
   const bytes = new Uint8Array(arrayBuffer);
   let bin = "";
@@ -625,9 +767,11 @@ async function uploadToBridge(name, arrayBuffer, dir) {
       name, b64,
       dir: dir || "",
       // 映射类文件是店铺无关的（dir=mapping），带上也无害；
-      // 其余文件按 shop_id 落到这家店自己的目录
-      shop_id: CURRENT_SHOP.shop_id || "",
-      shop_name: CURRENT_SHOP.shop_name || "",
+      // 其余文件按 shop_id 落到这家店自己的目录。
+      // shopOverride：闹钟/待办补回时后台没有"当前店铺"，要把归属显式带过来，
+      // 否则补回的订单会落进公共目录，核算时又变成"未识别店铺"。
+      shop_id: (shopOverride && shopOverride.shop_id) || CURRENT_SHOP.shop_id || "",
+      shop_name: (shopOverride && shopOverride.shop_name) || CURRENT_SHOP.shop_name || "",
       // 本次取数的区间：服务端拿它给快照打标签，
       // 界面上「用哪次数据」列表就能显示每份快照是哪个区间的
       range: CURRENT_RANGE || null,
@@ -650,57 +794,197 @@ function stamp() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}_${p(d.getMinutes())}`;
 }
 
+/** 记下"订单导出还在排队"，交给后台闹钟去收。 */
+async function rememberPendingOrder(item) {
+  const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
+  const fresh = (pendingOrders || []).filter((x) => Date.now() - (x.at || 0) < 2 * 3600 * 1000);
+  if (!fresh.some((x) => String(x.taskId) === String(item.taskId))) fresh.push(item);
+  await skSet({ pendingOrders: fresh.slice(-10) });
+}
+
+/**
+ * 收排队中的订单导出。
+ *
+ * 为什么要有这一步：大店导出要几分钟，卡在取数流程里干等会把整轮拖死；
+ * 而不等就丢，用户又得重新点。所以在后台留个闹钟，每分钟看一眼，
+ * 好了就自动下载回传——用户只要过几分钟回来点「核算」。
+ *
+ * shopId 传了就只收这家店的（新一轮开始时先试一次，能补回就不用重导）。
+ */
+async function harvestPendingOrders(log, shopId) {
+  const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
+  if (!pendingOrders.length) return 0;
+  const keep = [];
+  let got = 0;
+  for (const it of pendingOrders) {
+    if (Date.now() - (it.at || 0) > 2 * 3600 * 1000) continue;   // 太旧，丢弃
+    if (shopId && String(it.shop_id || "") !== String(shopId)) { keep.push(it); continue; }
+    try {
+      const rec = await apiPost(
+        await buildUrl(it.host, "/api/fulfillment/order/export_record/get"), {});
+      const list = (rec && rec.data && rec.data.export_records) || [];
+      const hit = list.find((x) => String(x.export_task_id) === String(it.taskId)
+                                && x.file_key && !/^\d+$/.test(String(x.file_key)));
+      if (!hit) { keep.push(it); continue; }
+      let url = "";
+      try {
+        const dl = await apiPost(
+          await buildUrl(it.host, "/api/fulfillment/order/download"),
+          { file_key: hit.file_key, export_task_id: it.taskId });
+        url = (dl && dl.data && (dl.data.download_url || dl.data.url)) || findUrl(dl) || "";
+      } catch (e) { /* 记录里通常还有直链，下面兜住 */ }
+      if (!url) url = findUrl(hit) || "";
+      if (!url) { keep.push(it); continue; }
+      const resp = await fetch(url, { credentials: "include" });
+      if (!resp.ok) { keep.push(it); continue; }
+      const buf = await resp.arrayBuffer();
+      if (!buf || buf.byteLength < 200) { keep.push(it); continue; }
+      const saved = await uploadToBridge(it.name || `全部 笔订单-${stamp()}.csv`, buf, "",
+        { shop_id: it.shop_id, shop_name: it.shop_name });
+      if (log) log(`   订单已自动补回：${saved.path}`);
+      got++;
+    } catch (e) {
+      keep.push(it);
+    }
+  }
+  await skSet({ pendingOrders: keep });
+  return got;
+}
+
 async function runOrders({ startMs, endMs }, log) {
   const host = await ensureHost("seller", log);
 
-  log("提交订单导出任务…");
-  const fileName = encodeURIComponent(`全部 笔订单-${stamp()}.csv`);
-  const created = await apiPost(
-    await buildUrl(host, "/api/fulfillment/order/export"),
-    {
-      search_condition: {
-        condition_list: { time_order_created: { value: [String(startMs), String(endMs)] } },
-      },
-      sort_info: "6",
-      file_name: fileName,
-      file_type: 2,
+  // 先看上次有没有在排队的导出已经生成好了：能补回就不用再排一个
+  try {
+    const recovered = await harvestPendingOrders(log, CURRENT_SHOP.shop_id);
+    if (recovered > 0) {
+      log("上次排队的订单已补回，本轮不再重复导出");
+      return { via: "排队补回" };
     }
-  );
-  const taskId = created?.data?.export_task_id;
-  if (!taskId) throw new Error("导出任务创建失败：没有拿到 export_task_id");
-  log(`任务已创建：${taskId}`);
+  } catch (e) { /* 补不回来就正常走 */ }
 
-  // 轮询导出记录，等文件生成
-  let fileKey = created?.data?.file_key || "";
-  for (let i = 0; i < 40; i++) {
-    await sleep(4000);
+  // —— 工具：建任务 / 等记录 / 下载落盘 ——
+  const isRealFileKey = (k) => !!k && !/^\d+$/.test(String(k));
+  const exportRecords = async () => {
     const rec = await apiPost(await buildUrl(host, "/api/fulfillment/order/export_record/get"), {});
-    const list = rec?.data?.export_records || [];
-    const hit = list.find((x) => String(x.export_task_id) === String(taskId));
-    if (hit && hit.file_key) {
-      fileKey = hit.file_key;
-      log(`文件已生成：${decodeURIComponent(hit.file_name || "")}`);
-      break;
+    return (rec && rec.data && rec.data.export_records) || [];
+  };
+
+  const createTask = async (sMs, eMs, name) => {
+    const created = await apiPost(
+      await buildUrl(host, "/api/fulfillment/order/export"),
+      {
+        search_condition: {
+          condition_list: { time_order_created: { value: [String(sMs), String(eMs)] } },
+        },
+        sort_info: "6",
+        file_name: encodeURIComponent(name),
+        file_type: 2,
+      }
+    );
+    const tid = created?.data?.export_task_id;
+    if (!tid) throw new Error("导出任务创建失败：没有拿到 export_task_id");
+    return String(tid);
+  };
+
+  // 等"对得上本次任务号"的导出记录。注意不能用建任务返回的 file_key：
+  // 那个可能是上一份导出的文件号，拿去下载只会回 21016003。
+  const waitRecord = async (tid, rounds, label) => {
+    let queued = false;
+    for (let i = 0; i < rounds; i++) {
+      await sleep(4000);
+      const list = await exportRecords().catch(() => []);
+      const mine = list.find((x) => String(x.export_task_id) === String(tid));
+      if (mine && isRealFileKey(mine.file_key)) return mine;
+      if (mine && !queued) {
+        queued = true;
+        const st = Object.entries(mine)
+          .filter(([k]) => /status|state|progress|msg|reason/i.test(k))
+          .map(([k, v]) => `${k}=${v}`).join(" ");
+        log(`   ${label}：已排队，平台还在生成${st ? "｜" + st : ""}`);
+      }
+      if (i % 5 === 4) log(`   等待中…（${(i + 1) * 4}s${queued ? "，已排队" : ""}）`);
     }
-    log(`等待中…（${(i + 1) * 4}s）`);
+    return null;
+  };
+
+  const saveOne = async (tid, rec, name) => {
+    let url = "";
+    let dlErr = "";
+    const prof = await siteProfile(host);
+    const maxTry = Math.max(1, Number(prof.download_retry) || 4);
+    const gap = Math.max(2000, Number(prof.download_retry_gap) || 6000);
+    for (let attempt = 0; attempt < maxTry && !url; attempt++) {
+      if (attempt) {
+        const wait = gap * attempt;
+        log(`   下载还没就绪，${Math.round(wait / 1000)} 秒后再试…`);
+        await sleep(wait);
+      }
+      try {
+        const dl = await apiPost(
+          await buildUrl(host, "/api/fulfillment/order/download"),
+          { file_key: rec.file_key, export_task_id: tid }
+        );
+        url = dl?.data?.download_url || findUrl(dl) || "";
+      } catch (e) {
+        dlErr = String((e && e.message) || e);
+      }
+    }
+    if (!url) url = findUrl(rec) || "";
+    if (!url) throw new Error(dlErr || "没有拿到下载地址");
+    const fileResp = await fetch(url, { credentials: "include" });
+    if (!fileResp.ok) throw new Error(`下载失败 HTTP ${fileResp.status}`);
+    const buf = await fileResp.arrayBuffer();
+    const saved = await uploadToBridge(name, buf);
+    log(`   已保存：${saved.path}`);
+    return { path: saved.path, bytes: buf.byteLength };
+  };
+
+  // 文件名带上区间：同一区间再点一次时，能认出"上次已经导好了"，
+  // 直接复用那份，不用再排一个 40MB 的任务（实测大店一次要 5 分钟）。
+  // 按本地日期取，不能用 toISOString：东八区的 10-01 00:00 在 UTC 是 09-30，
+  // 文件名会写成 20260930-20261030，跟实际区间差一天。
+  const ymd = (ms) => {
+    const d = new Date(ms);
+    const p2 = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}`;
+  };
+  const rTag = `${ymd(startMs)}-${ymd(endMs)}`;
+  const wantName = `全部 笔订单-${rTag}-${stamp()}.csv`;
+
+  const sameRange = async () => {
+    const list = await exportRecords().catch(() => []);
+    return list.find((x) => isRealFileKey(x.file_key)
+      && decodeURIComponent(String(x.file_name || "")).includes(`全部 笔订单-${rTag}-`));
+  };
+
+  // ① 已有同区间的导出：直接拿，别再排一个
+  const exist = await sameRange();
+  if (exist) {
+    log(`发现同区间已生成的导出，直接复用：${decodeURIComponent(exist.file_name || "")}`);
+    const one = await saveOne(String(exist.export_task_id), exist, wantName);
+    return { saved: one.path, bytes: one.bytes, reused: true };
   }
-  if (!fileKey) throw new Error("等了约 3 分钟仍未见导出文件，可能平台还在生成");
 
-  log("获取下载地址…");
-  const dl = await apiPost(
-    await buildUrl(host, "/api/fulfillment/order/download"),
-    { file_key: fileKey, export_task_id: taskId }
-  );
-  const url = dl?.data?.download_url;
-  if (!url) throw new Error("没有拿到 download_url");
+  // ② 没有就建任务。大店（几万行）生成要几分钟，这一轮只等 48 秒，
+  //    等不到就排队，由后台每分钟去收——实测这条路是通的。
+  log("提交订单导出任务…");
+  const fullTask = await createTask(startMs, endMs, wantName);
+  log(`任务已创建：${fullTask}`);
+  const rec = await waitRecord(fullTask, 12, "订单导出");
+  if (rec) {
+    log("文件已生成，开始下载…");
+    const one = await saveOne(fullTask, rec, wantName);
+    return { saved: one.path, bytes: one.bytes };
+  }
 
-  log("下载并回传…");
-  const fileResp = await fetch(url, { credentials: "include" });
-  if (!fileResp.ok) throw new Error(`下载失败 HTTP ${fileResp.status}`);
-  const buf = await fileResp.arrayBuffer();
-  const saved = await uploadToBridge(`全部 笔订单-${stamp()}.csv`, buf);
-  log(`已保存：${saved.path}`);
-  return { saved: saved.path, bytes: buf.byteLength };
+  await rememberPendingOrder({
+    host, taskId: fullTask, name: wantName, range_tag: rTag,
+    shop_id: CURRENT_SHOP.shop_id || "", shop_name: CURRENT_SHOP.shop_name || "",
+    at: Date.now(),
+  });
+  throw new Error("订单导出已排队：这家店数据量大，平台生成要几分钟。"
+    + "已记下任务，后台会自动下载；过几分钟再点一次「核算」就行（不用再点运行）");
 }
 
 // ---------------- 工具：在响应里找下载地址 ----------------
@@ -861,14 +1145,27 @@ async function runInPage(host, func, args, preferPath) {
     const msg = r.error || inner || "";
     if (!msg) return r;
     last = msg;
-    if (/Failed to fetch|NetworkError|ERR_|about:blank|chrome-error/i.test(msg)) {
-      // 这个标签页用不了了（被浏览器冻结、加载失败、已关闭）——换一个再试
+    if (r.badTab
+        || /Failed to fetch|NetworkError|ERR_|about:blank|chrome-error/i.test(msg)) {
+      // 这个标签页用不了了（被浏览器冻结、注入不了、加载失败、已关闭）——换一个再试
       if (r.tabId) exclude.add(r.tabId);
       await sleep(1500);
       continue;
     }
     return r;
   }
+
+  // 所有现成标签都不能用：开一个干净的后台标签再试一次。
+  // （用户点插件时可能正停在 chrome://extensions，那种页永远注入不了）
+  try {
+    const nt = await chrome.tabs.create({ url: `https://${host}/`, active: false });
+    await waitTabReady(nt.id);
+    await sleep(800);
+    const r = await _runInPageOnce(host, func, args, preferPath, exclude);
+    if (!r.error && !r.missingTab) return r;
+    last = r.error || last;
+  } catch (e) { /* 开页失败就用原来的错误 */ }
+
   return { error: last || "页面请求失败" };
 }
 
@@ -876,6 +1173,7 @@ async function _runInPageOnce(host, func, args, preferPath, exclude) {
   exclude = exclude || new Set();
   // 能用的标签页：没被排除、URL 正常（排除错误页和空白页）
   const usable = (t) => t && t.id && !exclude.has(t.id)
+    && String(t.url || "").startsWith(`https://${host}/`)
     && !/^chrome-error:|^about:/.test(String(t.url || ""));
   let tab = null;
   let openedByUs = false;
@@ -949,10 +1247,14 @@ async function _runInPageOnce(host, func, args, preferPath, exclude) {
   } catch (e) {
     const msg = String((e && e.message) || e);
     // 这句英文原文很难懂，翻成能照着做的提示
-    if (/Cannot access contents/i.test(msg)) {
-      return { error:
-        "扩展没有这个页面的访问权限：到 chrome://extensions → 净利助手 → 详情 → " +
-        "「网站访问权限」改成「在所有网站上」，然后重新点运行", tabId: tab.id };
+    if (/Cannot access contents|The tab was closed|No tab with id/i.test(msg)) {
+      // 这个标签页注入不了（chrome:// 页面、扩展页、被冻结、已关闭）。
+      // 标成 badTab，让上层换下一个，别在同一个上死磕三次。
+      return {
+        badTab: true,
+        error: "这个标签页不能注入脚本（可能是 chrome:// 页面或被冻结），换一个再试",
+        tabId: tab.id,
+      };
     }
     return { error: msg, tabId: tab.id };
   }
@@ -1415,7 +1717,7 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   //    只是刚创建时还是 0 字节，平台生成文件要 1~4 分钟。
   //    之前阻塞在这里等，把一轮拖到 279 秒；现在改成后台轮询：
   //    报表先用现有主表算出来，文件一好就自动入库，下次核算生效。
-  const bgTries = 90;      // 最多约 7 分钟（90 次 × 2 秒 + 每次请求开销）
+  const bgTries = 30;      // 最多约 2 分钟（90 次实测拖到 8 分钟，白等）
   const bgWait = 2000;
   const startBgExport = () => {
     // 放最后启动：它也要用页面标签页，跟③ 并发会互相干扰（表现为 Failed to fetch）
@@ -2123,8 +2425,11 @@ async function runAds(range, log, opts = {}) {
     }
   }
 
-  // 接口不通时，程序自己去广告页点「导出数据」（不弹保存框那条路）
-  if (!quick && !opts.noDirect) {
+  // 接口不通时，程序自己去广告页点「导出数据」（不弹保存框那条路）。
+  // 注意这里只看 quick：noDirect 的意思是「别先试直取接口」，不是「别导」。
+  // 之前两个条件一起写，菲律宾这种 noDirect 的站点连页面导出都被跳过，
+  // 直接掉到最后「查已完成任务」，而没人手动导过就是空等 5 分钟。
+  if (!quick) {
     const startDate = range && range.startDate;
     const endDate = range && (range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : range.to);
     if (startDate && endDate) {
@@ -2142,6 +2447,7 @@ async function runAds(range, log, opts = {}) {
 
   log("查询广告导出任务…");
   const maxRounds = quick ? 1 : 20;      // 非快查模式最多等 5 分钟
+  let idle = 0;                          // 连续「进行中 0 个」的次数
   for (let i = 0; i < maxRounds; i++) {
     const r = await pullAdsTasks(host, log);
     if (r.saved.length) {
@@ -2155,6 +2461,13 @@ async function runAds(range, log, opts = {}) {
       return { skipped: true };
     }
     log(`等待广告任务完成…（${(i + 1) * 15}s，进行中 ${r.running} 个）`);
+    // 连续三次都「没有任务在跑」，说明根本没人建过导出任务，
+    // 再等下去只是干耗 5 分钟，不如早点把结论交回去。
+    idle = r.running ? 0 : (idle + 1);
+    if (idle >= 3) {
+      log("没有在跑的广告导出任务，不再空等");
+      return { pending: false, none: true };
+    }
     await sleep(15000);
   }
   log("广告任务还没完成。它会在后台继续等待，好了自动下载，不用再点任何东西");
@@ -2187,6 +2500,9 @@ try {
     chrome.alarms.create("pending-watch", { periodInMinutes: 1, delayInMinutes: 1 });
     chrome.alarms.onAlarm.addListener((a) => {
       if (a.name === "pending-watch") consumePending().catch(() => {});
+      // 排队中的订单导出：每分钟看一眼，生成好就自动下载回传。
+      // 大店导出入队要几分钟，不能靠人守着。
+      if (a.name === "pending-watch") harvestPendingOrders(null, "").catch(() => {});
     });
     chrome.alarms.onAlarm.addListener((a) => {
       if (a.name === "ads-poll") pollAdsQuiet();
@@ -2605,7 +2921,9 @@ const EXPORT_FLOWS = {
     dir: "ads",              // → 店铺/inbox/广告表
 
     page: "ads-creation/dashboard",
-    steps: [["导出数据", "导出"], ["导出", "确定", "确认"]],
+    // 新版后台（GMV Max）右上角就是一个「导出」按钮，点了弹窗里再确认一次。
+    // 老版后台叫「导出数据」。两组词都留着，谁在页面上就用谁。
+    steps: [["导出数据", "导出", "Export"], ["导出", "确定", "确认", "下载", "Export"]],
   },
   affiliate: {
     label: "联盟佣金表",
@@ -2627,8 +2945,10 @@ const EXPORT_FLOWS = {
 /** 在页面里按文案点按钮（取最内层、可见的那个）。 */
 async function clickByTextIn(tabId, want) {
   try {
-    const [r] = await chrome.scripting.executeScript({
-      target: { tabId }, world: "MAIN",
+    // allFrames 很关键：新版广告后台是嵌在 iframe 里的（外层只有卖家后台侧边栏），
+    // 只在主文档里找，永远找不到「导出」——菲律宾就是这么卡住的。
+    const rs = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true }, world: "MAIN",
       func: (texts) => {
         const norm = (x) => (x || "").replace(/\s+/g, "").trim();
         const cands = Array.from(
@@ -2662,17 +2982,66 @@ async function clickByTextIn(tabId, want) {
       },
       args: [want],
     });
-    return (r && r.result) || "";
+    // 哪个 frame 点中了就返回它（外层框架可能没有按钮）
+    for (const x of rs || []) {
+      if (x && x.result) return x.result;
+    }
+    return "";
   } catch (e) {
     return "";
   }
 }
 
+/** 页面上现在有没有这些文案的可点按钮（只看可见元素）。 */
+async function hasButtonText(tabId, texts) {
+  try {
+    const rs = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true }, world: "MAIN",
+      func: (want) => {
+        const norm = (x) => (x || "").replace(/\s+/g, "").trim();
+        for (const el of document.querySelectorAll("button,[role=button],a,span,div")) {
+          const t = norm(el.textContent);
+          if (!t || t.length > 12) continue;
+          if (!want.some((w) => t === norm(w) || t.includes(norm(w)))) continue;
+          if (el.offsetParent === null) continue;
+          return true;
+        }
+        return false;
+      },
+      args: [texts],
+    });
+    return (rs || []).some((x) => x && x.result);
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * 等页面上出现目标按钮，等到再点。
+ *
+ * 为什么要等：广告后台（GMV Max）是重量级单页应用，浏览器报 status=complete
+ * 只代表 HTML 到了，面板还要好几秒才渲染出来。之前固定 sleep 3~5 秒就去点，
+ * 页面上还只有侧边栏，于是被判「没有导出按钮」。
+ */
+async function waitForButton(tabId, texts, timeoutMs = 40000, log) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    if (await hasButtonText(tabId, texts)) {
+      if (log && Date.now() - t0 > 3000) {
+        log(`   等 ${Math.round((Date.now() - t0) / 1000)} 秒后按钮出现`);
+      }
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return false;
+}
+
 /** 扫页面上所有含「导出」的按钮文案——按钮找不到时用来诊断。 */
 async function scanExportButtons(tabId) {
   try {
-    const [r] = await chrome.scripting.executeScript({
-      target: { tabId },
+    const rs = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
       func: () => {
         const out = [];
         const seen = new Set();
@@ -2688,7 +3057,74 @@ async function scanExportButtons(tabId) {
         return out.slice(0, 12);
       },
     });
-    return (r && r.result) || [];
+    const merged = [];
+    for (const x of rs || []) {
+      for (const t of (x && x.result) || []) {
+        if (!merged.includes(t)) merged.push(t);
+      }
+    }
+    return merged;
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * 诊断用：每个 frame 的地址 + 按钮数量。
+ *
+ * 广告面板到底在主文档还是 iframe 里、iframe 有没有注入成功，
+ * 光看「找不到按钮」是分不清的。有这张表就能一次定位。
+ */
+async function frameInfo(tabId) {
+  try {
+    const rs = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => ({
+        url: String(location.href).slice(0, 120),
+        buttons: document.querySelectorAll("button,[role=button],a").length,
+        vis: `${document.visibilityState}/${document.hasFocus() ? "focus" : "blur"}`,
+        text: String(document.body ? document.body.innerText : "").replace(/\s+/g, " ").slice(0, 60),
+      }),
+    });
+    return (rs || []).map((x) => x && x.result).filter(Boolean);
+  } catch (e) {
+    return [{ url: `注入失败：${(e && e.message) || e}`, buttons: 0, text: "" }];
+  }
+}
+
+/**
+ * 诊断用：把页面上看得见的按钮文案全列出来（不筛「导出」）。
+ *
+ * 为什么需要：换个国家/换个广告版本，按钮可能叫「下载」「报表」「Export」
+ * 甚至藏在下拉里。只报「没找到」等于没报，有这个清单就能一次定位。
+ */
+async function dumpButtons(tabId) {
+  try {
+    const rs = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => {
+        const out = [];
+        const seen = new Set();
+        const nodes = document.querySelectorAll("button,[role=button],a,[class*=btn],[class*=Btn]");
+        for (const el of nodes) {
+          const t = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ");
+          if (!t || t.length > 14 || seen.has(t)) continue;
+          const b = el.getBoundingClientRect();
+          if (b.width < 8 || b.height < 6) continue;
+          seen.add(t);
+          out.push(t);
+          if (out.length >= 40) break;
+        }
+        return out;
+      },
+    });
+    const merged = [];
+    for (const x of rs || []) {
+      for (const t of (x && x.result) || []) {
+        if (!merged.includes(t)) merged.push(t);
+      }
+    }
+    return merged;
   } catch (e) {
     return [];
   }
@@ -2882,6 +3318,20 @@ async function exportViaApi(kind, host, log, opts = {}) {
   // 页面默认按「今天」导出，必须把区间带进地址，否则导出来的是当天数据。
   // 商品分析页认 timeRange=开始|结束（闭区间）。
   let pagePath = cfg.page;
+  // 广告后台要带站点参数：不带的时候菲律宾会被路由踢回首页
+  // （地址栏看着还是 ads-creation/dashboard，页面其实是卖家后台首页）。
+  if (kind === "ads") {
+    let region = "MY";
+    try {
+      const prof = await siteProfile(realHost);
+      region = String(prof.region || "MY").toUpperCase();
+    } catch (e) { /* 忽略 */ }
+    // 这三个参数缺一不可（菲律宾实测）：
+    //   shop_region=站点  type=product（商品广告）  mpa=1（新版广告后台入口）
+    // 少了 type/mpa 会停在卖家后台首页，地址栏却还是 ads-creation/dashboard。
+    pagePath += `?shop_region=${region}&type=product&mpa=1`;
+    if (log) log(`   广告页带站点参数：${region}`);
+  }
   if (kind === "sku" && opts.range && opts.range.start) {
     let region = "MY";
     try {
@@ -2896,6 +3346,8 @@ async function exportViaApi(kind, host, log, opts = {}) {
 
   let tabId = 0;
   let attached = false;
+  let restoreWinId = 0;
+  let openedByUs = false;   // 复用用户的标签时不能关掉它
   const fileUrls = [];      // 候补文件地址
   const reqIds = new Map();
   const FILE_RE = /(https?:)?\/\/[^"'\\s]+\.(xlsx|xls|csv)(\?[^"'\\s]*)?|\/api\/[^"'\\s]*\/(export|download)[^"'\\s]*/gi;
@@ -2943,11 +3395,48 @@ async function exportViaApi(kind, host, log, opts = {}) {
   chrome.debugger.onEvent.addListener(onEvent);
   SUPPRESS_DL = true;      // 这个流程里不需要浏览器下载
   DL_SEEN = [];            // 清空上一轮记下的地址
+  // 广告后台（GMV Max）在**后台标签**里不初始化：页面停在卖家后台首页，
+  // 一个导出按钮都没有；同一个地址在前台标签打开就正常。所以广告这步必须开前台，
+  // 导完再把用户原来那个标签切回去。
+  const wantFront = kind === "ads";
+  let prevTabId = 0;
+  if (wantFront) {
+    try {
+      const [cur] = await chrome.tabs.query({ active: true, currentWindow: true });
+      prevTabId = (cur && cur.id) || 0;
+    } catch (e) { /* 忽略 */ }
+  }
   try {
-    const nt = await chrome.tabs.create({
-      url: `https://${realHost}/${pagePath}`, active: false,
-    });
-    tabId = nt.id;
+    // 广告页优先「复用你已经打开的那个」。
+    // 原因：后台新建的标签会被浏览器判成 hidden，重 SPA 直接不渲染
+    // （日志实测 vis=hidden/blur，页面上只剩侧边栏）；而你自己点开的那个是可见的。
+    if (wantFront) {
+      try {
+        const cands = await chrome.tabs.query({ url: [`*://${realHost}/ads-creation/*`] });
+        const pick = (cands || []).find((t) => t.active) || (cands || [])[0];
+        if (pick && pick.id) {
+          tabId = pick.id;
+          openedByUs = false;
+          try { await chrome.tabs.update(tabId, { active: true }); } catch (e) { /* 忽略 */ }
+          await focusWindow(pick.windowId);
+          restoreWinId = pick.windowId;
+          if (log) log("   复用你已打开的广告页");
+        }
+      } catch (e) { /* 忽略 */ }
+    }
+    if (!tabId) {
+      const nt = await chrome.tabs.create({
+        url: `https://${realHost}/${pagePath}`, active: wantFront,
+      });
+      tabId = nt.id;
+      openedByUs = true;
+      // 光 active:true 不够：如果标签落在最小化/无焦点的窗口里，
+      // Chrome 依然把页面当不可见，重 SPA 就不渲染。窗口要恢复 + 置前。
+      if (wantFront && nt && nt.windowId) {
+        await focusWindow(nt.windowId);
+        restoreWinId = nt.windowId;
+      }
+    }
     try {
       await chrome.debugger.attach({ tabId }, "1.3");
       await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
@@ -2968,8 +3457,37 @@ async function exportViaApi(kind, host, log, opts = {}) {
     // 装拦截器：页面要下载时我们拦住，浏览器就不会弹「另存为」
     await installDownloadGuard(tabId);
 
+    // 广告后台的入口各站点不统一：菲律宾的 /ads-creation/dashboard 会直接跳回首页，
+    // 页面上一个导出按钮都没有。所以不猜路径——从卖家后台侧边栏点「店铺广告」进去，
+    // 落到哪个页面就在哪个页面找导出。这一招对没开通广告的店也有效：
+    // 点进去还是首页，那就说明这家店确实没有广告后台，如实报出来。
+    if (kind === "ads") {
+      // 只在「当前不是广告页」时才点侧边栏。
+      // 复用了用户已经打开的广告页还去点一次「店铺广告」，会把面板重新导回空壳——
+      // 之前一直"打开就变空"就是这个自己踩的坑。
+      let onAds = false;
+      try {
+        const t0 = await chrome.tabs.get(tabId);
+        onAds = /ads-creation|ads-manager|\/ads\b/i.test(String((t0 && t0.url) || ""));
+      } catch (e) { /* 忽略 */ }
+      if (onAds) {
+        if (log) log("   已在广告页，不再重复点侧边栏");
+      } else {
+        const nav = await clickByTextIn(tabId, ["店铺广告", "广告", "Ads", "Marketing"]);
+        if (log) log(`   从侧边栏进广告后台：${nav || "没点到「店铺广告」"}`);
+      }
+      await sleep(5000);
+      try {
+        const t = await chrome.tabs.get(tabId);
+        if (log) log(`   当前页：${String((t && t.url) || "").split("?")[0]}`);
+      } catch (e) { /* 忽略 */ }
+      await installDownloadGuard(tabId);
+    }
+
     for (let si = 0; si < cfg.steps.length; si++) {
       const texts = cfg.steps[si];
+      // 第一步先等按钮渲染出来（广告面板要好几秒），后面几步是弹窗，直接点
+      if (si === 0) await waitForButton(tabId, texts, 40000, log);
       let clicked = false;
       for (let attempt = 0; attempt < 3; attempt++) {
         clicked = await clickByTextIn(tabId, texts);
@@ -2979,10 +3497,27 @@ async function exportViaApi(kind, host, log, opts = {}) {
       if (log) log(`   第 ${si + 1} 步点「${texts[0]}」：${clicked}`);
       if (!clicked && si === 0) {
         const names = await scanExportButtons(tabId);
+        // 页面上连「导出」两个字都没有时，光说"没找到"没法查。
+        // 把当前地址 + 页面上所有可见按钮文案打出来，一眼就知道是
+        // 走错页 / 没登录 / 还是这个站点的按钮叫别的名字。
+        let where = "";
+        try {
+          const t = await chrome.tabs.get(tabId);
+          where = String((t && t.url) || "");
+        } catch (e) { /* 忽略 */ }
+        const all = await dumpButtons(tabId);
+        const frames = await frameInfo(tabId);
+        if (log) {
+          for (const f of frames) {
+            log(`   [frame] ${f.url}｜按钮 ${f.buttons}｜${f.vis || ""}｜${f.text}`);
+          }
+        }
         return {
-          error: names.length
+          error: (names.length
             ? `没找到「${texts[0]}」，页面上含「导出」的按钮有：${names.join(" / ")}`
-            : "页面上没找到「导出」类按钮",
+            : "页面上没找到「导出」类按钮")
+            + `｜当前页：${where.split("?")[0]}`
+            + `｜可见按钮：${all.length ? all.slice(0, 20).join(" / ") : "（一个都没扫到）"}`,
         };
       }
       await sleep(2500);
@@ -3079,7 +3614,12 @@ async function exportViaApi(kind, host, log, opts = {}) {
     SUPPRESS_DL = false;
     try { chrome.debugger.onEvent.removeListener(onEvent); } catch (e) { /* 忽略 */ }
     if (attached) { try { await chrome.debugger.detach({ tabId }); } catch (e) { /* 忽略 */ } }
-    if (tabId) { try { await chrome.tabs.remove(tabId); } catch (e) { /* 忽略 */ } }
+    if (tabId && openedByUs) { try { await chrome.tabs.remove(tabId); } catch (e) { /* 忽略 */ } }
+    // 把用户原来在看的标签切回来，别把人家扔在一个空页面上
+    if (prevTabId) {
+      try { await chrome.tabs.update(prevTabId, { active: true }); } catch (e) { /* 忽略 */ }
+    }
+    void restoreWinId;   // 窗口不主动切回（切来切去更扰人），只记录
   }
 }
 
@@ -3687,7 +4227,1021 @@ async function consumePending() {
 // 后果是所有取数任务在第一步就抛 ReferenceError: runTask is not defined。
 // 现在补回来：按任务名分派、一键全跑、失败时自愈重试一次。
 
+/**
+ * 把某个窗口放到前台，但**不许改它的大小**。
+ *
+ * 之前直接写 {state:"normal", focused:true}，结果把用户最大化的浏览器
+ * 还原成上次的小窗了——用户看到的就是"点一下广告，浏览器缩小了"。
+ * 正确做法：只有最小化时才恢复，最大化的保持最大化，其余只置前。
+ */
+async function focusWindow(winId) {
+  if (!winId) return;
+  try {
+    const w = await chrome.windows.get(winId);
+    if (w && w.state === "minimized") {
+      await chrome.windows.update(winId, { state: "normal" });
+    }
+  } catch (e) { /* 忽略 */ }
+  try { await chrome.windows.update(winId, { focused: true }); } catch (e) { /* 忽略 */ }
+}
+
+/**
+ * 手动模式：装好拦截器，然后由用户自己在页面上点「导出」，我们只负责接住文件。
+ *
+ * 为什么留这条路：广告后台的页面状态太娇气，由程序去点按钮，
+ * 有时会点到下拉、有时弹层里还有一层确认；而人手点一下是 100% 能点对的。
+ * 程序该做的是「别添乱 + 把文件收好」，不是非要自己点。
+ */
+async function manualAdsCapture(log) {
+  let tab = null;
+  try {
+    const wins = await chrome.windows.getAll({ populate: true });
+    const order = wins.slice().sort((a, b) => (b.focused ? 1 : 0) - (a.focused ? 1 : 0));
+    for (const w of order) {
+      const t = (w.tabs || []).find((x) => /ads-creation\/dashboard/.test(String(x.url || "")));
+      if (t) { tab = { id: t.id, windowId: w.id }; break; }
+    }
+  } catch (e) { /* 忽略 */ }
+  if (!tab) throw new Error("没有打开着的广告页（先打开菲律宾广告面板再点这个）");
+
+  const tabId = tab.id;
+  try { await chrome.tabs.update(tabId, { active: true }); } catch (e) { /* 忽略 */ }
+  await focusWindow(tab.windowId);
+  await sleep(800);
+
+  await installDownloadGuard(tabId);
+  DL_SEEN = [];
+
+  // 同时盯网络：把「点导出」那一刻发出的每个请求记下来（方法+路径+请求体）。
+  // 目的不是这次拿文件，而是认清「创建导出任务」到底是哪个接口——
+  // download_task/query 只负责查，建任务的是另一个，抓到它就能纯接口完成。
+  let traced = 0;
+  let learnedScene = "";
+  let sawTaskId = false;
+  const onTrace = (source, method, params) => {
+    if (source.tabId !== tabId) return;
+    if (method !== "Network.requestWillBeSent") return;
+    const req = params.request || {};
+    const u = String(req.url || "");
+    if (!/oec_ads|ads-creation|export|download/i.test(u)) return;
+    if (/\.(js|css|png|jpg|svg|woff2?)(\?|$)/i.test(u)) return;
+    traced++;
+    const pth = u.split("?")[0].replace(/^https?:\/\/[^/]+/, "");
+    const postData = String(req.postData || "");
+    // 从请求体里认「场景名」和「任务号」：
+    //   场景名 = 这家店导出用的是哪一种（计划/商品/…）
+    //   任务号 = 说明这次确实建出了任务，场景名可信
+    const sc = postData.match(/"download_scene"\s*:\s*"([^"]+)"/);
+    if (sc) learnedScene = sc[1];
+    if (/"download_id"\s*:/.test(postData)) sawTaskId = true;
+    const body = postData.slice(0, 200);
+    if (log) log(`[trace] ${req.method || "?"} ${pth}${body ? " ｜ " + body : ""}`);
+  };
+  let trAttached = false;
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    trAttached = true;
+    await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
+    chrome.debugger.onEvent.addListener(onTrace);
+  } catch (e) {
+    if (log) log(`   网络追踪没挂上（不影响收文件）：${(e && e.message) || e}`);
+  }
+
+  const cleanup = () => {
+    try { chrome.debugger.onEvent.removeListener(onTrace); } catch (e) { /* 忽略 */ }
+    if (trAttached) { chrome.debugger.detach({ tabId }).catch(() => {}); }
+  };
+  if (log) log("   已就绪：请在页面上点「导出」，文件会自动接住（最多等 3 分钟）");
+
+  // 学到了就落盘：这家站点以后自动用这个场景名，不用再点、不用再猜。
+  const saveLearned = async () => {
+    if (!learnedScene || !(sawTaskId || captured)) return;
+    try {
+      const key = String((await siteProfile(host)).key || "");
+      if (!key) return;
+      const { adScene } = await skGet({ adScene: null });
+      const next = Object.assign({}, adScene || {});
+      next[key] = learnedScene;
+      await chrome.storage.local.set({ adScene: next });
+      if (log) log(`   已学会这家店的导出方式：${learnedScene}（以后自动用，不用再点）`);
+    } catch (e) { /* 记住失败不影响本次 */ }
+  };
+
+  let captured = false;
+  for (let i = 0; i < 90; i++) {
+    await sleep(2000);
+    const got = await harvestDownload(tabId);
+    if (got && got.buf && got.buf.byteLength > 1024) {
+      const nm = got.name || `creative data for product campaigns (${new Date()
+        .toISOString().slice(0, 10)}).csv`;
+      const saved = await uploadToBridge(nm, got.buf, "ads");
+      if (log) log(`   已接住广告导出表：${saved.path}`);
+      captured = true;
+      await saveLearned();
+      cleanup();
+      return { via: "手动导出", saved: saved.path };
+    }
+    if (i % 10 === 9 && log) log(`   还在等下载…（${(i + 1) * 2} 秒）`);
+  }
+  if (log && traced) log(`   本轮共记录 ${traced} 个广告相关请求`);
+  await saveLearned();
+  cleanup();
+  throw new Error("3 分钟内没等到下载（确认点的是「导出」并完成了确认框）");
+}
+
+/**
+ * 直接在你已经打开的广告页上点「导出」——不刷新、不换页、不挂调试器。
+ *
+ * 为什么会走到这一步：广告后台的页面状态太娇气——刷新会掉回「活动」页、
+ * 侧边栏点击会跳走、后台标签又不渲染。唯一稳定的是「你现在正看着的那一屏」，
+ * 上面就有导出按钮。那就别动页面，只点按钮、把文件接住。
+ */
+/**
+ * 新版广告后台（GMV Max）的「导出」其实是两个接口，不用点页面：
+ *   1) download_task/query + {download_scene} → 建任务，回 download_id
+ *   2) download_task/query + {download_id}    → 轮询，好了回下载地址
+ * 实测抓包（菲律宾 18:48 手动导出）就是这两步。
+ */
+/**
+ * 建广告导出任务——纯接口，不看页面。
+ *
+ * 关键：平台用 `post_product_list_v2` + `action:"download"` 来建任务，
+ * 建完再用 download_task/query 轮询拿地址。之前一直只调 query（那是"查"），
+ * 所以永远拿不到任务号——这才是"每加一家新店就卡住"的真正原因。
+ *
+ * 请求体的字段是从真实页面抓的（2026-10-31 LR Stationery）：
+ *   query_list 必须带 mixed_real_cost / extra_currency，page_size = -1，
+ *   dims 要 spu_id + campaign_id，action = download。
+ */
+/**
+ * 宽松版 POST：业务码非 0 也不抛错，把 JSON 原样返回。
+ * 用途是"取信息"（比如广告账户 ID）——平台常常 code!=0 但 data 里仍带着需要的字段。
+ */
+async function apiPostSoft(url, body) {
+  const resp = await apiPost(url, body).catch((e) => ({ __err: e.message }));
+  if (resp && resp.__err) {
+    // apiPost 对非 0 会抛，这里退化成"自己发一次"
+    try {
+      let host = "";
+      try { host = new URL(url).hostname; } catch (e) { /* 忽略 */ }
+      const { [HEADER_KEY]: hp = {} } = await skGet({ [HEADER_KEY]: {} });
+      const learned = (hp[host] || {});
+      const headers = { "Content-Type": "application/json" };
+      for (const [k, v] of Object.entries(learned)) {
+        if (!k.startsWith("_")) headers[k] = v;
+      }
+      const r = await fetch(url, {
+        method: "POST", credentials: "include", headers,
+        body: JSON.stringify(body || {}),
+      });
+      return await r.json();
+    } catch (e) {
+      return null;
+    }
+  }
+  return resp;
+}
+
+/**
+ * 把平台的原始报错翻成人话。
+ *
+ * 平台的 system_msg 其实是说清楚了的（req adv id missing），但那是一句英文
+ * 混在 JSON 里，出问题时没人愿意去翻。翻译一层，日志里直接写"缺什么"。
+ */
+function explainAdsError(raw) {
+  const t = String(raw || "");
+  const m = t.match(/"system_msg"\s*:\s*"([^"]*)"/);
+  const sys = (m ? m[1] : t).toLowerCase();
+  if (sys.includes("adv id missing")) return "缺少广告账户 ID（这家店绑了多个广告账户）";
+  if (sys.includes("no download_id provided")) return "接口被当成「按任务号查询」，没给任务号";
+  if (sys.includes("param_invalid") || sys.includes("参数无效")) return "参数不合法（字段名或取值变了）";
+  if (sys.includes("permission") || sys.includes("no permission")) return "没有广告数据权限（该店可能没开通广告）";
+  if (/21016003/.test(t)) return "导出文件还在生成";
+  if (/98001021/.test(t)) return "请求被判非法（风控参数缺失）";
+  return sys ? sys.slice(0, 60) : "";
+}
+
+/**
+ * 店铺档案：这家店的"运行时事实"。
+ *
+ * 为什么要有：场景名、广告账户 ID 这些东西平台不写文档，只能从页面里学。
+ * 学到的不能只存在本机扩展里——换台电脑就白学了。所以写进
+ * `数据/stores/<店>/profile.json`，档案跟着数据走，拷过去就生效。
+ */
+async function getStoreProfile(shopId) {
+  if (!shopId) return {};
+  try {
+    const r = await fetch(`${BRIDGE}/store_profile?shop_id=${encodeURIComponent(shopId)}`);
+    const j = await r.json();
+    return (j && j.profile) || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+async function saveStoreProfile(extra) {
+  const sid = CURRENT_SHOP.shop_id;
+  if (!sid) return;
+  try {
+    const prof = Object.assign({
+      shop_id: sid,
+      shop_name: CURRENT_SHOP.shop_name || "",
+      region: CURRENT_SHOP.region || "",
+      country: CURRENT_SHOP.country || "",
+    }, extra || {});
+    await fetch(`${BRIDGE}/store_profile`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(prof),
+    });
+  } catch (e) { /* 桥不在就不写，不影响取数 */ }
+}
+
+/**
+ * 找这家店的广告账户 ID。
+ *
+ * 顺序：① 已学到的请求头里有没有（页面请求会带 x-tt-oec-ads-account-id）
+ *      ② 问 get_onboard_info（宽松解析，业务码非 0 也读 data）
+ * 两个都拿不到就返回空——不阻断，让平台自己决定（有的店不需要）。
+ */
+async function resolveAdvId(host, log) {
+  const digAdv = (o, d) => {
+    if (!o || d > 4) return "";
+    if (typeof o === "object") {
+      for (const [k, v] of Object.entries(o)) {
+        if (/adv.*id$/i.test(k) && /^\d{6,}$/.test(String(v))) return String(v);
+        const x = digAdv(v, d + 1);
+        if (x) return x;
+      }
+    }
+    return "";
+  };
+
+  // ① 学到的 URL 参数里的 aadvid —— 实测账户 ID 是放在 URL 上的，不在请求头
+  try {
+    const { params = {} } = await chrome.storage.local.get({ params: {} });
+    const p = params[host] || {};
+    const cand = [p.aadvid, p.adv_id, p.advid, p.advertiser_id]
+      .find((v) => v && /^\d{6,}$/.test(String(v)));
+    if (cand) {
+      if (log) log(`   广告账户（来自页面 URL 参数 aadvid）：${cand}`);
+      return String(cand);
+    }
+  } catch (e) { /* 忽略 */ }
+
+  // ② 店铺档案里的（换电脑后不用重新学）
+  try {
+    const prof = await getStoreProfile(CURRENT_SHOP.shop_id);
+    if (prof && prof.adv_id && /^\d{6,}$/.test(String(prof.adv_id))) {
+      if (log) log(`   广告账户（来自店铺档案）：${prof.adv_id}`);
+      return String(prof.adv_id);
+    }
+  } catch (e) { /* 忽略 */ }
+
+  // ③ 学到的请求头（有的站点放在头里）
+  try {
+    const { [HEADER_KEY]: hp = {} } = await skGet({ [HEADER_KEY]: {} });
+    for (const [k, v] of Object.entries(hp[host] || {})) {
+      if (/ads-account-id|adv.?id/i.test(k) && /^\d{6,}$/.test(String(v))) {
+        if (log) log(`   广告账户（来自学到的请求头）：${v}`);
+        return String(v);
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+
+  // ② 接口
+  try {
+    const ob = await apiPostSoft(
+      await buildUrl(host, "/oec_ads/shopping/v1/oec/get_onboard_info"), {});
+    const id = digAdv(ob, 0);
+    if (id && log) log(`   广告账户：${id}`);
+    return id;
+  } catch (e) {
+    return "";
+  }
+}
+
+/**
+ * 打开广告页 12 秒，只为把请求头学下来（广告账户 ID 就在里头）。
+ * 纯自学：没有人工、没有远程，任何一台机器上都能跑。
+ */
+async function learnAdsHeaders(host, log) {
+  let tabId = 0;
+  let winId = 0;
+  try {
+    const w = await chrome.windows.getLastFocused();
+    winId = (w && w.id) || 0;
+  } catch (e) { /* 忽略 */ }
+  try {
+    const region = String((await siteProfile(host)).region || "MY").toUpperCase();
+    const nt = await chrome.tabs.create({
+      url: `https://${host}/ads-creation/dashboard?shop_region=${region}&type=product&mpa=1`,
+      active: true, ...(winId ? { windowId: winId } : {}),
+    });
+    tabId = nt.id;
+  } catch (e) {
+    return false;
+  }
+  const onReq = (source, method, params) => {
+    if (source.tabId !== tabId || method !== "Network.requestWillBeSent") return;
+    const req = params.request || {};
+    const u = String(req.url || "");
+    if (!/oec_ads/i.test(u)) return;
+    // URL 参数也要学：广告账户 ID（aadvid）就在 URL 上，不在请求头里。
+    // 新电脑只点「广告」、没先开过广告页时，这份参数是空的——所以点导出/开页面
+    // 这一刻必须顺手把参数也学下来，否则永远报「缺广告账户」。
+    try { learnParams(u); } catch (e) { /* 忽略 */ }
+    if (req.headers) {
+      try { learnHeaders(new URL(u).hostname, req.headers); } catch (e) { /* 忽略 */ }
+    }
+  };
+  let attached = false;
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    attached = true;
+    await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
+    chrome.debugger.onEvent.addListener(onReq);
+    await sleep(12000);
+    if (log) log("   已从页面学到一批请求头");
+    return true;
+  } catch (e) {
+    if (log) log(`   学请求头失败：${(e && e.message) || e}`);
+    return false;
+  } finally {
+    try { chrome.debugger.onEvent.removeListener(onReq); } catch (e) { /* 忽略 */ }
+    if (attached) { try { await chrome.debugger.detach({ tabId }); } catch (e) { /* 忽略 */ } }
+    if (tabId) { try { await chrome.tabs.remove(tabId); } catch (e) { /* 忽略 */ } }
+  }
+}
+
+async function createAdsExportByApi(host, log, range) {
+  const api = await buildUrl(host, "/oec_ads/shopping/v1/oec/stat/post_product_list_v2");
+
+  // 有的店铺（不是国家决定）要求显式带广告账户 ID，否则回
+  // code=3「req adv id missing」。页面自己是从 get_onboard_info 拿的 primary_adv_id，
+  // 这里同样取一次；取不到就照常发，让平台自己决定。
+  const advId = await resolveAdvId(host, log);
+  if (advId) { try { await saveStoreProfile({ adv_id: advId }); } catch (e) { /* 忽略 */ } }
+  const st = (range && range.startDate) || "";
+  const en = (range && (range.endDateExclusive
+    ? shiftDate(range.endDateExclusive, -1) : range.to)) || "";
+  const body = {
+    query_list: ["product_name", "campaign_id", "campaign_name", "product_id",
+                 "mixed_real_cost", "onsite_roi2_estimate_total_commission_pre_value",
+                 "onsite_roi2_shopping_sku",
+                 "mixed_real_cost_per_onsite_roi2_shopping_sku",
+                 "onsite_roi2_shopping_value", "onsite_mixed_real_roi2_shopping",
+                 "extra_currency"],
+    action: "download",
+    start_time: st,
+    end_time: en,
+    order_field: "mixed_real_cost",
+    order_type: 1,
+    page: 1,
+    page_size: -1,
+    filters: [
+      { field: "campaign_status", filter_type: 0, in_field_values: ["no_delete"] },
+      { field: "gmv_roi_mode", in_field_values: ["2"], filter_type: 10 },
+    ],
+    dims: ["spu_id", "campaign_id"],
+  };
+  if (advId) {
+    // 两种常见写法都带上，多带不会错，少带一定会报 req adv id missing
+    body.adv_id = advId;
+    body.adv_id_list = [advId];
+  }
+  const extra = advId
+    ? { "x-tt-oec-ads-account-id": advId, "x-adv-id": advId }
+    : {};
+  const apiWithAdv = advId
+    ? api + (api.includes("?") ? "&" : "?") + "aadvid=" + encodeURIComponent(advId)
+    : api;
+  let r = await apiPostSoft(apiWithAdv, { ...body });
+  // 平台说"缺广告账户"而我们手上没有：去页面把请求头学一遍，再重试一次。
+  // 这一步是程序自己做的，不需要人点，也不需要远程。
+  if ((!r || r.code !== 0) && !advId && /adv id missing/i.test(JSON.stringify(r || {}))) {
+    if (log) log("   平台说缺广告账户，先去页面把请求头学一遍…");
+    await learnAdsHeaders(host, log);
+    const again = await resolveAdvId(host, log);
+    if (again) {
+      body.adv_id = again;
+      body.adv_id_list = [again];
+      const api2 = api + (api.includes("?") ? "&" : "?") + "aadvid=" + encodeURIComponent(again);
+      r = await apiPostSoft(api2, body, {
+        "x-tt-oec-ads-account-id": again, "x-adv-id": again,
+      });
+      if (log) log(`   带上学到的账户 ${again} 重试：code=${r && r.code}`);
+    }
+  }
+  if (log) {
+    const keys = r && r.data ? Object.keys(r.data).slice(0, 6).join(",") : "";
+    const why = explainAdsError(JSON.stringify(r || {}));
+    log(`   建导出返回：code=${r && r.code}${why ? "｜" + why : ""}｜data 键=${keys || "空"}`);
+  }
+  // 有的返回里直接给 download_id，有的要再查一次
+  const digId = (o, d) => {
+    if (!o || d > 4) return "";
+    if (Array.isArray(o)) { for (const it of o) { const x = digId(it, d + 1); if (x) return x; } return ""; }
+    if (typeof o !== "object") return "";
+    for (const [k, v] of Object.entries(o)) {
+      if (/id$/i.test(k) && /^\d{6,}$/.test(String(v))) return String(v);
+      const x = digId(v, d + 1);
+      if (x) return x;
+    }
+    return "";
+  };
+  const direct = digId(r, 0);
+  if (direct) return direct;
+
+  // 没直接给：按场景查一次（两个场景都试）
+  const qapi = await buildUrl(host, "/oec_ads/shopping/v1/oec/stat/download_task/query");
+  for (const sc of ["product_list_navigation", "campaign_list_pgm_navigation"]) {
+    const q = await apiPost(qapi, { download_scene: sc }).catch(() => null);
+    const id = digId(q, 0);
+    if (id) {
+      if (log) log(`   场景 ${sc} 查到任务：${id}`);
+      return id;
+    }
+  }
+  return "";
+}
+
+async function exportAdsByApi(host, log, range) {
+  const api = await buildUrl(host, "/oec_ads/shopping/v1/oec/stat/download_task/query");
+
+  // 返回里 id 的字段名各版本不一样（download_id / task_id / 嵌在 offline_tasks 里），
+  // 不猜名字：递归找「字段名以 id 结尾、值是长数字」的那个。
+  const digId = (o, d) => {
+    if (!o || d > 4) return "";
+    if (Array.isArray(o)) {
+      for (const it of o) { const x = digId(it, d + 1); if (x) return x; }
+      return "";
+    }
+    if (typeof o !== "object") return "";
+    for (const [k, v] of Object.entries(o)) {
+      if (/id$/i.test(k) && /^\d{6,}$/.test(String(v))) return String(v);
+      const x = digId(v, d + 1);
+      if (x) return x;
+    }
+    return "";
+  };
+
+  // 场景名各站点/各版本可能不同：一个个试，谁回 download_id 就用谁，
+  // 并记住这个站点成功的那个，下次直接用——新店不用改代码。
+  let fav = "";
+  let key = "";
+  try {
+    key = String((await siteProfile(host)).key || "");
+    const { adScene } = await skGet({ adScene: null });
+    if (adScene && adScene[key]) fav = adScene[key];
+    if (!fav) {
+      const prof = await getStoreProfile(CURRENT_SHOP.shop_id);
+      if (prof && prof.ad_scene) fav = String(prof.ad_scene);
+    }
+  } catch (e) { /* 忽略 */ }
+
+  // 场景名 = 页面上哪个标签页。实测：
+  //   计划 → campaign_list_pgm_navigation
+  //   商品 → product_list_navigation   ← 之前漏了这个，商品页的店全部落空
+  // 两个都试，谁给任务号用谁。
+  const scenes = [...new Set([fav,
+                              "campaign_list_pgm_navigation",
+                              "product_list_navigation",
+                              "campaign_list_product",
+                              "campaign_list_export",
+                              "offline_export"].filter(Boolean))];
+  let did = "";
+  // ① 先走"建任务"接口（action=download）——这才是正路，纯接口不问页面
+  try {
+    did = await createAdsExportByApi(host, log, range);
+    if (did && log) log(`   导出任务已建：${did}`);
+  } catch (e) {
+    if (log) log(`   建任务失败：${(e && e.message) || e}，改按场景查`);
+  }
+  // ② 建不出来再按场景查已有任务（兼容旧任务/旧后台）
+  for (const sc of (did ? [] : scenes)) {
+    const r = await apiPost(api, { download_scene: sc }).catch(() => null);
+    const id = digId(r);
+    if (!id) {
+      if (log) log(`   场景「${sc}」没给任务号（code=${r && r.code}）`);
+      continue;
+    }
+    did = id;
+    if (log) log(`   导出任务已建（场景 ${sc}）：${id}`);
+    if (key && sc !== fav) {
+      try {
+        const { adScene } = await skGet({ adScene: null });
+        const next = Object.assign({}, adScene || {});
+        next[key] = sc;
+        await chrome.storage.local.set({ adScene: next });
+      } catch (e) { /* 记住失败不影响本次 */ }
+    }
+    break;
+  }
+  if (!did) throw new Error("所有场景都没能建出导出任务");
+
+  for (let i = 0; i < 30; i++) {
+    await sleep(3000);
+    let r = null;
+    try {
+      const body = i % 2 === 0
+        ? { download_id: did }
+        : { download_id: did, download_scene: "campaign_list_pgm_navigation" };
+      r = await apiPost(api, body);
+    } catch (e) {
+      if (log) log(`   轮询失败：${(e && e.message) || e}`);
+      continue;
+    }
+    const pickUrl = (o) => {
+      if (!o) return "";
+      if (typeof o.url === "string" && /^https?:/i.test(o.url)) return o.url;
+      const d = o.data || {};
+      if (d.download_url) return d.download_url;
+      if (typeof d.url === "string" && /^https?:/i.test(d.url)) return d.url;
+      for (const t of (o.offline_tasks || d.offline_tasks || [])) {
+        if (t && t.url && String(t.task_status || "").toUpperCase() === "SUCCESS") return t.url;
+      }
+      return findUrl(o) || "";
+    };
+    const url = pickUrl(r);
+    if (url && log) log(`   任务状态：${r.task_status || (r.data && r.data.task_status) || "?"}`);
+    if (url) {
+      if (log) log("   文件已就绪，开始取…");
+      const resp = await fetch(url, { credentials: "include" });
+      if (resp.ok) {
+        const buf = await resp.arrayBuffer();
+        if (buf && buf.byteLength > 1024) {
+          const st = (range && range.startDate) || "";
+          const en = (range && (range.endDateExclusive
+            ? shiftDate(range.endDateExclusive, -1) : range.to)) || "";
+          const nm = (st && en)
+            ? `Product campaign data ${st} - ${en}.xlsx`
+            : `Product campaign data ${new Date().toISOString().slice(0, 10)}.xlsx`;
+          const saved = await uploadToBridge(nm, buf, "ads");
+          if (log) log(`   已取回广告导出表：${saved.path}（${Math.round(buf.byteLength / 1024)} KB）`);
+          return { via: "导出接口", saved: saved.path };
+        }
+      }
+    }
+    if (i % 3 === 2 && log) {
+      log(`   等导出文件…（${(i + 1) * 3} 秒）${JSON.stringify(r).slice(0, 160)}`);
+    }
+  }
+  throw new Error("导出任务 90 秒内没生成文件");
+}
+
+/**
+ * 自己开一个「前台窗口里的广告页」，点导出、抓文件。
+ *
+ * 之前一直失败的真正原因：用 chrome.tabs.create 开的标签落在**上一次聚焦的窗口**，
+ * 那个窗口可能被别的窗口盖住/最小化，页面被判 hidden，重 SPA 就不渲染，
+ * 页面上根本没有「导出」按钮。
+ * 这里改成：先拿当前聚焦窗口 → 在**那个窗口**里开标签 → 真的激活 → 再等按钮。
+ *
+ * 这是兜底链的最后一层，不依赖国家、不依赖场景名，也不依赖你手动点。
+ */
+async function exportAdsByClickFresh(host, log, range) {
+  let winId = 0;
+  try {
+    const w = await chrome.windows.getLastFocused();
+    winId = (w && w.id) || 0;
+    if (w && w.state === "minimized") {
+      await chrome.windows.update(winId, { state: "normal" });
+    }
+  } catch (e) { /* 忽略 */ }
+
+  const region = String((await siteProfile(host)).region || "MY").toUpperCase();
+  const path = `ads-creation/dashboard?shop_region=${region}&type=product&mpa=1`;
+  let tabId = 0;
+  try {
+    const nt = await chrome.tabs.create({
+      url: `https://${host}/${path}`, active: true,
+      ...(winId ? { windowId: winId } : {}),
+    });
+    tabId = nt.id;
+    if (winId) { try { await chrome.windows.update(winId, { focused: true }); } catch (e) {} }
+  } catch (e) {
+    throw new Error(`开广告页失败：${(e && e.message) || e}`);
+  }
+
+  const urls = [];
+  let learnedScene = "";
+  const onNet = (source, method, params) => {
+    if (source.tabId !== tabId) return;
+    if (method === "Network.requestWillBeSent") {
+      // 自己点导出时，顺手把平台用的场景名记下来——这一步是"自学"的关键：
+      // 下次同站点直接用它，不用再走点页面这条慢路。
+      const _req = params.request || {};
+      try {
+        // 同时学请求头：广告账户 ID（x-tt-oec-ads-account-id）这类
+        // 判权参数就在头里，学到之后我们发的请求自然带上，不用再猜。
+        if (/oec_ads/i.test(String(_req.url || "")) && _req.headers) {
+          learnHeaders(new URL(_req.url).hostname, _req.headers);
+        }
+      } catch (e) { /* 忽略 */ }
+      const pd = String((_req.postData) || "");
+      const m = pd.match(/"download_scene"\s*:\s*"([^"]+)"/);
+      if (m) learnedScene = m[1];
+      return;
+    }
+    if (method !== "Network.responseReceived") return;
+    const u = String((params.response || {}).url || "");
+    if (!/\.(xlsx|xls|csv)(\?|$)|\/object\/wsos|download/i.test(u)) return;
+    if (/\.(js|css|png|jpg|svg|woff2?)(\?|$)/i.test(u)) return;
+    if (!urls.includes(u)) {
+      urls.push(u);
+      if (log) log(`   捕获到文件地址：${u.split("?")[0].slice(0, 100)}`);
+    }
+  };
+  let attached = false;
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    attached = true;
+    await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
+    chrome.debugger.onEvent.addListener(onNet);
+
+    // 等页面真的开始请求（SPA 启动要几秒），再等「导出」按钮出现
+    const ok = await waitForButton(tabId, ["导出", "导出数据", "Export"], 45000, log);
+    if (!ok) {
+      const vis = await chrome.scripting.executeScript({
+        target: { tabId }, func: () => document.visibilityState,
+      }).then((r) => (r && r[0] && r[0].result) || "?").catch(() => "?");
+      const frames = await frameInfo(tabId);
+      if (log) log(`   等 45 秒没出现「导出」按钮（页面 ${vis}；帧 ${frames.length} 个）`);
+    }
+    await installDownloadGuard(tabId);
+    const clicked = await clickByTextIn(tabId, ["导出", "导出数据", "Export"]);
+    if (log) log(`   点「导出」：${clicked || "没点到"}`);
+    if (!clicked) throw new Error("页面上没有可点的「导出」按钮");
+    await sleep(1800);
+    await clickByTextIn(tabId, ["导出", "确定", "确认", "下载", "Export"]);
+
+    for (let i = 0; i < 40; i++) {
+      await sleep(2000);
+      const got = await harvestDownload(tabId);
+      if (got && got.buf && got.buf.byteLength > 1024) {
+        const nm = got.name || `Product campaign data ${new Date().toISOString().slice(0, 10)}.xlsx`;
+        const saved = await uploadToBridge(nm, got.buf, "ads");
+        if (log) log(`   已接住广告导出表：${saved.path}`);
+        return { via: "页面导出", saved: saved.path };
+      }
+      for (const u of urls.slice().reverse()) {
+        try {
+          const r = await fetch(u, { credentials: "include" });
+          if (!r.ok) continue;
+          const buf = await r.arrayBuffer();
+          if (!buf || buf.byteLength < 1024) continue;
+          const nm = decodeURIComponent((u.split("?")[0].split("/").pop() || ""))
+            || `Product campaign data ${new Date().toISOString().slice(0, 10)}.xlsx`;
+          const saved = await uploadToBridge(nm, buf, "ads");
+          if (log) log(`   已取回广告导出表：${saved.path}`);
+          return { via: "页面导出", saved: saved.path };
+        } catch (e) { /* 还没生成 */ }
+      }
+    }
+    throw new Error("点了导出，但 80 秒内没拿到文件");
+  } finally {
+    if (learnedScene) {
+      // 存到「按站点」的表里，全体浏览器共用同一套学习结果
+      try {
+        const key = String((await siteProfile(host)).key || "");
+        if (key) {
+          const { adScene } = await skGet({ adScene: null });
+          const next = Object.assign({}, adScene || {});
+          next[key] = learnedScene;
+          await chrome.storage.local.set({ adScene: next });
+          if (log) log(`   已学会这家站点的导出场景：${learnedScene}（以后自动用）`);
+        }
+      } catch (e) { /* 忽略 */ }
+    }
+    try { chrome.debugger.onEvent.removeListener(onNet); } catch (e) { /* 忽略 */ }
+    if (attached) { try { await chrome.debugger.detach({ tabId }); } catch (e) { /* 忽略 */ } }
+    if (tabId) { try { await chrome.tabs.remove(tabId); } catch (e) { /* 忽略 */ } }
+  }
+}
+
+async function exportAdsByClick(host, log) {
+  // 自动开过很多次广告页，会留下好几个背景标签。
+  // 必须挑「你现在正看着的那个」——背景标签不渲染，点不到任何按钮。
+  let cands = [];
+  try {
+    const wins = await chrome.windows.getAll({ populate: true });
+    for (const w of wins) {
+      for (const t of (w.tabs || [])) {
+        if (/ads-creation\/dashboard/.test(String(t.url || ""))) {
+          cands.push({ id: t.id, windowId: w.id, active: !!t.active, focused: !!w.focused,
+                       last: t.lastAccessed || 0 });
+        }
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+  if (!cands.length) throw new Error("没有打开着的广告页");
+  cands.sort((a, b) => (b.focused - a.focused) || (b.active - a.active) || (b.last - a.last));
+
+  let tabId = 0;
+  for (const c of cands.slice(0, 4)) {
+    try {
+      await chrome.tabs.update(c.id, { active: true });
+      await focusWindow(c.windowId);
+      await sleep(900);
+      const r = await chrome.scripting.executeScript({
+        target: { tabId: c.id }, func: () => document.visibilityState,
+      });
+      const vis = String((r && r[0] && r[0].result) || "");
+      if (log) log(`   广告页标签 #${c.id}：${vis || "?"}`);
+      if (vis === "visible") { tabId = c.id; break; }
+    } catch (e) { /* 换下一个 */ }
+  }
+  if (!tabId) throw new Error("找到的广告页都不可见（请先切到广告页再点）");
+
+  // 只要「导出」出现就点。找不到就等一会儿（页面可能刚渲染完）。
+  await waitForButton(tabId, ["导出", "导出数据", "Export"], 15000, log);
+  await installDownloadGuard(tabId);
+  DL_SEEN = [];
+
+  // 挂调试器盯网络：点导出后平台会给出文件地址（或先建任务再给地址），
+  // 拿到地址我们自己用 fetch 去取，浏览器就不会弹「另存为」。
+  const urls = [];
+  let learnedScene = "";
+  const onNet = (source, method, params) => {
+    if (source.tabId !== tabId) return;
+    if (method === "Network.requestWillBeSent") {
+      // 自己点导出时，顺手把平台用的场景名记下来——这一步是"自学"的关键：
+      // 下次同站点直接用它，不用再走点页面这条慢路。
+      const _req = params.request || {};
+      try {
+        // 同时学请求头：广告账户 ID（x-tt-oec-ads-account-id）这类
+        // 判权参数就在头里，学到之后我们发的请求自然带上，不用再猜。
+        if (/oec_ads/i.test(String(_req.url || "")) && _req.headers) {
+          learnHeaders(new URL(_req.url).hostname, _req.headers);
+        }
+      } catch (e) { /* 忽略 */ }
+      const pd = String((_req.postData) || "");
+      const m = pd.match(/"download_scene"\s*:\s*"([^"]+)"/);
+      if (m) learnedScene = m[1];
+      return;
+    }
+    if (method !== "Network.responseReceived") return;
+    const u = String((params.response || {}).url || "");
+    if (!/\.(xlsx|xls|csv)(\?|$)|download|export_task|file_url/i.test(u)) return;
+    if (/\.(js|css|png|jpg|svg|woff2?)(\?|$)/i.test(u)) return;
+    if (!urls.includes(u)) {
+      urls.push(u);
+      if (log) log(`   捕获到文件地址：${u.split("?")[0].slice(0, 110)}`);
+    }
+  };
+  let attached = false;
+  chrome.debugger.onEvent.addListener(onNet);
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    attached = true;
+    await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
+  } catch (e) {
+    if (log) log(`   调试器没挂上（不影响拦截）：${(e && e.message) || e}`);
+  }
+
+  const first = await clickByTextIn(tabId, ["导出", "导出数据", "Export"]);
+  if (log) log(`   点「导出」：${first || "没点到"}`);
+  await sleep(1500);
+  // 可能弹层里还有一次确认（有的站点是「导出」下拉 →「下载」）
+  const second = await clickByTextIn(tabId, ["导出", "确定", "确认", "下载", "Export"]);
+  if (log) log(`   弹层确认：${second || "没有弹层"}`);
+
+  // 先看网络里有没有文件地址：有就自己下，不依赖浏览器下载（也就不会弹保存框）
+  for (let i = 0; i < 30 && !urls.length; i++) await sleep(1000);
+  for (const u of urls.slice().reverse()) {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        const r = await fetch(u, { credentials: "include" });
+        if (r.ok) {
+          const ct = r.headers.get("content-type") || "";
+          if (!ct.includes("json")) {
+            const buf = await r.arrayBuffer();
+            if (buf && buf.byteLength > 1024) {
+              const nm = decodeURIComponent((u.split("?")[0].split("/").pop() || ""))
+                || `product campaign data ${new Date().toISOString().slice(0, 10)}.xlsx`;
+              const saved = await uploadToBridge(nm, buf, "ads");
+              if (log) log(`   已取回广告导出表：${saved.path}（${Math.round(buf.byteLength / 1024)} KB）`);
+              if (attached) { try { await chrome.debugger.detach({ tabId }); } catch (e) { /* 忽略 */ } }
+              return { via: "网络取文件", saved: saved.path };
+            }
+          }
+        }
+      } catch (e) { /* 还没生成，等会儿再试 */ }
+      await sleep(3000);
+    }
+  }
+  if (attached) { try { await chrome.debugger.detach({ tabId }); } catch (e) { /* 忽略 */ } }
+
+  for (let i = 0; i < 40; i++) {
+    await sleep(2000);
+    const got = await harvestDownload(tabId);
+    if (got && got.buf && got.buf.byteLength > 1024) {
+      const nm = got.name || `creative data for product campaigns (${new Date()
+        .toISOString().slice(0, 10)}).csv`;
+      const saved = await uploadToBridge(nm, got.buf, "ads");
+      if (log) log(`   已接住广告导出表：${saved.path}`);
+      return { via: "点导出", saved: saved.path };
+    }
+  }
+  throw new Error("点了导出，但 80 秒内没接到文件（可能弹层里还要选日期或确认）");
+}
+
+/**
+ * 从「已经打开的广告页」直接抄它自己拿到的数据。
+ *
+ * 为什么这么做：同一个接口，马来能出数、菲律宾回「参数无效」——
+ * 页面自己能拿到，说明差的是请求头/上下文（广告账户 id 之类），
+ * 我们复刻不完整。与其一遍遍猜参数，不如：
+ *   挂上调试器 → 刷新广告页 → 页面自己去请求（它一定有权限）
+ *   → 把响应体接住 → 解析成广告表。
+ * 不依赖页面渲染出导出按钮，也不依赖我们发的请求被平台认可。
+ */
+async function captureAdsFromPage(host, log) {
+  let tab = null;
+  try {
+    const wins = await chrome.windows.getAll({ populate: true });
+    const order = wins.slice().sort((a, b) => (b.focused ? 1 : 0) - (a.focused ? 1 : 0));
+    for (const w of order) {
+      const t = (w.tabs || []).find((x) => /ads-creation\/dashboard/.test(String(x.url || "")));
+      if (t) { tab = { id: t.id, windowId: w.id }; break; }
+    }
+  } catch (e) { /* 忽略 */ }
+  if (!tab) throw new Error("没有打开着的广告页（请先手动打开菲律宾广告面板）");
+
+  const tabId = tab.id;
+  // 广告页必须真的"可见"，否则 SPA 只发配置类请求、不拉数据（实测 80 个响应全是时区/清单）。
+  // 这里激活标签 + 恢复窗口，然后回读 visibilityState 确认到底有没有生效。
+  for (let i = 0; i < 3; i++) {
+    try { await chrome.tabs.update(tabId, { active: true }); } catch (e) { /* 忽略 */ }
+    await focusWindow(tab.windowId);
+    await sleep(800);
+    let vis = "";
+    try {
+      const r = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => document.visibilityState,
+      });
+      vis = String((r && r[0] && r[0].result) || "");
+    } catch (e) { /* 忽略 */ }
+    if (vis === "visible") break;
+    if (log) log(`   广告页当前不可见（${vis || "?"}），再切一次…`);
+  }
+
+  const bodies = [];
+  const onEvent = async (source, method, params) => {
+    if (source.tabId !== tabId) return;
+    if (method !== "Network.responseReceived") return;
+    const u = String((params.response || {}).url || "");
+    // 实测：新版后台（GMV Max）拿数据用的是 post_campaign_list_v2，
+    // 老版是 post_product_list_v2。两个都接。
+    if (!/post_(product|campaign)_list_v2/i.test(u)) return;
+    try {
+      const b = await chrome.debugger.sendCommand(
+        { tabId }, "Network.getResponseBody", { requestId: params.requestId });
+      const txt = (b && b.body) || "";
+      if (txt.includes("table_v2")) bodies.push(txt);
+    } catch (e) { /* 响应体拿不到就跳过 */ }
+  };
+
+  let attached = false;
+  const seen = [];   // 诊断：广告相关的每个响应，路径 + 顶层键，用来认清哪个才是数据接口
+  chrome.debugger.onEvent.addListener(async (source, method, params) => {
+    if (source.tabId !== tabId || method !== "Network.responseReceived") return;
+    const u = String((params.response || {}).url || "");
+    if (!/oec_ads|ads-creation|\/api\//i.test(u)) return;
+    if (!/json/i.test(String((params.response || {}).mimeType || ""))) return;
+    try {
+      const b = await chrome.debugger.sendCommand(
+        { tabId }, "Network.getResponseBody", { requestId: params.requestId });
+      const txt = (b && b.body) || "";
+      if (!txt.trim().startsWith("{")) return;
+      const j = JSON.parse(txt);
+      const keys = Object.keys(j || {}).slice(0, 5).join(",");
+      const dataKeys = Object.keys((j && j.data) || {}).slice(0, 6).join(",");
+      const p = u.split("?")[0].replace(/^https:\/\/[^/]+/, "");
+      seen.push({ p, keys, dataKeys, len: txt.length });
+    } catch (e) { /* 取不到就算了 */ }
+  });
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    attached = true;
+    await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
+    // 不刷新页面：一刷新广告后台就回默认「活动」页，计划列表不再加载，
+    // 我们既拿不到数据、也把你正在看的页面搞乱。
+    // 改成：挂上监视器后，等页面自己发请求（用户点一下日期旁的刷新即可）。
+    if (log) log("   已开始监视，请在广告页点一下日期右边的刷新按钮（⟳）");
+    for (let i = 0; i < 75 && !bodies.length; i++) await sleep(1000);
+    if (log) {
+      log(`   这次共看到 ${seen.length} 个广告相关响应，其中 ${bodies.length} 个带数据表`);
+      // 把接口清单打进日志：哪个接口带 product_id / 行数据，一眼就能认出来
+      const uniq = [];
+      const got = new Set();
+      for (const s of seen) {
+        const k = s.p + "|" + s.dataKeys;
+        if (got.has(k)) continue;
+        got.add(k);
+        uniq.push(s);
+      }
+      for (const s of uniq.slice(0, 12)) {
+        log(`   · ${s.p}｜${Math.round(s.len / 1024)}KB｜data:${s.dataKeys || "空"}`);
+      }
+    }
+  } catch (e) {
+    if (log) log(`   挂调试器失败：${(e && e.message) || e}`);
+  } finally {
+    try { chrome.debugger.onEvent.removeListener(onEvent); } catch (e) { /* 忽略 */ }
+    if (attached) { try { await chrome.debugger.detach({ tabId }); } catch (e) { /* 忽略 */ } }
+  }
+
+  if (!bodies.length) throw new Error("刷新后没抓到广告数据接口的响应");
+
+  // 把多页/多次请求的行合起来（table_v2 是「每格 {data,name}」的列式结构，
+  // rowsToObjects 会按 name 还原成普通对象）
+  const rows = [];
+  for (const txt of bodies) {
+    try {
+      const j = JSON.parse(txt);
+      const t2 = j && j.data && j.data.table_v2;
+      if (Array.isArray(t2)) rows.push(...t2);
+    } catch (e) { /* 跳过坏包 */ }
+  }
+  if (!rows.length) throw new Error("抓到的响应里没有 table_v2 行数据");
+  if (log) {
+    // 先把第一行的字段名打出来：新版是「计划」维度，得确认里面有没有商品号，
+    // 没有的话就没法按商品摊广告费，得换别的口径算。
+    const objs = rowsToObjects(rows.slice(0, 3));
+    const keys = objs && objs[0] ? Object.keys(objs[0]).slice(0, 20).join(",") : "";
+    log(`   页面自己取到 ${rows.length} 行广告数据｜字段：${keys || "（识别不出）"}`);
+  }
+
+  const csv = adsRowsToCsv(rows);
+  const bytes = new TextEncoder().encode(csv);
+  const name = `creative data for product campaigns (页面读取 ${new Date()
+    .toISOString().slice(0, 10)}).csv`;
+  const saved = await uploadToBridge(name, bytes.buffer, "ads");
+  if (log) log(`   已保存：${saved.path}`);
+  return { via: "页面数据", rows: rows.length, saved: saved.path };
+}
+
+/**
+ * 广告规格接口的「参数探测」。
+ *
+ * 同一个接口 `/oec_ads/.../post_product_list_v2`，马来返回 code=0 有数据，
+ * 菲律宾返回 code=3（连 message 都没有）。两边的差别只可能在请求体，
+ * 尤其是 filters 里的 gmv_roi_mode。这里把几种变体各发一次，把平台真实
+ * 反应打进日志——一次点击就能定位，不用来回猜、来回改。
+ */
+async function probeAdsSpec(host, range, log) {
+  const store = await currentStoreId();
+  const resp = await fetch(`${BRIDGE}/spec`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task: "ads", range, store }),
+  });
+  const sj = await resp.json();
+  const step = (((sj.spec || {}).steps) || [])[0];
+  if (!step) {
+    log("   探测：规格里没有步骤，跳过");
+    return;
+  }
+  const base = JSON.parse(JSON.stringify(step.body || {}));
+  const dropFilter = (b, field) => {
+    b.filters = (b.filters || []).filter((f) => f.field !== field);
+    return b;
+  };
+  const variants = [
+    ["原样", () => JSON.parse(JSON.stringify(base))],
+    ["去掉 gmv_roi_mode", () => dropFilter(JSON.parse(JSON.stringify(base)), "gmv_roi_mode")],
+    ["gmv_roi_mode=1", () => {
+      const b = JSON.parse(JSON.stringify(base));
+      for (const f of b.filters || []) if (f.field === "gmv_roi_mode") f.in_field_values = ["1"];
+      return b;
+    }],
+    ["去掉全部 filters", () => { const b = JSON.parse(JSON.stringify(base)); delete b.filters; return b; }],
+  ];
+  for (const [label, make] of variants) {
+    try {
+      const r = await callApi(host, step.path, step.method || "POST", make());
+      const rows = r && r.data && r.data.table_v2;
+      const dataKeys = Object.keys((r && r.data) || {}).slice(0, 6).join(",");
+      // 有的站点把业务码放在 data 里（data={code,msg}），外层只有 code 正常，
+      // 只看外层会得到 undefined，等于什么都没看到。
+      const inner = (r && r.data) || {};
+      const code = (r && r.code) !== undefined ? r.code : inner.code;
+      const msg = inner.msg || inner.message || (r && r.message) || "";
+      log(`   探测「${label}」：code=${code}${msg ? " msg=" + String(msg).slice(0, 80) : ""}`
+        + `｜行数=${Array.isArray(rows) ? rows.length : "无 table_v2"}`
+        + `｜data 键=${dataKeys || "空"}`);
+    } catch (e) {
+      log(`   探测「${label}」：请求失败 ${(e && e.message) || e}`);
+    }
+  }
+}
+
 const TASK_IMPL = {
+  // 手动导出模式：程序只装拦截器 + 收文件，点按钮由人来（人点最准）
+  manualAds: async (range, log) => manualAdsCapture(log),
   orders: runOrders,
   sku: runSkuStats,
   // 链接资料：报表「款式编码」列的来源。跟 sku 取的是同一个接口，
@@ -3708,12 +5262,44 @@ const TASK_IMPL = {
     }
   },
   ads: async (range, log) => {
+    // 站点档案里标了 ads_spec=false 的（实测菲律宾），别再浪费一轮请求，
+    // 直接去广告页点导出。没标的照常先试规格接口。
+    let prof = {};
+    try {
+      prof = await siteProfile(await ensureHost("seller", log));
+    } catch (e) { /* 拿不到就当默认 */ }
+    if (prof.ads_spec === false) {
+      // 这家站的接口我们复刻不全（平台回「参数无效」），但页面自己能拿到数据。
+      // 先抄页面的：挂调试器刷新广告页、接住响应——不依赖渲染、不依赖导出按钮。
+      const host = await ensureHost("seller", log);
+      log(`   站点 ${String(prof.key || "?").toUpperCase()} 改走「导出任务」接口…`);
+      try {
+        return await exportAdsByApi(host, log, range);
+      } catch (e) {
+        log(`   导出接口没成：${(e && e.message) || e}；改在页面上点导出`);
+      }
+      try {
+        return await exportAdsByClickFresh(host, log, range);
+      } catch (e) {
+        log(`   页面导出也没成：${(e && e.message) || e}；改查已完成的导出任务`);
+      }
+      log("   → 这家店的导出方式还没学会：点一次「广告（我自己点导出）」，"
+          + "我会记住它的接口，以后这家店就全自动了");
+      return runAds(range, log, { noDirect: true });
+    }
     try {
       return await runSpecTask("ads", range, log);
     } catch (e) {
-      log(`   规格接口不可用（${(e && e.message) || e}），改下广告导出任务…`);
-      // 只查一轮：有用户点过导出的成品就下，没有就跳过，不空等 5 分钟
-      return runAds(range, log, { noDirect: true, quick: true });
+      log(`   规格接口不可用（${(e && e.message) || e}），改走「导出任务」接口…`);
+      // 实测：马来西亚的新店（Chroma Home）也回 code=3，跟菲律宾一样——
+      // 说明差别不在国家，而在**这家店是不是 GMV Max 账户**。
+      // 所以「导出任务」这条路对两个国家都先试，最后才退到点页面。
+      try {
+        return await exportAdsByApi(await ensureHost("seller", log), log, range);
+      } catch (e2) {
+        log(`   导出接口也没成：${(e2 && e2.message) || e2}；改在页面上点导出`);
+      }
+      return runAds(range, log, { noDirect: true });
     }
   },
 };
@@ -3730,10 +5316,10 @@ async function runTask(task, range, log, opts = {}) {
     for (const t of ["orders", "sku", "affiliate", "ads"]) {
       try {
         log(`—— 开始：${t} ——`);
-        out[t] = await runTask(
-          t, range, log,
-          t === "ads" ? { quick: true } : { force: !!opts.force },
-        );
+        // 广告以前用 quick 模式（只查已完成的导出任务，不主动导）省时间，
+        // 但直取接口在部分站点（实测菲律宾 code=3）根本不通，quick 就等于放弃广告，
+        // 算出来的净利里没有广告费、看着特别高。现在让它同样走「页面点导出」兜底。
+        out[t] = await runTask(t, range, log, { force: !!opts.force });
       } catch (e) {
         log(`—— ${t} 失败：${e.message}`);
         out[t] = { error: String(e.message || e) };
@@ -3745,22 +5331,33 @@ async function runTask(task, range, log, opts = {}) {
   const impl = TASK_IMPL[task];
   if (!impl) throw new Error(`不支持的取数任务：${task}`);
 
-  // 先确认这是哪家店——数据要按店铺分开存，混在一起就全乱了
-  if (!CURRENT_SHOP.shop_id) {
-    try {
-      const host = await ensureHost(TASK_HINT[task] || "seller", log);
-      await identifyShop(host, log);
-    } catch (e) {
-      log(`店铺识别跳过：${(e && e.message) || e}`);
-    }
+  // 手动导出模式不碰页面：不识别、不刷参数、不开页，直接装拦截器等着收文件。
+  // （ensureHost 在参数过期时会刷新页面，那会把用户正在看的广告页搞没）
+  if (task === "manualAds") {
+    const impl0 = TASK_IMPL[task];
+    return await impl0(range, log, opts);
+  }
+
+  // 先确认这是哪家店——数据要按店铺分开存，混在一起就全乱了。
+  // 每轮第一家任务都重新认一遍：同一个浏览器里换登店铺时，
+  // 缓存里的 shop_id 会让新一轮的数据写进上一家店的目录。
+  try {
+    const host = await ensureHost(TASK_HINT[task] || "seller", log);
+    await identifyShop(host, log, { force: task === "orders" || !CURRENT_SHOP.shop_id });
+  } catch (e) {
+    log(`店铺识别跳过：${(e && e.message) || e}`);
   }
 
   try {
     return await impl(range, log, opts);
   } catch (e) {
     const msg = String(e.message || e);
-    // 登录态或风控参数失效是最常见的失败原因：刷新一次参数再试，别直接甩给用户
-    if (/40[123]|风控|登录|code=|参数|学不到/.test(msg)) {
+    // 登录态或风控参数失效是最常见的失败原因：刷新一次参数再试，别直接甩给用户。
+    // 但「文件还在生成」(21016003) 和「该时段没有订单」跟参数无关，
+    // 重排任务只会又多等一轮，必须排除掉。
+    const retriable = /40[123]|风控|登录|code=|参数|学不到/.test(msg)
+      && !/21016003|没有生成订单导出文件/.test(msg);
+    if (retriable) {
       log("可能登录态或风控参数失效，刷新页面后重试一次…");
       try {
         await ensureHost(TASK_HINT[task], log, true);
@@ -3775,6 +5372,20 @@ async function runTask(task, range, log, opts = {}) {
 
 async function runTaskThenCalc(task, range, log, opts = {}) {
   const r = await runTask(task, range, log, opts);
+
+  // 订单还在平台排队时别急着算：算出来只会是"没有订单表"，白跑一趟。
+  // 大店导出要几分钟，这里等它（后台跑，面板关了也不影响），
+  // 拿到就直接接着算，用户不用再点第二次。
+  const ordErr = (r && r.orders && r.orders.error) ? String(r.orders.error) : "";
+  if (/排队/.test(ordErr)) {
+    log("订单还在平台排队，等它生成好再算（最多 4 分钟）…");
+    for (let i = 0; i < 12; i++) {
+      await sleep(20000);
+      const got = await harvestPendingOrders(log, CURRENT_SHOP.shop_id).catch(() => 0);
+      if (got > 0) { log("订单已到，继续核算"); break; }
+      if (i % 3 === 2) log(`   还在等订单…（${(i + 1) * 20} 秒）`);
+    }
+  }
   try {
     return { fetch: r, calc: await calcNow(range, log, opts) };
   } catch (e) {
@@ -3808,11 +5419,63 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         buffered: buffer.length,
         stats: s.stats,
         learnedHosts: Object.keys(s.params || {}),
+        shop: CURRENT_SHOP,
+        shopError: SHOP_ERROR,
         running: s.running,
         lastResult: s.lastResult,
         lastCalc: s.lastCalc,
       });
     });
+    return true;
+  }
+
+  // 面板一打开就问一次「现在这家店是谁」。
+  // 新店铺不需要任何手工登记：接口认出来就自动建档、自动带出国家。
+  if (msg.type === "identifyNow") {
+    (async () => {
+      const log = (m) => appendTaskLog(`[identify] ${m}`);
+      try {
+        // 已经知道这家店是谁：立刻回给面板（瞬时显示），
+        // 之后在后台安静地复核一次。以前每次都走完整识别，面板要等好几秒。
+        if (CURRENT_SHOP.shop_id) {
+          sendResponse({ ok: true, shop: CURRENT_SHOP, country: CURRENT_SHOP.country || "" });
+          const fresh = Date.now() - (CURRENT_SHOP._at || 0) < 10 * 60 * 1000;
+          if (fresh) return;                       // 10 分钟内不重复复核
+          (async () => {
+            try {
+              const h = await ensureHost("seller", log);
+              await identifyShop(h, log, { force: true });
+            } catch (e) { /* 复核失败就继续用已知的 */ }
+          })();
+          return;
+        }
+
+        // 没有身份：走和「运行时」完全相同的那条路（先刷参数再识别）
+        let host = "";
+        try {
+          host = await ensureHost("seller", log);
+        } catch (e) {
+          host = pickHost((await chrome.storage.local.get({ params: {} })).params, "seller") || "";
+        }
+        if (!host) {
+          const t = await findTab("seller");
+          host = (t && t.host) || "";
+        }
+        if (!host) {
+          sendResponse({ ok: false, error: "当前没有打开卖家后台页面（seller-xx.tiktok.com）" });
+          return;
+        }
+        const shop = await identifyShop(host, log, { force: true });
+        sendResponse({
+          ok: !!shop.shop_id,
+          shop,
+          country: shop.country || "",
+          error: shop.shop_id ? "" : (SHOP_ERROR || "没认出店铺"),
+        });
+      } catch (e) {
+        sendResponse({ ok: false, error: String((e && e.message) || e) });
+      }
+    })();
     return true;
   }
 

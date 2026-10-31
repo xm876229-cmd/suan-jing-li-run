@@ -1,0 +1,85 @@
+# 算净利润 · 长期约定
+
+## 硬规则：改一处 = 同步所有版本
+用户明确要求（2026-10-30）：「以后有修改所有版本都同步一起改，不管是项目目录还是安装版还是 release」。
+
+四份东西必须版本一致：
+1. 项目目录 `桌面\算净利润\`（源头，开发时改这里）
+2. `release\净利助手\`（免安装版；**浏览器实际加载的扩展多半是这里的** `浏览器扩展\`）
+3. `%LOCALAPPDATA%\JingLiHelper\`（安装版，扩展目录名 `extension\`）
+4. `release\净利助手-安装包.exe` / `净利助手-免安装.zip`（分发包）
+
+同步命令：
+- `python -m scripts.sync_all`       扩展 + `_internal\默认配置` + `_internal\默认数据\costs` + 文档（只覆盖不删除）
+- `python -m scripts.sync_all --check` 只看差异
+- `python -m scripts.sync_all --build` 先重打包 exe/安装包再同步（Python 侧改动的唯一真正同步方式）
+
+注意：打包版代码冻在 `jingli.exe` 内，只拷扩展不够；改了 Python 必须 `--build`。
+`bridge/server.py::_sync_extension_copies()` 在桥启动时也会兜底同步扩展。
+
+## 数据与目录
+- 数据根 `数据\stores\<店名>\`：`inbox\{订单表,广告表,联盟佣金表,商品映射}`、`商品SKU表`、`链接资料`、`快照`
+- 店铺身份以 `meta.json` 的 `shop_id` 为准；目录用店名，新店首次识别自动改名
+- 映射主表 `数据\mapping\master.csv`（全局累积，跨进程锁 `.merge.lock`）
+- 成本 `数据\costs\master.csv`；配置 `配置\{rates,formulas,stores,...}.json`
+
+## 多店铺
+- 一家店一个浏览器、各装一份扩展；核算锁按 shop_id 分开，可并行
+- 店铺名以「浏览器实际登录的店铺」为准，弹窗选错不会串店
+
+## 约定
+- CHANGELOG.md 用 Python 写，别用 heredoc/regex
+- 扩展改完要升 `manifest.json` 版本号，否则刷新后看不出变没变
+
+## 站点差异层（加新店不卡住的关键）
+- `配置/sites.json`：域名→站点代码/国家/站点特性（`ads_spec` 是否支持规格接口、`download_retry` 下载重试次数）。bridge 通过 `/stores` 一并下发，扩展缓存到 chrome.storage。
+- 扩展逻辑：`siteProfile(host)` 读这份档案；未登记的站点走默认（先试规格接口，失败自动兜底），**不需要改代码**。
+- 店铺身份只认 `stores/<店名>/meta.json`，核算不再要求 stores.json 里有这家店（cli.py 已兜底）。
+- 每类数据统一三段兜底：规格接口 → 页面点导出（拦截下载，不弹另存为）→ 已完成的导出任务。
+- 缺表不再静默：`/run` 返回 `missing`，日志和面板都提示「本轮没有广告数据，净利偏高」。
+
+## 广告全自动（2026-10-31 定型，0.21.99）
+四层机制，任何店铺/任何电脑都走同一条路，不需要人工介入：
+1. **建任务**：`POST /oec_ads/shopping/v1/oec/stat/post_product_list_v2`
+   `{action:"download", page_size:-1, dims:["spu_id","campaign_id"], query_list:[...,"mixed_real_cost","extra_currency"], filters:[...]}`
+   → `download_task/query` **只查不建**，别再拿它建任务
+2. **广告账户 ID**：在**页面 URL 参数 `aadvid`** 上（不在请求头！头里只有 `x-tt-oec-region`）
+   程序从 `learnParams` 存下的参数里取；取不到就开广告页 12 秒自学再重试
+3. **轮询**：`download_task/query {download_id}` → `task_status:SUCCESS` + `url`（签名地址，无 .xlsx 后缀）
+4. **下载**：自己 fetch，不弹保存框
+
+导出表是**商品维度**（带「商品 ID」列），转换器见商品 ID 就跳过，不要再按计划分摊。
+币种可能是 USD（LR Home.MY 实测），核算按 USD→本地汇率换算。
+
+平台报错原文对照（`system_msg`）：
+- `req adv id missing` → 缺广告账户 ID
+- `no download_id provided` → 把 query 当建任务用了
+- `21016003` → 导出文件还在生成
+
+## 发布脚本断线处理
+GitHub 上传偶发 `IncompleteRead`（响应没读完但文件已传上去）。
+`build/do_release.py` 已改为：失败先查附件列表核对大小，对上就算成功，否则重试 3 次。
+
+## 订单导出（2026-10-31, 0.22.2）
+`POST /api/fulfillment/order/export` 建任务 → `export_record/get` 轮询 → `order/download`。
+- **file_key ≠ export_task_id**：file_key 形如 `b595bc8c907f427bsafe`（16 位十六进制+safe），
+  任务号是纯数字。拿任务号当 file_key 去下载，永远回 `21016003`（"文件还在生成"）。
+- 建任务返回的 `data.file_key` 有时就是任务号，必须过滤纯数字。
+
+## 核算卡死（0.22.2）
+没有订单表时，`jingli.exe run` 子进程抛异常后卡在退出阶段（CPU 0），父进程干等 15 分钟。
+- `/run` 前先用 `loader.has_orders_table(dir)` 预检，没有就直接回提示
+- 子进程超时 900s → 300s
+- 子进程输出按 GBK 兜底解码（打包版是 GBK，强制 utf-8 会乱码）
+- 失败时把堆栈翻译成人话，不要把 traceback 丢给界面
+
+## 大店订单（2026-10-31, 0.22.8）
+Chroma Home 实测：30 天 **57,703 行 / 40 MB**，平台生成导出文件约 **5 分钟**。
+- 以前只等 44 秒就判失败、反复重排任务 → 永远拿不到，还越排越慢
+- 正解：建一个整段任务 → 等 48 秒 → 没出来就进 `pendingOrders` 待办，
+  由 `pending-watch` 闹钟每分钟收一次（实测 5 分钟内到位）
+- **撤销按周切片**：5 个片段在大店同样慢，等于把 1 个慢任务变 5 个
+- 订单文件名带区间：`全部 笔订单-20261001-20261030-HHMM.csv`，
+  同区间再点运行可直接复用已生成的导出，不重排
+- 判定 file_key 真假：真实格式 `b595bc8c907f427bsafe`（16 位十六进制+safe），
+  纯数字是 export_task_id，拿它下载必回 21016003

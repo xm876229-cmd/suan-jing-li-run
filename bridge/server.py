@@ -27,7 +27,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, parse_qs
 
 if not getattr(sys, "frozen", False):
     _root = Path(__file__).resolve().parents[1]
@@ -44,9 +44,24 @@ LOG_FILE = paths.CAPTURE / "task.log"
 PORT = int(os.environ.get("JINGLI_PORT") or 8765)
 
 TASK_LOG: list[str] = []
-_RUN_LOCK = threading.Lock()
 _PENDING: list = []          # 待办队列：[{task, range, store, country, at}, ...]
 _PENDING_LOCK = threading.Lock()
+
+# 核算锁按店铺分开：两家店各开一个浏览器同时点运行是正常用法，
+# 用一把全局锁会让第二家直接报「已有核算任务在进行」——多店铺等于用不了。
+# 同一家店仍然互斥（连点两下不该算两遍）。
+_RUN_LOCKS: dict[str, threading.Lock] = {}
+_RUN_LOCKS_GUARD = threading.Lock()
+
+
+def _run_lock_for(key: str) -> threading.Lock:
+    k = (key or "").strip() or "_all"
+    with _RUN_LOCKS_GUARD:
+        lk = _RUN_LOCKS.get(k)
+        if lk is None:
+            lk = threading.Lock()
+            _RUN_LOCKS[k] = lk
+        return lk
 
 
 
@@ -217,6 +232,32 @@ def remember_store(shop_id: str, info: dict) -> None:
                              encoding="utf-8")
     except OSError:
         pass
+    _retitle_store(meta_file.parent, sid)
+
+
+def _retitle_store(cur, shop_id: str) -> None:
+    """新店第一次被认出来时，把「一串数字」的目录改成店名。
+
+    使用者打开 数据\\stores 应该看到店名。只在目录里除了 meta.json 没别的东西时改，
+    已经有数据的店一律不动——正在跑的核算读到一半路径变了，比目录难看严重得多。
+    """
+    try:
+        want = paths.store_display_name(shop_id)
+    except Exception:  # noqa: BLE001
+        return
+    safe = re.sub(r'[\\/:*?"<>|]', "_", want or "").strip(" .")
+    if not safe or cur.name == safe:
+        return
+    dst = cur.parent / safe
+    if dst.exists():
+        return
+    try:
+        if [p for p in cur.iterdir() if p.name != "meta.json"]:
+            return
+        cur.rename(dst)
+        _append_log(f"[identify] 店铺目录按店名命名：{safe}")
+    except OSError:
+        pass
 
 
 def discovered_stores() -> list[dict]:
@@ -295,6 +336,53 @@ def rename_store(shop_id: str, alias: str) -> dict:
     return {"ok": True, "shop_id": sid, "name": hit["name"]}
 
 
+def remove_store(shop_id: str) -> dict:
+    """把一家店从列表里移除——目录挪进 `数据/stores/_已删除/`，不真删。
+
+    为什么不真删：里面是这家店的历史订单/SKU/快照，删了要重新取数，
+    而有些数据平台只保留一段时间。挪走能恢复，代价只是占硬盘。
+    想彻底清掉，自己把 `_已删除` 那个文件夹删了就行。
+    """
+    sid = (shop_id or "").strip()
+    if not sid:
+        return {"ok": False, "error": "缺少店铺 ID"}
+
+    # 1) 摘掉 stores.json 里的登记（手动加过才有）
+    removed_cfg = False
+    try:
+        cfg = json.loads(paths.STORES_FILE.read_text(encoding="utf-8"))
+        stores = cfg.get("stores") or []
+        keep = [x for x in stores
+                if str(x.get("id") or "") != sid
+                and str(x.get("zhanfu_browser_id") or "") != sid]
+        if len(keep) != len(stores):
+            cfg["stores"] = keep
+            paths.STORES_FILE.write_text(
+                json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            removed_cfg = True
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2) 店目录挪进回收站
+    moved_to = ""
+    try:
+        d = paths.store_root(sid)
+        if d.is_dir():
+            trash = paths.STORES_ROOT / "_已删除"
+            trash.mkdir(parents=True, exist_ok=True)
+            dst = trash / f"{d.name}_{datetime.now():%Y%m%d_%H%M%S}"
+            shutil.move(str(d), str(dst))
+            moved_to = str(dst)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"挪走店目录失败：{e}"}
+
+    if not moved_to and not removed_cfg:
+        return {"ok": False, "error": "没找到这家店（可能已经移除）"}
+
+    _append_log(f"[店铺] 已移除 {sid}（目录：{moved_to or '无'}），可在 数据/stores/_已删除 找回")
+    return {"ok": True, "moved_to": moved_to, "removed_config": removed_cfg}
+
+
 def store_list() -> dict:
     """给扩展用的店铺清单：每家店的国家已经写在配置里，界面上选店即可。
 
@@ -341,13 +429,38 @@ def store_list() -> dict:
             "last_seen": d["last_seen"],
         })
 
+    # 「自动」这个标签原来只挂在「没写进 stores.json」的店上，
+    # 于是手动登记过的马来一号店看着像"没被识别"。
+    # 实际该看的是**有没有识别档案**（meta.json 才是店铺身份的来源）。
+    for st in stores:
+        try:
+            meta = paths.store_root(st.get("id") or "") / "meta.json"
+            st["auto"] = meta.is_file()
+        except Exception:  # noqa: BLE001
+            pass
+
     default = ""
     try:
         default = cfg.get("defaults", {}).get("country", "")
     except Exception:
         pass
 
-    return {"ok": True, "stores": stores, "countries": countries, "default": default}
+    # 站点档案一起发下去：扩展据此推国家、决定某些站点要不要跳过规格接口。
+    # 差异写在 config/sites.json 里，加新店/新站点不用改扩展代码。
+    return {"ok": True, "stores": stores, "countries": countries,
+            "default": default, "sites": _sites_cfg()}
+
+
+def _sites_cfg() -> dict:
+    """读站点档案（配置/sites.json）。读不到就给空表，扩展按默认逻辑走。"""
+    try:
+        f = paths.CONFIG / "sites.json"
+        if f.is_file():
+            d = json.loads(f.read_text(encoding="utf-8"))
+            return {"sites": d.get("sites") or {}, "defaults": d.get("defaults") or {}}
+    except Exception:  # noqa: BLE001
+        pass
+    return {"sites": {}, "defaults": {}}
 
 
 def _make_snapshot(shop_id: str, payload: dict) -> dict:
@@ -389,9 +502,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/health"):
+            # extVersion：磁盘上扩展目录的版本（程序自己读文件）。
+            # 面板拿它跟内存里跑的版本对比，就能发现「文件更新了但扩展没重新加载」
+            # —— 这种情况界面上版本号是新的，跑的还是旧代码，最难查。
+            _ext = ""
+            try:
+                import json as _j
+                _mf = paths.EXTENSION / "manifest.json"
+                _ext = str(_j.loads(_mf.read_text(encoding="utf-8")).get("version") or "")
+            except Exception:  # noqa: BLE001
+                pass
             _json(self, {"ok": True, "service": "jingli-bridge",
                          "captureDir": str(CAPTURE_DIR),
-                         "inbox": str(INBOX_DIR)})
+                         "inbox": str(INBOX_DIR),
+                         "extVersion": _ext})
         elif self.path.startswith("/endpoints"):
             _json(self, rebuild_endpoints())
         elif self.path.startswith("/log"):
@@ -402,6 +526,22 @@ class Handler(BaseHTTPRequestHandler):
             with _PENDING_LOCK:
                 job = _PENDING.pop(0) if _PENDING else None
             _json(self, {"ok": True, "job": job})
+        elif self.path.startswith("/store_profile"):
+            # 读店铺档案：换电脑后扩展从这里直接拿到"学过的"账户/场景，
+            # 不用再开页面学一遍。档案跟着数据目录走，拷过去就生效。
+            try:
+                q = parse_qs(urlparse(self.path).query)
+                sid = (q.get("shop_id") or [""])[0].strip()
+                f = paths.store_root(sid) / "profile.json"
+                prof = {}
+                if sid and f.is_file():
+                    try:
+                        prof = json.loads(f.read_text(encoding="utf-8"))
+                    except Exception:  # noqa: BLE001
+                        prof = {}
+                _json(self, {"ok": True, "profile": prof})
+            except Exception as e:  # noqa: BLE001
+                _json(self, {"ok": False, "error": str(e)}, 500)
         elif self.path.startswith("/stores") or self.path.startswith("/api/stores"):
             _json(self, store_list())
         elif self.path == "/" or self.path.startswith("/index"):
@@ -572,8 +712,63 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
     def do_POST(self):
-        if self.path.startswith("/api/mapping"):
+        if self.path.startswith("/api/reports/delete"):
+            # 注意必须在 do_POST 里：页面是 POST 过来的，
+            # 之前误放在 do_GET 分支，于是报「unknown endpoint」。
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                names = payload.get("names") or []
+                if not isinstance(names, list) or not names:
+                    _json(self, {"ok": False, "error": "没选中报表"}, 400)
+                    return
+                from bridge import ui
+                r = ui.delete_reports([str(x) for x in names])
+                _append_log(f"[报表] 删除了 {len(r.get('moved') or [])} 份（已移到 _已删除）")
+                _json(self, r)
+            except Exception as e:  # noqa: BLE001
+                _json(self, {"ok": False, "error": f"删除失败：{e}"}, 500)
+        elif self.path.startswith("/api/mapping"):
             self._post_mapping()
+        elif self.path.startswith("/store_profile"):
+            # 店铺档案：扩展第一次跑这家店时，把"这家店的运行时事实"
+            # （站点代码、广告账户 ID、导出场景…）写进店里，以后直接用。
+            # 存进数据目录而不是配置文件：档案是跟着店走的，换电脑拷数据就行。
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                prof = json.loads(self.rfile.read(length) or b"{}")
+                sid = str(prof.get("shop_id") or "").strip()
+                if not sid:
+                    _json(self, {"ok": False, "error": "缺少 shop_id"}, 400)
+                    return
+                d = paths.store_root(sid)
+                d.mkdir(parents=True, exist_ok=True)
+                # 合并写：每次只更新这次学到的键，别把上次学的冲掉
+                old = {}
+                f = d / "profile.json"
+                if f.is_file():
+                    try:
+                        old = json.loads(f.read_text(encoding="utf-8"))
+                    except Exception:  # noqa: BLE001
+                        old = {}
+                old.update({k: v for k, v in prof.items() if v not in (None, "")})
+                old["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                f.write_text(json.dumps(old, ensure_ascii=False, indent=2), encoding="utf-8")
+                _json(self, {"ok": True, "path": str(f)})
+            except Exception as e:  # noqa: BLE001
+                _json(self, {"ok": False, "error": f"档案保存失败：{e}"}, 500)
+        elif self.path.startswith("/api/stores/remove"):
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                sid = str(payload.get("id") or "").strip()
+                if not sid:
+                    _json(self, {"ok": False, "error": "缺少店铺 ID"}, 400)
+                    return
+                r = remove_store(sid)
+                _json(self, r, 200 if r.get("ok") else 400)
+            except Exception as e:  # noqa: BLE001
+                _json(self, {"ok": False, "error": f"移除失败：{e}"}, 500)
         elif self.path.startswith("/api/stores/rename"):
             self._post_rename_store()
         elif self.path.startswith("/identify"):
@@ -677,12 +872,23 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            # 前端发什么，这里就得往下传什么。
+            # 之前只传了 6 个字段，报表列 / 合计位置 / 列标题 / 广告表头 / 佣金表头 /
+            # 映射表头全被吞掉——界面提示「已保存」，其实一个都没写进去，
+            # 刷新后又变回默认（表现就是「勾选保存后又恢复全选」）。
             _json(self, config_page.save_config(
                 params, payload.get("formulas") or {},
                 by_country=payload.get("by_country"),
                 order_fields=payload.get("order_fields"),
                 cost_fields=payload.get("cost_fields"),
-                exclude_zero_amount=payload.get("exclude_zero_amount")))
+                exclude_zero_amount=payload.get("exclude_zero_amount"),
+                report_columns=payload.get("report_columns"),
+                report_column_order=payload.get("report_column_order"),
+                report_total_position=payload.get("report_total_position"),
+                report_titles=payload.get("report_titles"),
+                ads_fields=payload.get("ads_fields"),
+                affiliate_fields=payload.get("affiliate_fields"),
+                mapping_fields=payload.get("mapping_fields")))
         except Exception as e:  # noqa: BLE001
             _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
 
@@ -718,7 +924,8 @@ class Handler(BaseHTTPRequestHandler):
         #   有时同一类表名字还带不同后缀。）
         tmp_dir = paths.EXPORTS / "_tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = tmp_dir / f"upload-{int(time.time()*1000)}-{safe}"
+        # 加纳秒后缀：两家店同时回传时同一毫秒内会撞名，撞了就会互相覆盖
+        tmp_path = tmp_dir / f"upload-{time.time_ns()}-{safe}"
         try:
             tmp_path.write_bytes(data)
         except OSError as e:
@@ -742,7 +949,11 @@ class Handler(BaseHTTPRequestHandler):
             # 链接改绑后老 SKU 也要能查到归属，所以不能只留最新一份。
             target_dir = MAPPING_DIR
         elif shop_id:
-            target_dir = paths.store_kind_dir(shop_id, table_kind or "orders")
+            # 表头认不出来时，用扩展告诉我们的「这张表是从哪个页面导的」兜底。
+            # 以前一律落到 orders，结果广告表、佣金表全堆进「订单表」——
+            # 核算照样能算（loader 按表头认表），但人打开文件夹是懵的。
+            _k = table_kind or (kind if kind in ("orders", "ads", "affiliate") else "orders")
+            target_dir = paths.store_kind_dir(shop_id, _k)
             remember_store(shop_id, payload)
         else:
             # 认不出店铺：单独隔一个专区，绝不混进任何一家已知店
@@ -1275,10 +1486,7 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
 
-        if not _RUN_LOCK.acquire(blocking=False):
-            _json(self, {"ok": False, "error": "已有核算任务在进行，请稍候"})
-            return
-
+        _lk = None
         try:
             from src import settings as cfg_settings
 
@@ -1300,13 +1508,55 @@ class Handler(BaseHTTPRequestHandler):
                         shop_code = st.get("shop_code") or ""
                         shop_id = st.get("shop_id") or shop_id or store
                         break
+
+            # 以「浏览器实际登录的那家」为准。
+            # 两个浏览器各登一家时，弹窗里的店铺可能还停在上一次选的那家，
+            # 照它算就会把 A 店的名字贴到 B 店的数据上，报表看着正常、数字是别家的。
+            if shop_id and store != shop_id:
+                _alias = next((st.get("name") for st in store_list().get("stores", [])
+                               if st.get("id") == shop_id), "")
+                _meta: dict = {}
+                try:
+                    _mf = paths.store_meta_file(shop_id)
+                    if _mf.is_file():
+                        _meta = json.loads(_mf.read_text(encoding="utf-8"))
+                except Exception:  # noqa: BLE001
+                    _meta = {}
+                _real = str(_alias or _meta.get("shop_name") or "").strip()
+                if _real and _real != store_name:
+                    if store_name:
+                        _append_log(f"[run] 弹窗选的是「{store_name}」，浏览器登的是「{_real}」，"
+                                    f"以登录的店铺为准")
+                    store_name = _real
+                if _meta.get("country"):
+                    country = str(_meta.get("country") or country)
+                shop_code = str(_meta.get("shop_code") or shop_code)
+
+            # 一家店一把锁：两家店可以同时算，同一家店不能重复算
+            _lk = _run_lock_for(shop_id or store or "_all")
+            _got_lock = _lk.acquire(blocking=False)
+            if not _got_lock:
+                _lk = None
+                _json(self, {"ok": False,
+                             "error": f"店铺「{store_name or shop_id or '全部'}」正在核算中，请稍候"})
+                return
+
             if not store_name:
                 store_name = country or "未识别店铺"
             country = country or "马来西亚"
 
             # 数据来源：有 shop_id 就读它自己的目录，各店数据不混
             data_dir = paths.store_dir(shop_id)
-            if not data_dir.is_dir() or not any(data_dir.iterdir()):
+            # 要看「有没有真的文件」：目录结构是程序自己建的（订单表/广告表…），
+            # 只看有没有子目录的话，一家还没取过数的店也会被当成有数据，
+            # 然后一路跑到 loader 报 FileNotFoundError，用户只看到一串堆栈。
+            _has_data = False
+            if data_dir.is_dir():
+                try:
+                    _has_data = any(p.is_file() for p in data_dir.rglob("*"))
+                except OSError:
+                    _has_data = False
+            if not _has_data:
                 if shop_id:
                     # 选了店铺却没有数据：直说，别悄悄拿别的数据算。
                     # 旧行为是退回公共目录——多店铺时会把别家的数据算进来，
@@ -1373,6 +1623,21 @@ class Handler(BaseHTTPRequestHandler):
             if not data_dirs:
                 data_dirs = [data_dir]
 
+            # 预检订单表：没有订单就没有核算的必要。
+            # 以前让它一路跑到 loader 抛 FileNotFoundError，子进程还会卡住不退，
+            # 界面只能干等 15 分钟——不如在这里直接说清。
+            try:
+                from src import loader as _ld
+                _has_order = _ld.has_orders_table(data_dir)
+            except Exception:  # noqa: BLE001
+                _has_order = True
+            if not _has_order:
+                _json(self, {"ok": False,
+                             "error": f"店铺「{store_name}」没有订单表，无法核算。"
+                                      f"先在扩展里点一次「立即运行」把订单取回来；"
+                                      f"如果订单一直取不到，多半是该时段没有订单。"})
+                return
+
             # 报表放到该店铺自己的子目录，文件名按设置里的模板生成
             cfg_settings.load()
             out_dir = paths.OUTPUT / re.sub(r'[\\/:*?"<>|]', "_", store_name)
@@ -1401,7 +1666,10 @@ class Handler(BaseHTTPRequestHandler):
                 "--dir", str(data_dirs[0]),
                 # 有店铺就只传店铺：国家由 config/stores.json 决定，
                 # 两处都传容易打架（--country 会覆盖 --store）
-                *(["--store", store] if store else ["--country", country]),
+                # 优先传 shop_id：快照是按店铺目录存的，只传国家时
+                # 子进程不知道去哪找快照，会报「找不到快照（店铺 未指定）」。
+                *(["--store", shop_id or store] if (shop_id or store)
+                  else ["--country", country]),
                 "--out", str(out),
                 "--json",
             ]
@@ -1427,10 +1695,24 @@ class Handler(BaseHTTPRequestHandler):
             env["PYTHONUTF8"] = "1"
             proc = subprocess.run(
                 cmd, cwd=str(ROOT), capture_output=True, env=env,
-                text=True, encoding="utf-8", errors="replace", timeout=900,
+                # 不用 text=True：打包后的子进程在无控制台时按系统编码（GBK）输出，
+                # 统一按 utf-8 解会把中文日志全变成乱码，出错了也读不出原因。
+                timeout=300,
+                # 不弹黑窗口：桥在后台跑，每核算一次冒一个窗口很吓人
+                creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                               if os.name == "nt" else 0),
             )
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
+
+            def _dec(raw: bytes) -> str:
+                for enc in ("utf-8", "gbk"):
+                    try:
+                        return raw.decode(enc)
+                    except UnicodeDecodeError:
+                        continue
+                return raw.decode("utf-8", "replace")
+
+            stdout = _dec(proc.stdout or b"")
+            stderr = _dec(proc.stderr or b"")
 
             summary = None
             for line in reversed(stdout.strip().splitlines()):
@@ -1446,8 +1728,11 @@ class Handler(BaseHTTPRequestHandler):
                 # 检查用到的导出文件有没有太旧的：广告任务可能还没下来，
                 # 这时会静默沿用上一期文件，数字看着正常但其实是错的。
                 stale = []
+                # 文件在哪家店的目录里就在哪查：多店铺时不能统一看公共 inbox，
+                # 否则要么漏报，要么把别家店旧文件的账算到这家头上
+                _src_dir = paths.store_dir(shop_id) if shop_id else INBOX_DIR
                 for label, fname in (summary.get("sources") or {}).items():
-                    f = INBOX_DIR / fname
+                    f = _src_dir / fname
                     try:
                         age_h = (datetime.now().timestamp() - f.stat().st_mtime) / 3600
                     except OSError:
@@ -1457,6 +1742,22 @@ class Handler(BaseHTTPRequestHandler):
                 if stale:
                     summary["stale"] = stale
                     _append_log("[run] 注意：有数据文件超过 24 小时未更新 → " + "；".join(stale))
+
+                # 哪一类表这一轮压根没有：不能悄悄按 0 算。
+                # 广告缺席时净利会明显偏高，报表看着漂亮、实际是错的方向。
+                missing = []
+                for label, cn in (("广告", "广告表"), ("联盟佣金", "联盟佣金表")):
+                    d = _src_dir / cn
+                    try:
+                        has = d.is_dir() and any(p.is_file() for p in d.rglob("*"))
+                    except OSError:
+                        has = False
+                    if not has:
+                        missing.append(label)
+                if missing:
+                    summary["missing"] = missing
+                    _append_log(f"[run] 注意：本轮没有{'、'.join(missing)}数据，"
+                                f"这部分按 0 计，净利偏高，别直接拿去对账")
                 _append_log(
                     f"[run] 完成：GMV {summary.get('gmv')} 净利 {summary.get('net_local')} "
                     f"（人民币 {summary.get('net_cny')}）"
@@ -1503,16 +1804,29 @@ class Handler(BaseHTTPRequestHandler):
                 _json(self, {"ok": True, **summary})
             else:
                 tail = "\n".join((stdout + "\n" + stderr).strip().splitlines()[-12:])
-                _append_log(f"[run] 失败：{tail.splitlines()[-1] if tail else 'unknown'}")
-                _json(self, {"ok": False, "error": tail or "核算失败", "returncode": proc.returncode})
+                # 堆栈对人没用。认得出的情况直接说他能听懂的那句。
+                if "没识别出订单表" in tail or "没有可读的数据目录" in tail:
+                    brief = "没有识别出订单表：先在扩展里取一次订单；如果该时段本来就没订单，换日期再算"
+                elif "没有解析出任何订单行" in tail:
+                    brief = "订单表里没有可用的行（表头不对，或这个区间确实没有订单）"
+                elif "区间内没有可核算的订单" in tail:
+                    brief = "这个日期区间内没有订单，换个区间再试"
+                elif "没有解析出任何商品" in tail:
+                    brief = "没有解析出商品：检查商品 SKU 表是否取到"
+                else:
+                    brief = tail or "核算失败"
+                _append_log(f"[run] 失败：{brief.splitlines()[-1] if brief else 'unknown'}")
+                _json(self, {"ok": False, "error": brief, "returncode": proc.returncode})
         except subprocess.TimeoutExpired:
-            _append_log("[run] 失败：核算超时")
-            _json(self, {"ok": False, "error": "核算超过 15 分钟未完成"})
+            _append_log("[run] 失败：核算超时（5 分钟）")
+            _json(self, {"ok": False, "error": "核算超过 5 分钟没跑完，已中断。"
+                                             "多半是订单表太大或某个文件有问题，可以换成按店铺单独算。"})
         except Exception as e:  # noqa: BLE001
             _append_log(f"[run] 异常：{e}")
             _json(self, {"ok": False, "error": str(e)})
         finally:
-            _RUN_LOCK.release()
+            if _lk is not None:
+                _lk.release()
 
 
     def _post_pending(self):
@@ -1704,8 +2018,36 @@ def _auto_runner() -> None:
             print(f"[自动] 检查出错（忽略）：{e}", flush=True)
 
 
+def _sync_extension_copies() -> None:
+    """把最新的扩展同步到「浏览器实际加载的那一份」。
+
+    为什么会不同步：开发时改的是 `程序目录\\浏览器扩展`，
+    而浏览器里加载的通常是 `release\\净利助手\\浏览器扩展`（当初装的时候点的那份）。
+    两份不同步时，改完代码、点刷新、版本号还是旧的——查半天以为是缓存。
+    这里在启动时对一次版本号，不一致就从程序目录覆盖过去。
+    打包运行没有 release 目录，这段自然不做事。
+    """
+    try:
+        src = paths.EXTENSION
+        dst = ROOT / "release" / "净利助手" / "浏览器扩展"
+        if not dst.is_dir() or dst.resolve() == src.resolve():
+            return
+        v1 = json.loads((src / "manifest.json").read_text(encoding="utf-8")).get("version")
+        v2 = json.loads((dst / "manifest.json").read_text(encoding="utf-8")).get("version")
+        if v1 == v2:
+            return
+        for f in src.iterdir():
+            if f.is_file():
+                shutil.copy2(f, dst / f.name)
+        print(f"[扩展] 已同步到浏览器加载目录：{v2} → {v1}", flush=True)
+        _append_log(f"[扩展] 浏览器加载目录里的扩展已更新：{v2} → {v1}（刷新扩展生效）")
+    except Exception as e:  # noqa: BLE001
+        print(f"[扩展] 同步跳过：{e}", flush=True)
+
+
 def main() -> int:
     _setup_log_file()
+    _sync_extension_copies()
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"本地桥已启动：http://127.0.0.1:{PORT}")

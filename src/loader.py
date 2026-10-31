@@ -1152,6 +1152,19 @@ def _merge_orders(items: list[tuple[Path, list[tuple]]],
     return lines, overlaps, titles
 
 
+def has_orders_table(folder) -> bool:
+    """目录里有没有能当订单表用的文件。
+
+    只做分类、不解析内容——核算前用它拦一句"没订单就别算了"，
+    比让子进程跑到 loader 抛异常、界面干等十几分钟要好。
+    """
+    try:
+        b, _jm, _sk = _scan_folder(Path(folder))
+        return bool(b.get("order"))
+    except Exception:  # noqa: BLE001
+        return True          # 判不出来就别拦，交给正常流程
+
+
 def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
                    usd_to_local: float = 1.0,
                    mapping_file: Optional[Path] = None,

@@ -222,6 +222,13 @@ def _summary_specs(res: CalcResult, fees, ratios, has_alt, enabled,
                 (lambda p, i: (p.net_local - (res.compare.get(p.product_id).net_local
                                            if res.compare.get(p.product_id) is not None else ZERO))),
                 lambda: (t.net_local - (res.compare_total or ZERO)), neg=True)
+
+    # 列的先后由用户在「报表列」里排：enabled 是有序的，照着它排序。
+    # 上面那段 add(...) 的顺序只是默认值；不再在代码里写死，
+    # 否则界面怎么拖、报表都是老样子。
+    if isinstance(enabled, (list, tuple)) and enabled:
+        order = {k: i for i, k in enumerate(enabled)}
+        specs.sort(key=lambda s: order.get(s["key"], len(order)))
     return specs
 
 

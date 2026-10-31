@@ -76,6 +76,17 @@ def _ask(prompt: str, default: str = "") -> str:
     return v or default
 
 
+def _no_window_flags() -> int:
+    """子进程不弹命令行窗口。
+
+    Windows 上只要父进程没有控制台（打包成 windowed exe 就是这种），
+    每起一个 netstat / tasklist / taskkill / 核算子进程，系统都会给它
+    分配一个新控制台——表现就是启动桥的时候"啪啪啪闪好几下黑窗口"。
+    """
+    if os.name != "nt":
+        return 0
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
 def bridge_running() -> bool:
     import json
     import urllib.request
@@ -177,7 +188,8 @@ def _serve_daemon() -> int:
     last = _stamp()
     while True:
         try:
-            proc = subprocess.Popen(cmd, env=env, cwd=str(paths.ROOT))
+            proc = subprocess.Popen(cmd, env=env, cwd=str(paths.ROOT),
+                                    creationflags=_no_window_flags())
         except OSError as e:
             print(f"桥启动失败：{e}（5 秒后重试）")
             time.sleep(5)
@@ -216,6 +228,7 @@ def _serve_daemon() -> int:
 def _is_bridge_proc(pid: str) -> bool:
     try:
         out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"],
+                             creationflags=_no_window_flags(),
                              capture_output=True, text=True, timeout=10,
                              errors="replace").stdout.lower()
     except Exception:  # noqa: BLE001
@@ -282,7 +295,8 @@ def _kill_bridge_on_port(port: int) -> list[str]:
         return killed
     try:
         out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True,
-                             timeout=15, errors="replace").stdout
+                             timeout=15, errors="replace",
+                             creationflags=_no_window_flags()).stdout
     except Exception:  # noqa: BLE001
         return killed
 
@@ -306,6 +320,7 @@ def _kill_bridge_on_port(port: int) -> list[str]:
                 continue
             try:
                 subprocess.run(["taskkill", "/PID", t, "/F", "/T"],
+                               creationflags=_no_window_flags(),
                                capture_output=True, timeout=15)
                 killed.append(t)
             except Exception:  # noqa: BLE001
