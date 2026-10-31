@@ -1083,9 +1083,19 @@ def _scan_folder(folder: Path) -> tuple[dict, list, list]:
     if not folder.is_dir():
         return buckets, json_maps, skipped
 
-    for f in sorted(folder.rglob("*")):
-        if not f.is_file():
-            continue
+    def _mt(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    files = [f for f in folder.rglob("*") if f.is_file()]
+    # 按修改时间从旧到新：同一个订单同时出现在「9/1~9/30」和「9/1~10/28」两份导出里时，
+    # 后合并的那份会把状态盖上去——必须是**更新**的那份说了算（退款/取消要反映出来）。
+    # 以前按文件名排序，恰好把旧的那份排在后面，状态被改回老样子。
+    files.sort(key=lambda p: (_mt(p), str(p)))
+
+    for f in files:
         if f.suffix.lower() not in (".xlsx", ".xls", ".csv", ".txt", ".json"):
             continue
         if f.name.startswith("~$") or f.name.startswith("."):
@@ -1435,6 +1445,28 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
     # ---- 订单：多份合并去重 ----
     orders: list[OrderLine] = []
     if buckets["order"]:
+        # 先按本次报表区间筛文件：区间完全不沾边的老导出不必读进来
+        # （大店一份就 40MB，读一遍十几秒，而且会让"订单怎么到 10/28"更费解）
+        if window:
+            lo, hi = window
+            keep_o, drop_o = [], []
+            for of, orows in buckets["order"]:
+                r = table_range(of, orows)
+                if r and (r[1] < lo or r[0] > hi):
+                    drop_o.append(f"{of.name}（{r[0]}~{r[1]}）")
+                else:
+                    keep_o.append((of, orows))
+            if drop_o and keep_o:
+                buckets["order"] = keep_o
+                issues.append("订单表：跳过了 %d 份与报表区间 %s~%s 不重叠的导出——%s"
+                              % (len(drop_o), lo, hi, "、".join(drop_o[:3])))
+
+        # 记下订单数据实际覆盖的区间：报表页要拿它跟统计区间对照
+        _ors = [table_range(p, r) for p, r in buckets["order"]]
+        _ors = [x for x in _ors if x]
+        if _ors:
+            ranges["订单表"] = (min(x[0] for x in _ors), max(x[1] for x in _ors))
+
         orders, overlaps, titles = _merge_orders(buckets["order"], order_fields)
         names = " + ".join(p.name for p, _ in buckets["order"])
         sources["订单"] = names

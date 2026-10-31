@@ -802,10 +802,28 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
         cost = sum(data.ads.get(p, 0) + data.commissions.get(p, 0) for p in orphans)
         issues.append(f"{len(orphans)} 个商品本期无订单但有广告/佣金支出（合计 {cost:.2f}），已单列，净利为负")
 
+    # 订单表本身是按日期过滤的，不用整段计入——但要看得出「这份文件覆盖到哪」，
+    # 否则面板选了 9/1~9/30、文件夹里躺着一份导到 10/28 的订单，会让人以为算错了。
+    _ranges = getattr(data, "ranges", None) or {}
+    if (dfrom or dto) and data.orders:
+        _miss = len(data.orders) - len(lines)
+        if _miss > 0:
+            lo = dfrom.isoformat() if dfrom else "不限"
+            hi = dto.isoformat() if dto else "不限"
+            orng = _ranges.get("订单表")
+            tail = f"；这份订单表覆盖 {orng[0]}~{orng[1]}" if orng else ""
+            issues.append(
+                f"订单表里有 {_miss:,} 行不在报表区间 {lo}~{hi} 内（订单创建时间），"
+                f"已排除，不计入 GMV / 订单数 / 成本{tail}"
+            )
+
     # 广告 / 佣金是「整段一个数」的表（没有日期列），只能整段计入。
     # 一旦导出区间和报表区间对不上，那段日子的费用就被错算进这一期了——
     # 这件事没法自动修，但必须让人看见，否则净利率会莫名其妙偏低。
-    for label, (a, b) in (getattr(data, "ranges", None) or {}).items():
+    for label in ("广告表", "联盟佣金表"):
+        if label not in _ranges:
+            continue
+        a, b = _ranges[label]
         lo = dfrom.isoformat() if dfrom else ""
         hi = dto.isoformat() if dto else ""
         if not lo and not hi:
