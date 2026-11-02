@@ -26,11 +26,15 @@
 - 传完再跑一次 `verify_release --remote` 作为独立复核
 - 三个版本号必须一致：`浏览器扩展/manifest.json`、`CHANGELOG.md` 首个 `## [vX]`、`do_release.py` 的 TAG
 
-## 数据与目录
-- 数据根 `数据\stores\<店名>\`：`inbox\{订单表,广告表,联盟佣金表,商品映射}`、`商品SKU表`、`链接资料`、`快照`
+## 数据与目录（0.24.4 起子目录全中文）
+- 数据根 `数据\`：`抓包记录 / 导出 / 成本 / 链接映射 / 日志 / 店铺 / 回收站`
+- 每店 `数据\店铺\<店名>\收件箱\{订单表,广告表,联盟佣金表,商品映射}` + `商品SKU表`、`链接资料`、`快照`
 - 店铺身份以 `meta.json` 的 `shop_id` 为准；目录用店名，新店首次识别自动改名
-- 映射主表 `数据\mapping\master.csv`（全局累积，跨进程锁 `.merge.lock`）
-- 成本 `数据\costs\master.csv`；配置 `配置\{rates,formulas,stores,...}.json`
+- 映射主表 `数据\链接映射\master.csv`（全局累积，跨进程锁 `.merge.lock`）
+- 成本 `数据\成本\master.csv`；配置 `配置\{rates,formulas,stores,...}.json`
+- 迁移靠 `paths._cn_sub()`：新名不存在就把英文旧目录改名；两边都在就合并（`_merge_into`）
+- **`.gitignore` 必须忽略整个 `数据/*`**：改名后旧的 `data/` 规则失效，
+  0.24.4 差点把几十 MB 订单表提交进仓库（已改成整目录忽略 + 几个说明文件例外）
 
 ## 多店铺
 - 一家店一个浏览器、各装一份扩展；核算锁按 shop_id 分开，可并行
