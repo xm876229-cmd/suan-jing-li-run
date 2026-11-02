@@ -270,8 +270,35 @@ def _online_now(shop_id: str) -> bool:
     return bool(rec) and (time.time() - float(rec.get("at") or 0)) < _ONLINE_TTL
 
 
+# 「今天取过什么」的短缓存：卡片墙 3 秒刷一次，每家店每次都去翻 meta.json +
+# 台账文件没必要。12 秒的新鲜度对一行提示完全够，取完数之后最多晚一拍显示。
+_CAP_TTL = 12.0
+_CAP_BRIEF: dict[str, tuple[float, dict]] = {}
+_CAP_BRIEF_LOCK = threading.Lock()
+
+
+def _captured_brief(shop_id: str) -> dict:
+    sid = (shop_id or "").strip()
+    if not sid:
+        return {}
+    now = time.time()
+    with _CAP_BRIEF_LOCK:
+        hit = _CAP_BRIEF.get(sid)
+        if hit and now - hit[0] < _CAP_TTL:
+            return hit[1]
+    try:
+        from src import capture as _cap
+        data = _cap.today(sid)
+    except Exception:  # noqa: BLE001
+        data = {}
+    with _CAP_BRIEF_LOCK:
+        _CAP_BRIEF[sid] = (now, data)
+    return data
+
+
 def _enqueue(store: str, rng: dict, *, task: str = "all", auto: bool = False,
-             manual: bool = False, with_formula=None, country: str = "") -> dict:
+             manual: bool = False, with_formula=None, country: str = "",
+             force: bool = False) -> dict:
     """往队列里放一个任务。store 必填——不写 store 就等于"谁都能领"，
     多店同时在线时必然串店，这正是这次要修的东西。
 
@@ -295,6 +322,10 @@ def _enqueue(store: str, rng: dict, *, task: str = "all", auto: bool = False,
     }
     if with_formula is not None:
         job["with_formula"] = bool(with_formula)
+    if force:
+        # 「今天导过也重导」：用户明知道数据变了才会勾这个。
+        # 不勾的时候，扩展看到今天的取数台账就会跳过重复的那几步。
+        job["force"] = True
     with _PENDING_LOCK:
         # 同一家店在队列里最多留一个待领任务，新的顶掉旧的。
         #
@@ -885,6 +916,37 @@ def _make_snapshot(shop_id: str, payload: dict) -> dict:
         return {}
 
 
+def _mark_capture(shop_id: str, table_kind: str, payload: dict, path: Path) -> dict:
+    """上传成功后记一笔「这类表今天取过了」。
+
+    记的是「哪家店、哪个区间、哪一类表、文件在哪」，扩展下次跑同店同区间时
+    凭它跳过重复导出。认不出店或没有区间就不记——宁可多导一次，
+    也不能让别的区间冒用这批数据。
+    """
+    if not shop_id:
+        return {}
+    kind = {"order": "orders", "ads": "ads",
+            "affiliate": "affiliate", "mapping": "sku"}.get((table_kind or "").lower())
+    if not kind:
+        return {}
+    try:
+        from src import auto_run
+        from src import capture as _cap
+
+        rng = auto_run.normalize_range(payload.get("range") or {})
+        a, b = str(rng.get("startDate") or ""), str(rng.get("to") or "")
+        if not a or not b:
+            return {}
+        if _cap.mark(shop_id, kind, a, b, path,
+                     shop_name=str(payload.get("shop_name") or "")):
+            return {"kind": kind, "from": a, "to": b,
+                    "label": _cap.KIND_CN.get(kind, kind)}
+    except Exception as e:  # noqa: BLE001
+        # 记账失败不影响上传，也不能让用户看见异常
+        _append_log(f"[upload] 取数记账失败：{e}")
+    return {}
+
+
 # 请求体上限。普通接口都是几 KB 的 JSON，8MB 已经非常宽松；
 # 上传接口单独放宽（用户在「导入数据」里传整月订单，几十 MB 正常）。
 MAX_BODY = 8 * 1024 * 1024
@@ -1227,6 +1289,19 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/order-headers"):
             from bridge import config_page
             _json(self, config_page.order_headers())
+        elif self.path.startswith("/api/capture"):
+            # 「今天这个区间取过没有」——扩展跑之前问一句，取过的就不再导。
+            # 参数：shop / from / to，缺区间就直说判断不了（照常全部重取）。
+            from src import capture as _cap
+            from urllib.parse import parse_qs, urlparse as _up
+            q = parse_qs(_up(self.path).query)
+            shop = (q.get("shop") or [""])[0].strip()
+            sid = _canon_shop(shop) if shop else ""
+            st = _cap.status(sid, (q.get("from") or [""])[0],
+                            (q.get("to") or [""])[0])
+            if sid:
+                st["today"] = _cap.today(sid)
+            _json(self, st)
         elif self.path.startswith("/api/costs"):
             from bridge import costs_api
             from urllib.parse import parse_qs, urlparse as _up
@@ -1637,11 +1712,16 @@ class Handler(BaseHTTPRequestHandler):
         _append_log(f"{who}文件已保存：{path.name}（{len(data)/1024:.0f} KB）")
         if warning:
             _append_log(f"[warn] {warning}")
+        # 记账：哪家店、哪个区间、哪一类表，今天已经取到了。
+        # 同一天再跑同区间就直接复用这几份，不再去平台重导（见 src/capture.py）。
+        _marked = _mark_capture(shop_id, table_kind, payload, path)
         out = {"ok": True, "path": str(path), "bytes": len(data),
                "shop_id": shop_id, "store_dir": str(target_dir),
                "kind": table_kind or "unknown"}
         if warning:
             out["warning"] = warning
+        if _marked:
+            out["captured"] = _marked
         # 上传即入库：顺手存一份快照，随时能回到这批数据重算。
         # 区间取扩展带上来的（这一轮取的是什么日期范围），
         # 界面上「用哪次数据」列表就能显示每份快照对应哪个区间。
@@ -2081,18 +2161,38 @@ class Handler(BaseHTTPRequestHandler):
             job = _enqueue(sid, rng, auto=bool(payload.get("auto")),
                            manual=not bool(payload.get("auto")),
                            with_formula=payload.get("with_formula"),
-                           country=str(payload.get("country") or ""))
+                           country=str(payload.get("country") or ""),
+                           force=bool(payload.get("force")))
             jobs.append(job["id"])
             is_on = _online_now(sid)
             (sent if is_on else offline).append(sid)
             _append_log(f"[运行] 派给 {_store_dir_names().get(sid, sid)}"
                         f"{'（在线）' if is_on else '（浏览器没开，排队等 30 分钟）'}")
 
+        # 说清楚这次会不会真去平台导：今天同区间已经取全的店，会直接复用，
+        # 几十秒就出结果——不然用户会以为「怎么这么快，是不是没跑」。
+        _reuse_names: list[str] = []
+        if not payload.get("force"):
+            try:
+                from src import capture as _cap
+                _a = str((rng or {}).get("startDate") or "")
+                _b = str((rng or {}).get("to") or "")
+                for sid in ids:
+                    if len(_cap.status(sid, _a, _b).get("reuse") or []) >= 4:
+                        _reuse_names.append(_store_dir_names().get(sid, sid))
+            except Exception:  # noqa: BLE001
+                _reuse_names = []
+
+        _base_note = ("已派发。在线的店几秒内开始；离线的店等浏览器打开后自动开跑。"
+                      if offline else "已派发，在线的店几秒内开始。")
+        if _reuse_names:
+            _base_note += "（" + "、".join(_reuse_names) + " 今天已取过这批数据，会直接复用；要重导勾「强制重新取数」）"
+
         _json(self, {
             "ok": True, "count": len(ids), "jobs": jobs,
             "range": rng, "sent": sent, "offline": offline,
-            "note": ("已派发。在线的店几秒内开始；离线的店等浏览器打开后自动开跑。"
-                     if offline else "已派发，在线的店几秒内开始。"),
+            "reuse": _reuse_names,
+            "note": _base_note,
         })
 
     def _get_live(self):
@@ -2125,6 +2225,9 @@ class Handler(BaseHTTPRequestHandler):
                 "running": rec.get("running") or None,
                 "progress": prog.get(sid) or None,
                 "queued": sum(1 for q in queue if q.get("store") == sid),
+                # 今天这家店已经取到过什么（卡片上那行「今日 09:12 已取数」）。
+                # 有了它，用户点运行前就知道这次会不会真去平台导。
+                "captured": _captured_brief(sid),
             }
         _json(self, {"ok": True, "now": int(now * 1000),
                      "steps": list(RUN_STEPS), "labels": STEP_LABELS,
@@ -2733,6 +2836,21 @@ class Handler(BaseHTTPRequestHandler):
                 country=country, dfrom=dfrom or "", dto=dto or "",
             )
             out = out_dir / f"{base_name}.xlsx"
+            # 重算（改了费率/成本后马上重来）默认覆盖同名报表。
+            # 以前是「同名不覆盖、自动加 (2)」——取数一天只做一次，
+            # 重算却可能做十次，两天下来「报表」页就堆满 (2)(3)(4)，
+            # 还分不清哪份是最后那版。旧文件挪进回收站，改错了能找回上一版。
+            _replace = bool(payload.get("replace"))
+            if out.exists() and _replace:
+                try:
+                    # 带上微秒：一秒内连着重算两次时，同名目标会被判为「已存在」，
+                    # 那就会白白退回另存一份。
+                    _trash = paths.DATA / "回收站" / f"报表_{datetime.now():%Y%m%d_%H%M%S_%f}"
+                    _trash.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(out), str(_trash / out.name))
+                except OSError:
+                    # 文件正在 Excel/WPS 里开着就挪不动，退回另存一份，别让核算失败
+                    _replace = False
             if out.exists():
                 i = 2
                 while out.exists():
@@ -2849,6 +2967,16 @@ class Handler(BaseHTTPRequestHandler):
                 summary["report_name"] = out.name
                 summary["store_name"] = store_name
                 summary["shop_id"] = shop_id
+                if _replace:
+                    summary["replaced"] = True
+                # 这一轮哪几类表沿用了当天早些时候取的那批（没有重新去平台导）。
+                # 不上报表，但界面和日志要看得见——不然「怎么秒出结果」会让人怀疑。
+                _rv = payload.get("reused")
+                _reused = ([str(x) for x in _rv if str(x).strip()][:8]
+                           if isinstance(_rv, list) else [])
+                if _reused:
+                    summary["reused"] = _reused
+                    _append_log("[run] 复用当天已取的数据：" + "、".join(_reused))
 
                 # 记一笔历史，界面画走势用
                 try:

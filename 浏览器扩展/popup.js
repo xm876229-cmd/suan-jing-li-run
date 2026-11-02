@@ -112,6 +112,10 @@ function renderResult(state) {
       (calc.missing && calc.missing.length
         ? `<br><span style="color:#C0392B">⚠ 本轮没有${escapeHtml(calc.missing.join("、"))}数据，` +
           `这部分按 0 计，净利偏高</span>`
+        : "") +
+      (calc.reused && calc.reused.length
+        ? `<br><span class="lbl">复用今日已取</span> ${escapeHtml(calc.reused.join("、"))}`
+          + `<span class="lbl">（同区间同一天，没重新导）</span>`
         : "");
     box.title = calc.file || "";
     return;
@@ -260,7 +264,9 @@ function runTasks(task, btn) {
   // 直接启动先把任务跑完了，可队列里还留着两份 —— 后台每分钟来领一次，
   // 于是同一份任务又跑两遍（实测一轮 41 秒，会被连跑三轮）。
   // 现在只走「先直接启动，失败才入队兜底」这一条路。
-  const force = task === "sku";
+  // 「强制重新取数」：默认关。关着的时候，今天已经导过的同区间数据会直接复用
+  // （改完佣金费率再算一遍就不用再等导出）；要拿最新数据就勾上。
+  const force = !!( $("forceFetch") && $("forceFetch").checked );
   const store = currentStore();
   const countryNow = ($("country").value || "").trim();
 

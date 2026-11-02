@@ -665,6 +665,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .legend{font-size:11.5px;color:var(--text-3);padding:8px 6px 0;display:flex;gap:14px}
   .toast{position:fixed;left:50%;bottom:32px;transform:translateX(-50%) translateY(8px);
     background:#191917;color:#fff;padding:11px 22px;border-radius:10px;font-size:13px;
+    max-width:min(760px,calc(100vw - 80px));line-height:1.55;text-align:center;
     opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;z-index:70}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   pre.log{background:#fbfbf9;border:1px solid var(--line);border-radius:10px;
@@ -766,6 +767,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .sc-foot button:hover{border-color:#ccd4de}
   .sc-foot button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
   .sc-foot button.primary:hover{background:var(--accent-hover)}
+  .sc-foot button.ghost{background:transparent;border-color:var(--line);
+    color:var(--text-2);padding:6px 11px}
+  .sc-foot button.ghost:hover{border-color:var(--accent);color:var(--accent);background:#fff}
   .sc-foot button:disabled{opacity:.5;cursor:default}
   .sc-date{display:flex;gap:4px;align-items:center}
   .sc-date input{font:inherit;font-size:11.5px;padding:4px 6px;width:104px;
@@ -773,6 +777,25 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
   .sc-empty{padding:50px 20px;text-align:center;color:var(--text-3);font-size:13px;
     border:1px dashed var(--line);border-radius:var(--radius);grid-column:1/-1}
+
+  /* 「参数改了，要不要重算」浮条：从底部出来，不挡卡片 */
+  .recalc-bar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);
+    display:none;align-items:center;gap:14px;background:#1b1b19;color:#fff;
+    padding:12px 14px 12px 18px;border-radius:14px;max-width:calc(100vw - 60px);
+    box-shadow:0 18px 44px -18px rgba(0,0,0,.55);z-index:65}
+  .recalc-bar.show{display:flex}
+  .recalc-bar .tx{min-width:0}
+  .recalc-bar .tx b{display:block;font-size:13px;font-weight:600;line-height:1.4}
+  .recalc-bar .tx em{display:block;font-style:normal;font-size:11.5px;color:#b6bcc4;margin-top:2px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:520px}
+  .recalc-bar button{font-size:12.5px;padding:7px 15px;border-radius:9px;white-space:nowrap}
+  .recalc-bar button.primary{background:var(--accent-2);border:1px solid var(--accent-2);
+    color:#03231b;font-weight:600}
+  .recalc-bar button.primary:hover{background:#17c79b}
+  .recalc-bar button.plain{background:transparent;border:1px solid #3f3f3b;color:#cdd2d8}
+  .recalc-bar button.plain:hover{background:#2a2a27}
+  /* 重算条出现时把 toast 顶上去，两个都贴底会叠在一起 */
+  body.has-recalc .toast{bottom:96px}
 
   .sc-date{display:none}
   body.single #home-range-wrap,body.single #home-presets{display:none}
@@ -992,6 +1015,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <button data-k="yesterday">昨天</button>
         </div>
         <div class="grow"></div>
+        <label class="chk" title="不勾：今天同一区间已经取过的表直接复用，改完费率重算只需几十秒。
+勾上：忽略记录，重新去平台导一遍（数据确实变了才勾）">
+          <input type="checkbox" id="force-fetch"> 强制重新取数
+        </label>
         <button class="primary" id="btn-run-picked">运行勾选的</button>
       </div>
 
@@ -1007,7 +1034,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <section class="page" id="view-run" hidden>
       <div class="head"><h1>开始核算</h1>
         <p>用<b>已经在本机上的数据</b>出报表，不会重新去店铺抓数。
-          要重新取数回「驾驶舱」点运行；手上没有数据，去「导入数据」把自己导出的表传上来。</p></div>
+          改了佣金费率、成本表、汇率之后，回这里点一次就行，几十秒出新数字。<br>
+          要去平台重新导一遍，回「驾驶舱」点运行。</p></div>
 
       <div class="card"><h2>① 用哪批数据<span class="hint">不勾就按当前最新的一份</span></h2>
         <div class="body">
@@ -1052,8 +1080,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
                 不带公式：文件小、打开快，数字是最终值。</em></span>
           </label>
           <div class="row" style="margin-top:16px;align-items:center;gap:14px">
-            <button class="primary" id="btn-run" style="padding:10px 26px">开始核算</button>
-            <span class="muted" style="font-size:12.5px">报表会出在「报表」页，同名不覆盖、自动加 (2)</span>
+            <button class="primary" id="btn-run" style="padding:10px 26px">重新计算</button>
+            <span class="muted" style="font-size:12.5px">
+              只算不取数，几秒到几十秒 · 同名报表会被这一版替换，旧版留在「数据\回收站」</span>
           </div>
           <div class="note" id="run-note"></div>
         </div></div>
@@ -1669,6 +1698,17 @@ _TEMPLATE = r"""<!DOCTYPE html>
             会打成一个 zip；也可以在「设置」里定好目录，以后自动放过去</div>
         </div></div></div>
 
+      <div class="card"><h2>改了参数要重算，不用重新取数<span class="hint">最省时间的一条</span></h2>
+        <div class="body tight"><div class="kv">
+          <div>取数 vs 重算</div><div><b>取数</b>是去店铺后台把订单/广告/佣金导下来，慢（大店订单要等平台生成几分钟）；
+            <b>重算</b>只用已经在本机的数据重新出报表，几十秒。</div>
+          <div>什么时候重算</div><div>改了<b>佣金费率、成本表、计算参数、汇率</b>之后——保存完屏幕下方会冒出
+            「重新计算」的按钮，点一下就行；也可以在各店卡片上点<b>「重算」</b>。</div>
+          <div>同一天重复跑</div><div>同一天、<b>同一个起止日期</b>再跑一次，会直接复用当天第一次导的数据（快）。
+            <b>换区间就要重新取数</b>——数据是平台按区间导的，不能拿一段充另一段。</div>
+          <div>数据确实变了</div><div>勾上驾驶舱工具条上的<b>「强制重新取数」</b>，就忽略当天的记录，重新去平台导一遍。</div>
+        </div></div></div>
+
       <div class="card"><h2>常见问题</h2>
         <div class="body tight"><div class="kv">
           <div>自动抓数失败</div><div>扩展面板里有<b>「手动导数据」</b>：
@@ -1729,6 +1769,17 @@ _TEMPLATE = r"""<!DOCTYPE html>
 </div></div>
 <div class="toast" id="toast"></div>
 
+<!-- 参数改完后的重算条。改费率/成本是为了让数字变对，
+     但改完不重算，报表还是旧数字——这一步以前全靠用户自己记得。 -->
+<div class="recalc-bar" id="recalc-bar">
+  <div class="tx">
+    <b id="recalc-title">参数改了，现有报表还是旧数字</b>
+    <em id="recalc-sub"></em>
+  </div>
+  <button class="primary" id="recalc-go">重新计算</button>
+  <button class="plain" id="recalc-x">先不用</button>
+</div>
+
 <script>
 const $ = s => document.querySelector(s);
 const KINDS = [{id:'normal',label:'正常'},{id:'cancelled',label:'已取消'},{id:'refunded',label:'退货退款'},
@@ -1786,6 +1837,9 @@ function sec2text(sec){
  */
 let HOME_RANGE = null;          // 总控用的区间
 const CARD_RANGE = {};          // 单店模式下每张卡自己的区间
+// 刚重算完的结果，按店铺记在内存里画在卡片上。
+// 卡片墙每 3 秒重画一次，写进 DOM 会被冲掉，只能记在这儿。
+const CARD_RECALC = {};
 
 const RP = { el: null, anchor: null, onPick: null, a: null, b: null, y: 0, m: 0, phase: 'a' };
 
@@ -2080,7 +2134,14 @@ function cardHtml(id, s, labels){
     : (s.online ? (anyFail ? '有失败' : (stale ? ('扩展 ' + s.ver + ' 待刷新') : '待命'))
                 : '浏览器没开');
   const realName = s.shop_name && s.shop_name !== s.store_name ? s.shop_name : '';
-  const meta = [realName || ('ID ' + String(id).slice(-8)), s.region].filter(Boolean).join(' · ');
+  // 今天已经取到过数据就别让人白等：卡片上直接写「今日已取 09:12」，
+  // 四个都齐 = 这次点运行会秒过（直接复用），缺的才会上平台导。
+  const cap = s.captured || {};
+  const capTxt = cap.count ? ('今日已取 ' + (cap.last || '') + (cap.count >= 4 ? ' · 全齐' : '')) : '';
+  const meta = [realName || ('ID ' + String(id).slice(-8)), s.region, capTxt].filter(Boolean).join(' · ');
+  // 刚点过「重算」的店，卡片底部直接显示新数字——不用再翻「报表」页确认改费率有没有生效
+  const rc = CARD_RECALC[id];
+  const lastTxt = rc ? ('重算于 ' + rc.hhmm + ' · 净利 ' + fmt2(rc.net)) : lastLine(s);
   const picked = PICKED.has(id);
   return `<div class="sc ${picked ? 'picked' : ''}" data-card="${esc(id)}">
     <div class="sc-head">
@@ -2093,7 +2154,7 @@ function cardHtml(id, s, labels){
     </div>
     <div class="sc-body">${stepsHtml(prog, labels)}</div>
     <div class="sc-foot">
-      <div class="last">${esc(lastLine(s))}</div>
+      <div class="last">${esc(lastTxt)}</div>
       <div class="sc-date">
         <button class="rbtn" data-range="${esc(id)}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -2102,6 +2163,8 @@ function cardHtml(id, s, labels){
           </svg><span>${esc(fmtRange(CARD_RANGE[id]))}</span>
         </button>
       </div>
+      <button class="ghost" data-recalc="${esc(id)}"
+              title="用已经在本机的数据重算，不重新取数。改了佣金费率、成本表之后点这个">重算</button>
       <button data-run="${esc(id)}" class="primary">运行</button>
     </div>
   </div>`;
@@ -2149,11 +2212,36 @@ function renderCards(){
   grid.querySelectorAll('[data-run]').forEach(b => {
     b.onclick = () => {
       const id = b.dataset.run;
+      // 派了新任务，之前那次「重算于 …」的结果就过期了，别再挂在卡片上
+      delete CARD_RECALC[id];
       if(HOME_MODE === 'single'){
         runStores([id], b, cardRange(id) || homeRange());
       }else{
         runStores([id], b, homeRange());
       }
+    };
+  });
+  grid.querySelectorAll('[data-recalc]').forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.recalc;
+      const rg = (HOME_MODE === 'single' ? (cardRange(id) || homeRange()) : homeRange());
+      const old = b.textContent;
+      b.disabled = true;
+      b.textContent = '重算中…';
+      const res = await recalcMany([id], rg, null);
+      b.disabled = false;
+      b.textContent = old;
+      const one = res.find(x => x.ok);
+      if(one){
+        CARD_RECALC[id] = {net: one.net_local,
+                           hhmm: new Date().toTimeString().slice(0, 5)};
+        renderCards();
+        toast('已重算：净利 ' + fmt2(one.net_local)
+              + '（' + (Number(one.net_margin) * 100).toFixed(2) + '%）');
+      }else{
+        toast(String((res[0] || {}).error || '重算失败').slice(0, 70));
+      }
+      loadStatus(); loadTrend();
     };
   });
   if(HOME_MODE === 'single'){
@@ -2222,6 +2310,8 @@ function cardRange(id){
 
 async function runStores(ids, btn, range){
   if(!ids || !ids.length){ toast('先勾选要跑的店铺'); return; }
+  // 勾了「强制重新取数」就不复用今天已取的表，老老实实重导一遍。
+  const force = !!($('#force-fetch') && $('#force-fetch').checked);
   // 单店模式：各区间的店可以不一样，只能一家一家派
   if(HOME_MODE === 'single' && ids.length >= 1 && !range){
     if(btn) btn.disabled = true;
@@ -2231,9 +2321,9 @@ async function runStores(ids, btn, range){
       try{
         const r = await (await fetch('/api/run-stores', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ stores: [id], range: rg })
+          body: JSON.stringify({ stores: [id], range: rg, force })
         })).json();
-        if(r && r.ok) n++;
+        if(r && r.ok){ n++; rememberRun(rg); }
       }catch(e){ /* 单家失败不影响其它 */ }
     }
     if(btn) btn.disabled = false;
@@ -2243,11 +2333,12 @@ async function runStores(ids, btn, range){
   }
   if(btn) btn.disabled = true;
   try{
+    const rg = range || homeRange();
     const r = await (await fetch('/api/run-stores', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ stores: ids, range: range || homeRange() })
+      body: JSON.stringify({ stores: ids, range: rg, force })
     })).json();
-    if(r.ok) toast(r.note || ('已派给 ' + (r.count || ids.length) + ' 家店'));
+    if(r.ok){ toast(r.note || ('已派给 ' + (r.count || ids.length) + ' 家店')); rememberRun(rg); }
     else toast(r.error || '派发失败');
   }catch(e){
     toast(LIVE_DOWN ? '取数服务没连上（可能被关了），去「调试」页点「启动取数服务」'
@@ -2256,6 +2347,105 @@ async function runStores(ids, btn, range){
   if(btn) btn.disabled = false;
   setTimeout(loadLive, 800);
 }
+
+/* ---------------- 重新计算（不重新取数） ----------------
+   取数贵：订单要等平台生成（大店五六分钟），还容易撞风控；
+   核算便宜：数据都在本机，几秒到几十秒。
+   所以「改了佣金费率 / 成本表 / 汇率」这类事，只要重算，不用重取。
+   和「运行」的区别就这一句：运行 = 取数 + 算，重算 = 只算。 */
+let LAST_RUN = null;
+try{ LAST_RUN = JSON.parse(localStorage.getItem('jl_last_run') || 'null'); }catch(e){ LAST_RUN = null; }
+
+function rememberRun(rg){
+  if(!rg || !rg.startDate) return;
+  LAST_RUN = {from: rg.startDate, to: rg.to || '', at: Date.now()};
+  try{ localStorage.setItem('jl_last_run', JSON.stringify(LAST_RUN)); }catch(e){}
+}
+
+/** 重算用哪个区间：优先「上次跑的那个」，没有就本月至今。 */
+function recalcRange(){
+  if(LAST_RUN && LAST_RUN.from) return {startDate: LAST_RUN.from, to: LAST_RUN.to || ''};
+  const [a, b] = rangeOf('month');
+  return {startDate: a, to: b};
+}
+
+function showRecalcBar(why){
+  const bar = $('#recalc-bar'); if(!bar) return;
+  const rg = recalcRange();
+  const n = PICKED.size || (storesCache || []).length;
+  $('#recalc-title').textContent = why || '参数改了，现有报表还是旧数字';
+  $('#recalc-sub').textContent = '按 ' + rg.startDate + ' ~' + (rg.to || ' 今天')
+    + ' 重算' + (n ? (' ' + n + ' 家') : '') + '：用已经在本机的数据，不重新取数';
+  bar.classList.add('show');
+  document.body.classList.add('has-recalc');
+}
+
+function hideRecalcBar(){
+  const bar = $('#recalc-bar'); if(bar) bar.classList.remove('show');
+  document.body.classList.remove('has-recalc');
+}
+
+/** 逐家重算。返回每家 /run 的结果（含 net_local / report_name）。 */
+async function recalcMany(ids, rg, onProgress){
+  const out = [];
+  for(let i = 0; i < ids.length; i++){
+    if(onProgress) onProgress(i, ids.length);
+    try{
+      const r = await fetch('/run', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({store: ids[i],
+                              from: (rg && rg.startDate) || null,
+                              to: (rg && rg.to) || null,
+                              // 没手动动过这个勾就不传，让桥按「设置 → 报表」来，
+                              // 免得重算出来的报表和平时设置的不一样
+                              with_formula: ($('#with-formula') && $('#with-formula').dataset.touched)
+                                ? !!$('#with-formula').checked : undefined,
+                              // 重算覆盖同一份报表，别再堆 (2)(3)——一天改几次费率
+                              // 就能堆出十几份，报表页直接没法看。
+                              replace: true})});
+      out.push(await r.json());
+    }catch(e){ out.push({ok:false, store: ids[i], error: e.message}); }
+  }
+  return out;
+}
+
+/** 一句话说清重算结果，成功失败都给人能看懂的。 */
+function recalcNote(res){
+  const ok = res.filter(x => x.ok), bad = res.filter(x => !x.ok);
+  let t = '';
+  if(ok.length === 1){
+    const o = ok[0];
+    t = '已重算：净利 <b>' + fmt2(o.net_local) + '</b>　净利率 '
+      + (Number(o.net_margin) * 100).toFixed(2) + '%　' + esc(o.report_name || '');
+  }else if(ok.length){
+    t = '已重算 ' + ok.length + ' 家：' + ok.map(o =>
+      esc(o.store_name || '') + ' ' + fmt2(o.net_local)).join('　');
+  }
+  if(bad.length){
+    t += (t ? '<br>' : '') + '<b>失败 ' + bad.length + ' 家</b>　'
+      + esc(String(bad[0].error || '未知原因').slice(0, 120));
+  }
+  return {html: t, ok: ok.length, bad: bad.length};
+}
+
+$('#recalc-x') && ($('#recalc-x').onclick = hideRecalcBar);
+$('#recalc-go') && ($('#recalc-go').onclick = async () => {
+  const btn = $('#recalc-go');
+  const rg = recalcRange();
+  // 驾驶舱上勾了哪几家就重算哪几家；一家没勾 = 全都算一遍
+  let ids = [...PICKED].filter(Boolean);
+  if(!ids.length) ids = (storesCache || []).map(s => s.id).filter(Boolean);
+  if(!ids.length){ toast('还没识别到店铺，先让扩展认一次店'); return; }
+  btn.disabled = true;
+  const res = await recalcMany(ids, rg, (i, n) => {
+    $('#recalc-sub').textContent = '正在重算（' + (i + 1) + '/' + n + '）…';
+  });
+  btn.disabled = false;
+  const s = recalcNote(res);
+  toast((s.ok ? ('重算完成 ' + s.ok + ' 家，报表已更新') : '重算失败')
+        + (s.bad ? ('，' + s.bad + ' 家没算成') : ''));
+  if(s.ok && !s.bad) hideRecalcBar();
+  loadStatus(); loadTrend();
+});
 
 function go(view){
   document.querySelectorAll('.page').forEach(p => p.hidden = p.id !== 'view-' + view);
@@ -2377,6 +2567,17 @@ if(_runRangeBtn) _runRangeBtn.onclick = () => openRangePicker(_runRangeBtn, RUN_
 });
 
 async function loadRunFiles(){
+  // 「带公式」勾选默认跟随「设置 → 报表」，而不是每次进来都是未勾选：
+  // 用户在设置里选了带公式，回核算页却看到没勾，一出报表又是不带的，
+  // 只会觉得「设置没保存」。
+  if($('#with-formula') && !$('#with-formula').dataset.init){
+    $('#with-formula').dataset.init = '1';
+    try{
+      const st = await (await fetch('/api/settings')).json();
+      const wf = ((st.settings || {}).report || {}).with_formula;
+      if(typeof wf === 'boolean') $('#with-formula').checked = wf;
+    }catch(e){ /* 读不到就按未勾选 */ }
+  }
   try{
     const j = await (await fetch('/api/data-files')).json();
     const groups = (j.groups || []).filter(g => g.items.length);
@@ -2822,6 +3023,11 @@ document.querySelectorAll('#snap-chips button').forEach(b => {
   b.onclick = () => pickSnaps(b.dataset.sel);
 });
 
+// 手动动过「带公式」就记一笔：驾驶舱的「重算」据此判断要不要沿用这个选择
+$('#with-formula') && ($('#with-formula').onchange = () => {
+  $('#with-formula').dataset.touched = '1';
+});
+
 $('#btn-run').onclick = async () => {
   const btn = $('#btn-run'), n = $('#run-note');
   const store = $('#store').value;
@@ -2830,6 +3036,7 @@ $('#btn-run').onclick = async () => {
   if(!ids.length){ note(n, '没有可核算的店铺，先去「店铺」页看看识别到没有', 'err'); return; }
   btn.disabled = true;
   const results = [];
+  const runRg = {startDate: RUN_RANGE ? RUN_RANGE.startDate : '', to: RUN_RANGE ? RUN_RANGE.to : ''};
   for(let i = 0; i < ids.length; i++){
     const how = snaps.length > 1 ? ('合并 ' + snaps.length + ' 份快照核算') : (snaps.length ? '按选定快照核算' : '按实时数据核算');
     note(n, how + '（' + (i+1) + '/' + ids.length + '）…', 'ok');
@@ -2839,6 +3046,9 @@ $('#btn-run').onclick = async () => {
                              from: RUN_RANGE ? RUN_RANGE.startDate : null,
                              to: RUN_RANGE ? RUN_RANGE.to : null,
                              snapshots: snaps.length ? snaps : null,
+                             // 这里本来就是「只算不取数」，同名报表直接替换，
+                             // 不然改一次费率就多一份 (2)(3)，报表页没法看
+                             replace: true,
                              with_formula: !!( $('#with-formula') && $('#with-formula').checked )})})
       results.push(await r.json());
     }catch(e){ results.push({ok:false, error:e.message, store: ids[i]}); }
@@ -2851,6 +3061,7 @@ $('#btn-run').onclick = async () => {
   if(bad.length) t += (t ? '<br>' : '') + '<b>失败 ' + bad.length + ' 家</b><br>'
     + bad.map(x => esc(x.store || '') + '：' + esc(String(x.error || '').slice(0, 120))).join('<br>');
   note(n, t, bad.length ? 'err' : 'ok');
+  if(ok.length) rememberRun(runRg);      // 下次「重算」默认还按这一段
   btn.disabled = false;
   loadStatus(); loadTrend();
 };
@@ -4252,6 +4463,9 @@ async function saveConfig(silent){
       const n = Object.keys(payload.by_country || {}).length;
       toast(j.ok ? ('已保存（通用 + ' + n + ' 个国家的单独设置），下次核算立即生效')
                  : ('保存失败：' + j.error));
+      // 参数改了但报表还是旧数字，是这里最容易踩的空档：
+      // 直接给一条「重算」的出路，不用人自己想起来去核算页。
+      if(j.ok) showRecalcBar('计算参数刚改过，现有报表还是旧数字');
     } else if(!j.ok){
       toast('自动保存失败：' + j.error);
     }
@@ -4465,7 +4679,7 @@ $('#btn-cost-save').onclick = async () => {
     const j = await r.json();
     toast(j.ok ? ('已保存 ' + j.count + ' 个编码' + (j.removed ? '，删掉 ' + j.removed + ' 个' : ''))
                : ('保存失败：' + j.error));
-    if(j.ok) loadCosts();
+    if(j.ok){ loadCosts(); showRecalcBar('成本表刚改过，现有报表还是旧数字'); }
   }catch(e){ toast('保存出错：' + e.message); }
   btn.disabled = false;
 };
@@ -4488,6 +4702,7 @@ $('#cost-file').onchange = async ev => {
         $('#cost-note').innerHTML = `<b>导入完成</b>新增 ${j.added} 个编码，更新 ${j.updated} 个，`
           + `没变 ${j.unchanged} 个，现在共 ${j.total} 个。`;
         loadCosts();
+        showRecalcBar('成本表刚导入过，现有报表还是旧数字');
       }else{
         $('#cost-note').className = 'note show err';
         $('#cost-note').textContent = '导入失败：' + j.error;
@@ -4717,7 +4932,7 @@ $('#btn-rate-save').onclick = async () => {
       body: JSON.stringify({countries: out, labels})});
     const j = await r.json();
     toast(j.ok ? '费率已保存（' + j.countries + ' 个国家）' : ('保存失败：' + j.error));
-    if(j.ok) loadRates();
+    if(j.ok){ loadRates(); showRecalcBar('佣金费率刚改过，现有报表还是旧数字'); }
   }catch(e){ toast('出错：' + e.message); }
 };
 

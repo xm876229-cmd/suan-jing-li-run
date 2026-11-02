@@ -206,6 +206,10 @@ def build_app() -> Path:
         # PyInstaller 一般能扫到，这里显式声明，防止它在别人的电脑上变成
         # 「只有这台机器能跑」的玄学问题
         "--hidden-import", "src.fx",
+        # 取数台账（今天取过哪几类表）：桥里是函数内导入的，
+        # 显式声明一份，免得打包版少了这个模块——表现是「复用不生效」，
+        # 只会让人觉得「怎么又重导了一遍」，根本查不到原因
+        "--hidden-import", "src.capture",
         # 桌面窗口：pywebview 的后端是运行时才导入的，
         # PyInstaller 静态扫不到，不显式声明就会打包出一个「点了没反应」的 exe
         "--hidden-import", "src.desktop",

@@ -4127,6 +4127,33 @@ function stopKeepAlive() {
   if (taskKeepAlive) { clearInterval(taskKeepAlive); taskKeepAlive = null; }
 }
 
+// ---------------- 今天取过的数据能不能直接用 ----------------
+// 同一家店、同一个区间，一天里常常算好几次（改了佣金费率、补了成本、
+// 换了汇总口径）。每次重导一遍又慢又容易撞风控，而当天早上导的那批
+// 本来就没变。所以取数前先问本地桥「这个区间今天取过没有」，
+// 取过的这几类表就跳过——文件已经在本机，核算照样用它。
+//
+// 只认「同一天 + 起止日期完全一样 + 文件还在」，跨天自动失效。
+const TASK_CN = { orders: "订单表", sku: "商品SKU表", ads: "广告表", affiliate: "联盟佣金表" };
+
+async function reuseToday(range) {
+  const sid = (CURRENT_SHOP && CURRENT_SHOP.shop_id) || "";
+  const from = (range && range.startDate) || "";
+  const to = (range && (range.to ||
+    (range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : ""))) || "";
+  if (!sid || !from || !to) return {};
+  try {
+    const q = new URLSearchParams({ shop: sid, from, to });
+    const resp = await fetch(`${BRIDGE}/api/capture?${q.toString()}`);
+    const j = await resp.json();
+    if (!j || !j.ok) return {};
+    return j.tables || {};
+  } catch (e) {
+    return {};        // 桥没开、或还是老版本：不复用，照常取
+  }
+}
+
+
 // ---------------- 核算 ----------------
 // 取数完成后让本地桥跑一次核算（Python 子进程），点一下就能看到净利，
 // 不用再切到命令行。核算是同步阻塞的，通常十几秒到一两分钟。
@@ -4153,7 +4180,11 @@ async function calcNow(range, log, opts = {}) {
         auto: !!opts.auto,
         // 计划任务里勾了「带公式 / 不带公式」就按它来；没给就不传，
         // 桥会退回设置页里的开关
-        with_formula: (typeof opts.with_formula === "boolean" ? opts.with_formula : undefined) }),
+        with_formula: (typeof opts.with_formula === "boolean" ? opts.with_formula : undefined),
+        // 哪几类表沿用了当天已取的（桥只用来写日志，不影响算法）
+        reused: opts.reused || [],
+        // 重算：覆盖同一份报表，不又堆一个 (2)(3)
+        replace: !!opts.replace }),
     });
   } catch (e) {
     throw new Error(`连不上本地桥（${e.message}），请确认 scripts\\start_bridge.bat 在跑`);
@@ -5431,6 +5462,25 @@ const TASK_HINT = { orders: "seller", sku: "seller", link: "seller", affiliate: 
 async function runTask(task, range, log, opts = {}) {
   if (task === "all") {
     const out = {};
+    // 先问桥：这个区间今天取过哪几类表。取过的直接跳过，
+    // 省下的时间去平台重导一遍纯属浪费（大店订单光等生成就要几分钟）。
+    let reuse = {};
+    if (!opts.force) {
+      // 先认一遍店：复用是按 shop_id 查的，用旧身份查会把 A 店的记录
+      // 当成 B 店今天的取数，结果 B 店压根没导就用上了。
+      // （平时这步在 orders 任务里做，但 orders 可能被跳过，只能提前认。）
+      try {
+        await identifyShop(await ensureHost("seller", log), log, { force: true });
+      } catch (e) { /* 认不出就按现有身份走，别把取数挡了 */ }
+      reuse = await reuseToday(range);
+      const hit = Object.keys(reuse);
+      if (hit.length) {
+        const at = (Object.values(reuse)[0] || {}).at || "";
+        log(`今天 ${at} 已经取过这批数据（同一区间）：`
+            + hit.map((k) => TASK_CN[k] || k).join("、")
+            + "，这次直接用，不再上平台导");
+      }
+    }
     // 广告排在最后：它只查已完成任务，不会阻塞前面的取数；
     // 剩下几个是算净利必需的，任何一个失败都不影响其余继续跑。
     //
@@ -5438,6 +5488,18 @@ async function runTask(task, range, log, opts = {}) {
     // 重复抓一遍纯属浪费。sku 跑完会自动带出链接资料。
     for (const t of ["orders", "sku", "affiliate", "ads"]) {
       const t0 = Date.now();
+      const hit = reuse[t];
+      if (hit) {
+        // 复用：文件已经在本机，核算照样读它。进度也照报「完成」，
+        // 但明细写清「复用今日 09:12」，别让人以为又导了一遍。
+        out[t] = { reused: true, at: hit.at || "", saved: hit.file || "" };
+        log(`—— ${t}：复用今天 ${hit.at || ""} 已取的那份（同区间同一天）——`);
+        await reportProgress(t, "done", {
+          elapsed: 0,
+          detail: `复用今日 ${hit.at || ""} 的数据`,
+        });
+        continue;
+      }
       await reportProgress(t, "running");
       try {
         log(`—— 开始：${t} ——`);
@@ -5526,7 +5588,18 @@ async function runTaskThenCalc(task, range, log, opts = {}) {
   try {
     await reportProgress("calc", "running");
     const c0 = Date.now();
-    const c = await calcNow(range, log, opts);
+    // 告诉桥这次哪几类表是「沿用当天早些时候取的」，它会写进日志。
+    const reused = [];
+    if (r && !Array.isArray(r) && typeof r === "object") {
+      for (const k of ["orders", "sku", "ads", "affiliate"]) {
+        if (r[k] && r[k].reused) reused.push(TASK_CN[k] || k);
+      }
+    }
+    // 四类表全是复用今天的 —— 那这次实质上就是「重算」：
+    // 数据一字没变，报表却堆出个 (2)(3) 只会让人分不清哪份是最后那版。
+    // 覆盖同一份，旧版进回收站。
+    const allReused = reused.length >= 4;
+    const c = await calcNow(range, log, { ...opts, reused, replace: opts.replace || allReused });
     await reportProgress("calc", "done", { elapsed: (Date.now() - c0) / 1000 });
     await reportProgress("report", "done", {
       elapsed: (Date.now() - c0) / 1000,
@@ -5735,7 +5808,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       startKeepAlive();
       await chrome.storage.local.set({ running: { task: "calc", at: Date.now() } });
       try {
-        const j = await calcNow(msg.range || {}, log, { country: msg.country, store: msg.store });
+        const j = await calcNow(msg.range || {}, log, {
+          country: msg.country, store: msg.store, replace: true });
         await chrome.storage.local.set({ lastResult: { task: "calc", ok: true, at: Date.now() } });
         finish({ ok: true, started: true, done: true, result: j });
       } catch (e) {
