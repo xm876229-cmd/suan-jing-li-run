@@ -676,6 +676,15 @@ def store_list() -> dict:
             st["auto"] = meta.is_file()
         except Exception:  # noqa: BLE001
             pass
+        # 把「店铺后台里真实的名字」带上：用户可能把目录改成了中文别名
+        # （比如 马来一号店），光看别名认不出是哪家店。
+        if not st.get("shop_name"):
+            try:
+                sid = str(st.get("id") or st.get("shop_id") or "")
+                m = json.loads((paths.store_root(sid) / "meta.json").read_text(encoding="utf-8"))
+                st["shop_name"] = str(m.get("shop_name") or "")
+            except Exception:  # noqa: BLE001
+                st["shop_name"] = ""
 
     default = ""
     try:
@@ -1781,6 +1790,10 @@ class Handler(BaseHTTPRequestHandler):
             out[sid] = {
                 "shop_id": sid,
                 "store_name": nm,
+                # 扩展心跳时报上来的「店铺后台里真实的名字」。
+                # 用户可能把目录改成中文别名，卡片上两个都显示，才认得出是哪家。
+                "shop_name": rec.get("shop_name") or "",
+                "region": rec.get("region") or "",
                 "online": bool(rec) and age < _ONLINE_TTL,
                 "last_beat": int(rec.get("at") or 0),
                 "ver": rec.get("ver") or "",

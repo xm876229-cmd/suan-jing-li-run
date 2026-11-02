@@ -554,6 +554,96 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .dropzone.over{border-color:var(--accent);background:var(--accent-soft,#f0f7f5);
     box-shadow:0 0 0 3px rgba(15,110,86,.08)}
   .dropzone b{font-size:13.5px}
+
+  /* ---------- 驾驶舱（首页） ---------- */
+  .nav .grp{margin:14px 18px 6px;font-size:11px;letter-spacing:.06em;
+    color:var(--text-3);text-transform:uppercase}
+  .nav .grp:first-of-type{margin-top:4px}
+
+  .bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:12px 14px;margin-bottom:14px}
+  .bar .sep{width:1px;height:22px;background:var(--line)}
+  .bar .grow{flex:1}
+  .bar label.chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;
+    color:var(--text-2);cursor:pointer;user-select:none}
+  .bar label.chk input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+  .bar input[type=date]{font:inherit;font-size:13px;padding:6px 9px;
+    border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}
+  .bar .inline{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text-2)}
+
+  .seg{display:inline-flex;background:var(--line-soft);border-radius:9px;padding:3px;gap:2px}
+  .seg button{border:0;background:transparent;color:var(--text-2);font:inherit;font-size:13px;
+    padding:5px 13px;border-radius:7px;cursor:pointer;transition:background .12s,color .12s}
+  .seg button.on{background:var(--panel);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.06)}
+
+  .store-grid{display:grid;gap:14px;
+    grid-template-columns:repeat(auto-fill,minmax(330px,1fr));margin-bottom:18px}
+  .sc{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:0;overflow:hidden;display:flex;flex-direction:column;
+    transition:border-color .12s,box-shadow .12s}
+  .sc:hover{border-color:#d8d6cc;box-shadow:0 2px 10px rgba(25,25,23,.05)}
+  .sc.picked{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+  .sc.fail{border-color:#e2b6a6;background:#fffdfc}
+  .sc-head{display:flex;align-items:flex-start;gap:9px;padding:13px 14px 10px}
+  .sc-head input[type=checkbox]{margin-top:3px;width:15px;height:15px;
+    accent-color:var(--accent);cursor:pointer;flex:none}
+  .sc-title{min-width:0;flex:1}
+  .sc-title .n{font-size:14.5px;font-weight:500;line-height:1.3;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sc-title .m{font-size:12px;color:var(--text-3);margin-top:2px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .dot{width:7px;height:7px;border-radius:50%;flex:none;display:inline-block}
+  .dot.on{background:#1d9e75}
+  .dot.off{background:#c4c2b8}
+  .dot.run{background:#378add;animation:pulse 1.4s ease-in-out infinite}
+  .dot.warn{background:#e0a03a}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .sc-state{font-size:12px;color:var(--text-3);display:inline-flex;align-items:center;
+    gap:5px;white-space:nowrap;padding-top:2px}
+
+  .sc-body{padding:0 14px 12px;flex:1}
+  .step{display:flex;align-items:center;gap:8px;font-size:12.5px;line-height:2.05;
+    color:var(--text-3)}
+  .step .ic{width:14px;height:14px;flex:none;display:inline-flex;
+    align-items:center;justify-content:center}
+  .step .nm{flex:none;width:96px;color:var(--text-3)}
+  .step .dt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .step .tm{flex:none;font-variant-numeric:tabular-nums;color:var(--text-3)}
+  .step.done .nm,.step.done .tm{color:var(--text-2)}
+  .step.done .ic{color:#1d9e75}
+  .step.run .nm{color:var(--accent);font-weight:500}
+  .step.run .dt{color:var(--accent)}
+  .step.fail .nm,.step.fail .dt{color:#b4462a}
+  .step.fail .ic{color:#b4462a}
+
+  .sc-foot{display:flex;align-items:center;gap:8px;padding:10px 14px 12px;
+    border-top:1px solid var(--line-soft);background:#fcfcfa}
+  .sc-foot .last{font-size:11.5px;color:var(--text-3);flex:1;min-width:0;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sc-foot button{font:inherit;font-size:12.5px;padding:6px 14px;border-radius:8px;
+    border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer}
+  .sc-foot button:hover{border-color:#d8d6cc}
+  .sc-foot button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .sc-foot button.primary:hover{background:var(--accent-hover)}
+  .sc-foot button:disabled{opacity:.5;cursor:default}
+  .sc-date{display:flex;gap:4px;align-items:center}
+  .sc-date input{font:inherit;font-size:11.5px;padding:4px 6px;width:104px;
+    border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--text)}
+
+  .sc-empty{padding:50px 20px;text-align:center;color:var(--text-3);font-size:13px;
+    border:1px dashed var(--line);border-radius:var(--radius);grid-column:1/-1}
+
+  .sc-date{display:none}
+  body.single #home-range-wrap,body.single #home-presets{display:none}
+  /* 单店模式：卡片上要放两个日期 + 按钮，一行塞不下，会挤成一团。
+     让日期独占一行、按钮另起一行，跟「上次」那行不再抢空间。 */
+  body.single .sc-foot{flex-wrap:wrap;gap:6px}
+  body.single .sc-foot .last{display:none}
+  body.single .sc-date{display:flex;width:100%}
+  body.single .sc-date input{flex:1;width:auto;min-width:0}
+  body.single .sc-foot button{width:100%}
+
 </style>
 </head>
 <body>
@@ -570,55 +660,57 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div><div class="name">净利助手</div><div class="sub">TikTok 店铺</div></div>
     </div>
     <nav class="nav" id="nav">
+<div class="grp">运营</div>
       <a href="#/overview" data-view="overview">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <rect x="2" y="2" width="5" height="5" rx="1.2"/><rect x="9" y="2" width="5" height="5" rx="1.2"/>
           <rect x="2" y="9" width="5" height="5" rx="1.2"/><rect x="9" y="9" width="5" height="5" rx="1.2"/>
-        </svg><span>总览</span></a>
+        </svg><span>驾驶舱</span></a>
       <a href="#/run" data-view="run">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <circle cx="8" cy="8" r="6"/><path d="M6.6 5.6l4 2.4-4 2.4z" stroke-linejoin="round"/>
         </svg><span>开始核算</span></a>
-      <a href="#/import" data-view="import">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <path d="M8 2.6v7.2M5.2 7l2.8 2.8L10.8 7" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M2.8 11.2v1.4a1.6 1.6 0 001.6 1.6h7.2a1.6 1.6 0 001.6-1.6v-1.4" stroke-linecap="round"/>
-        </svg><span>导入数据</span></a>
       <a href="#/reports" data-view="reports">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <path d="M4 2h5l3 3v9a1 1 0 01-1 1H4a1 1 0 01-1-1V3a1 1 0 011-1z" stroke-linejoin="round"/>
           <path d="M9 2v3.5h3.5M5.5 8.5h5M5.5 11h3.5" stroke-linecap="round"/>
         </svg><span>报表</span></a>
+<div class="grp">数据</div>
+      <a href="#/import" data-view="import">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M8 2.6v7.2M5.2 7l2.8 2.8L10.8 7" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M2.8 11.2v1.4a1.6 1.6 0 001.6 1.6h7.2a1.6 1.6 0 001.6-1.6v-1.4" stroke-linecap="round"/>
+        </svg><span>导入数据</span></a>
       <a href="#/stores" data-view="stores">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <path d="M2.5 6.5V13a1 1 0 001 1h9a1 1 0 001-1V6.5" stroke-linejoin="round"/>
           <path d="M2 6.5l1.4-3.2a1 1 0 01.9-.6h7.4a1 1 0 01.9.6L14 6.5" stroke-linejoin="round"/>
           <path d="M6 14v-3.5h4V14" stroke-linejoin="round"/>
         </svg><span>店铺</span></a>
-      <div class="gap"></div>
       <a href="#/costs" data-view="costs">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <path d="M2.5 4.2L8 2l5.5 2.2v7.6L8 14l-5.5-2.2z" stroke-linejoin="round"/>
           <path d="M2.5 4.2L8 6.5l5.5-2.3M8 6.5V14" stroke-linejoin="round"/>
         </svg><span>成本表</span></a>
+<div class="grp">设置</div>
+      <a href="#/params" data-view="params">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M2 4.5h12M2 11.5h12" stroke-linecap="round"/>
+          <circle cx="6" cy="4.5" r="1.8" fill="var(--panel)"/><circle cx="10.5" cy="11.5" r="1.8" fill="var(--panel)"/>
+        </svg><span>计算参数</span></a>
       <a href="#/rates" data-view="rates">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <circle cx="8" cy="8" r="6"/>
           <path d="M8 4.6v7M9.8 6.2c0-.8-.8-1.2-1.8-1.2s-1.7.5-1.7 1.2c0 1.8 3.5.9 3.5 2.7 0 .8-.8 1.2-1.8 1.2s-1.8-.4-1.8-1.2"
                 stroke-linecap="round"/>
         </svg><span>费率</span></a>
-      <a href="#/params" data-view="params">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <path d="M2 4.5h12M2 11.5h12" stroke-linecap="round"/>
-          <circle cx="6" cy="4.5" r="1.8" fill="var(--panel)"/><circle cx="10.5" cy="11.5" r="1.8" fill="var(--panel)"/>
-        </svg><span>计算参数</span></a>
-
       <a href="#/settings" data-view="settings">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <circle cx="8" cy="8" r="2.2"/>
           <path d="M8 1.8v1.6M8 12.6v1.6M14.2 8h-1.6M3.4 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7L3.6 3.6"
                 stroke-linecap="round"/>
         </svg><span>设置</span></a>
+      <div class="gap"></div>
       <a href="#/help" data-view="help">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
           <circle cx="8" cy="8" r="6.2"/>
@@ -638,23 +730,48 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
   <main class="main">
     <section class="page" id="view-overview">
-      <div class="head"><h1>总览</h1>
-        <p>数据拿没拿到、上次算出多少、接下来该做什么，都在这。</p></div>
+      <div class="head"><h1>驾驶舱</h1>
+        <p>每家店一张卡。浏览器开着的店几秒内开工；没开的先排队，等它打开自动跑。</p></div>
+
+      <div class="bar">
+        <div class="seg" id="home-mode">
+          <button data-mode="total" class="on">总控</button>
+          <button data-mode="single">单店</button>
+        </div>
+        <div class="sep"></div>
+        <label class="chk"><input type="checkbox" id="pick-all"> 全选</label>
+        <span class="muted" id="pick-count" style="font-size:12.5px">已选 0 家</span>
+        <div class="sep"></div>
+        <div class="inline" id="home-range-wrap">
+          <span style="color:var(--text-3)">区间</span>
+          <input type="date" id="home-from">
+          <span style="color:var(--text-3)">~</span>
+          <input type="date" id="home-to">
+        </div>
+        <div class="chips tight" id="home-presets">
+          <button data-k="last_month">上月</button>
+          <button data-k="month">本月至今</button>
+          <button data-k="last7">近 7 天</button>
+          <button data-k="yesterday">昨天</button>
+        </div>
+        <div class="grow"></div>
+        <button class="primary" id="btn-run-picked">运行勾选的</button>
+      </div>
+
+      <div class="store-grid" id="store-grid">
+        <div class="sc-empty">正在读取店铺…</div>
+      </div>
+
       <div class="stats" id="stats"></div>
-      <div class="card"><h2>下一步做什么</h2><div class="body"><div class="row">
-        <button class="primary" onclick="go('run')">开始核算</button>
-        <button onclick="go('stores')">管理店铺</button>
-        <button onclick="go('params')">调整计算口径</button>
-        <button onclick="go('reports')">查看报表</button>
-      </div></div></div>
       <div class="card"><h2>最近的净利走势<span class="hint" id="trend-hint"></span></h2>
         <div class="body" id="trend"><div class="empty">还没有核算记录</div></div></div>
     </section>
 
     <section class="page" id="view-run" hidden>
       <div class="head"><h1>开始核算</h1>
-        <p>用已经下载到本机的订单数据出报表。选好店铺和日期，点一下就行。
-           没有自动取到数据？去左栏<b>「导入数据」</b>传你自己导出的表。</p></div>
+        <p><b>这一页只重算，不取数</b>——用已经下载到本机的数据出报表。
+           要重新从店铺抓数据，回<b>「驾驶舱」</b>点运行。
+           手上没有数据？去<b>「导入数据」</b>传你自己导出的表，算法完全一样。</p></div>
       <div class="card"><h2>核算范围</h2><div class="body">
         <div class="chips" id="chips">
           <button data-k="month">本月</button><button data-k="lastmonth">上月</button>
@@ -1357,6 +1474,261 @@ function rateCn(k){
   return (rateLabels && rateLabels[k]) || (rateCnServer && rateCnServer[k]) || RATE_LABELS[k] || k;
 }
 
+
+/* ---------------- 驾驶舱 ---------------- */
+let LIVE = null, LIVE_T = null, PICKED = new Set(), HOME_MODE = 'total';
+const STEP_KEYS = ['sku', 'orders', 'ads', 'affiliate', 'calc', 'report'];
+
+function pad2(n){ return String(n).padStart(2, '0'); }
+function dstr(d){ return d.getFullYear() + '-' + pad2(d.getMonth()+1) + '-' + pad2(d.getDate()); }
+
+function sec2text(sec){
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return sec + ' 秒';
+  const m = Math.floor(sec / 60), s = sec % 60;
+  if (m < 60) return m + ' 分' + (s ? ' ' + pad2(s) + ' 秒' : '');
+  return Math.floor(m/60) + ' 时' + (m%60) + ' 分';
+}
+
+/** 区间预设：算出具体日期填进输入框，派任务时传具体日期，扩展不用懂规则 */
+function rangeOf(kind){
+  const now = new Date(), t = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const y = new Date(t); y.setDate(t.getDate() - 1);
+  if (kind === 'yesterday') return [dstr(y), dstr(y)];
+  if (kind === 'last7'){
+    const s0 = new Date(y); s0.setDate(y.getDate() - 6);
+    return [dstr(s0), dstr(y)];
+  }
+  if (kind === 'month') return [dstr(new Date(t.getFullYear(), t.getMonth(), 1)), dstr(t)];
+  const first = new Date(t.getFullYear(), t.getMonth() - 1, 1);
+  const last = new Date(t.getFullYear(), t.getMonth(), 0);
+  return [dstr(first), dstr(last)];
+}
+
+function homeRange(){
+  const f = ($('#home-from') || {}).value, t = ($('#home-to') || {}).value;
+  if (f && t) return { startDate: f, to: t };
+  const [a, b] = rangeOf('last_month');
+  return { startDate: a, to: b };
+}
+
+function setHomeRange(kind){
+  const [a, b] = rangeOf(kind);
+  $('#home-from').value = a; $('#home-to').value = b;
+}
+
+async function loadLive(){
+  try{
+    const r = await fetch('/api/live');
+    LIVE = await r.json();
+  }catch(e){ LIVE = null; }
+  renderCards();
+}
+
+function startLive(){
+  stopLive();
+  loadLive();
+  LIVE_T = setInterval(() => { if(!document.hidden) loadLive(); }, 3000);
+}
+function stopLive(){ if(LIVE_T){ clearInterval(LIVE_T); LIVE_T = null; } }
+
+function updatePickCount(){
+  const el = $('#pick-count');
+  if(el) el.textContent = `已选 ${PICKED.size} 家`;
+  const all = $('#pick-all');
+  if(all){
+    const total = LIVE && LIVE.stores ? Object.keys(LIVE.stores).length : 0;
+    all.checked = total > 0 && PICKED.size === total;
+    all.indeterminate = PICKED.size > 0 && PICKED.size < total;
+  }
+}
+
+function stepIcon(state, isRun){
+  if(isRun) return '<span style="color:#378add">◐</span>';
+  if(state === 'done') return '<span style="color:#1d9e75">✓</span>';
+  if(state === 'fail') return '<span style="color:#b4462a">✕</span>';
+  return '<span style="color:#c9c7bd">○</span>';
+}
+
+function stepsHtml(prog, labels){
+  const steps = (prog && prog.steps) || {};
+  const cur = (prog && prog.current) || '';
+  return STEP_KEYS.map(k => {
+    const one = steps[k] || {};
+    const isRun = cur === k;
+    const cls = isRun ? 'run' : (one.state || '');
+    let detail = one.detail || one.error || '';
+    if(isRun && !detail) detail = '正在跑…';
+    let tm = '';
+    if(one.elapsed) tm = sec2text(one.elapsed);
+    else if(isRun && one.at) tm = '已等 ' + sec2text(Date.now()/1000 - one.at);
+    return `<div class="step ${cls}">
+      <span class="ic">${stepIcon(one.state, isRun)}</span>
+      <span class="nm">${esc(labels[k] || k)}</span>
+      <span class="dt">${esc(detail)}</span>
+      <span class="tm">${esc(tm)}</span></div>`;
+  }).join('');
+}
+
+function lastLine(s){
+  const p = s.progress || {};
+  if(p.finished) return (p.ok === false ? '上次失败' : '上次成功') + ' · ' +
+    new Date(p.finished * 1000).toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
+  if(p.current) return '正在跑…';
+  if(!s.online) return '浏览器没开';
+  return '还没跑过';
+}
+
+function cardHtml(id, s, labels){
+  const prog = s.progress || {};
+  const cur = prog.current || '';
+  const anyFail = Object.values(prog.steps || {}).some(x => x.state === 'fail');
+  const dot = cur ? 'run' : (s.online ? (anyFail ? 'warn' : 'on') : 'off');
+  const stateTxt = cur ? '运行中' : (s.online ? (anyFail ? '有失败' : '待命') : '浏览器没开');
+  const realName = s.shop_name && s.shop_name !== s.store_name ? s.shop_name : '';
+  const meta = [realName || ('ID ' + String(id).slice(-8)), s.region].filter(Boolean).join(' · ');
+  const picked = PICKED.has(id);
+  return `<div class="sc ${picked ? 'picked' : ''}" data-card="${esc(id)}">
+    <div class="sc-head">
+      <input type="checkbox" data-pick="${esc(id)}" ${picked ? 'checked' : ''}>
+      <div class="sc-title">
+        <div class="n">${esc(s.store_name || id)}</div>
+        <div class="m">${esc(meta)}</div>
+      </div>
+      <span class="sc-state"><i class="dot ${dot}"></i>${esc(stateTxt)}</span>
+    </div>
+    <div class="sc-body">${stepsHtml(prog, labels)}</div>
+    <div class="sc-foot">
+      <div class="last">${esc(lastLine(s))}</div>
+      <div class="sc-date">
+        <input type="date" data-d1="${esc(id)}"><span style="color:var(--text-3)">~</span>
+        <input type="date" data-d2="${esc(id)}">
+      </div>
+      <button data-run="${esc(id)}" class="primary">运行</button>
+    </div>
+  </div>`;
+}
+
+function renderCards(){
+  const grid = $('#store-grid');
+  if(!grid) return;
+  const j = LIVE;
+  if(!j || !j.stores || !Object.keys(j.stores).length){
+    grid.innerHTML = '<div class="sc-empty">还没识别到店铺。<br>在浏览器里打开店铺后台，扩展会自动认出是哪家店。</div>';
+    updatePickCount();
+    return;
+  }
+  const labels = j.labels || {};
+  const ids = (j.order && j.order.length) ? j.order : Object.keys(j.stores);
+  grid.innerHTML = ids.map(id => cardHtml(id, j.stores[id] || {}, labels)).join('');
+
+  grid.querySelectorAll('[data-pick]').forEach(cb => {
+    cb.onchange = () => {
+      const id = cb.dataset.pick;
+      if(cb.checked) PICKED.add(id); else PICKED.delete(id);
+      const card = cb.closest('.sc');
+      if(card) card.classList.toggle('picked', cb.checked);
+      updatePickCount();
+    };
+  });
+  grid.querySelectorAll('[data-run]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.run;
+      if(HOME_MODE === 'single'){
+        runStores([id], b, cardRange(id) || homeRange());
+      }else{
+        runStores([id], b, homeRange());
+      }
+    };
+  });
+  if(HOME_MODE === 'single'){
+    const [a, b] = rangeOf('last_month');
+    grid.querySelectorAll('[data-d1]').forEach(el => { if(!el.value) el.value = a; });
+    grid.querySelectorAll('[data-d2]').forEach(el => { if(!el.value) el.value = b; });
+  }
+  updatePickCount();
+}
+
+let HOME_INIT = false;
+
+function initHome(){
+  if(!HOME_INIT){
+    HOME_INIT = true;
+    setHomeRange('last_month');
+    document.querySelectorAll('#home-presets button').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('#home-presets button').forEach(x => x.classList.remove('on'));
+        btn.classList.add('on');
+        setHomeRange(btn.dataset.k);
+      };
+    });
+    document.querySelectorAll('#home-mode button').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('#home-mode button').forEach(x => x.classList.remove('on'));
+        btn.classList.add('on');
+        HOME_MODE = btn.dataset.mode;
+        document.body.classList.toggle('single', HOME_MODE === 'single');
+        renderCards();
+      };
+    });
+    const all = $('#pick-all');
+    if(all) all.onchange = (e) => {
+      const ids = (LIVE && LIVE.stores) ? Object.keys(LIVE.stores) : [];
+      PICKED = e.target.checked ? new Set(ids) : new Set();
+      renderCards();
+    };
+    const runBtn = $('#btn-run-picked');
+    if(runBtn) runBtn.onclick = (e) => runStores([...PICKED], e.currentTarget, homeRange());
+  }
+  loadStatus();
+  loadTrend();
+  startLive();
+}
+
+/** 某张卡片上自己选的日期（单店模式用） */
+function cardRange(id){
+  const grid = $('#store-grid');
+  if(!grid) return null;
+  const d1 = grid.querySelector(`[data-d1="${id}"]`);
+  const d2 = grid.querySelector(`[data-d2="${id}"]`);
+  if(!d1 || !d2 || !d1.value || !d2.value) return null;
+  return { startDate: d1.value, to: d2.value };
+}
+
+async function runStores(ids, btn, range){
+  if(!ids || !ids.length){ toast('先勾选要跑的店铺'); return; }
+  // 单店模式：各区间的店可以不一样，只能一家一家派
+  if(HOME_MODE === 'single' && ids.length >= 1 && !range){
+    if(btn) btn.disabled = true;
+    let n = 0;
+    for(const id of ids){
+      const rg = cardRange(id) || homeRange();
+      try{
+        const r = await (await fetch('/api/run-stores', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ stores: [id], range: rg })
+        })).json();
+        if(r && r.ok) n++;
+      }catch(e){ /* 单家失败不影响其它 */ }
+    }
+    if(btn) btn.disabled = false;
+    toast(n ? `已按各店自己的区间派发 ${n} 家` : '派发失败');
+    setTimeout(loadLive, 800);
+    return;
+  }
+  if(btn) btn.disabled = true;
+  try{
+    const r = await (await fetch('/api/run-stores', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ stores: ids, range: range || homeRange() })
+    })).json();
+    if(r.ok) toast(r.note || ('已派给 ' + (r.count || ids.length) + ' 家店'));
+    else toast(r.error || '派发失败');
+  }catch(e){ toast('派发失败：' + e.message); }
+  if(btn) btn.disabled = false;
+  setTimeout(loadLive, 800);
+}
+
 function go(view){
   document.querySelectorAll('.page').forEach(p => p.hidden = p.id !== 'view-' + view);
   document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.view === view));
@@ -1369,7 +1741,7 @@ function go(view){
   if(view === 'stores') loadStores();
   if(view === 'run'){ loadRunFiles(); loadSnapshots(); }
   if(view === 'import'){ loadImportOptions(); loadImportFiles(); }
-  if(view === 'overview'){ loadStatus(); loadTrend(); }
+  if(view === 'overview') initHome(); else stopLive();
   if(location.hash !== '#/' + view) location.hash = '#/' + view;
 }
 document.querySelectorAll('#nav a').forEach(a =>
@@ -1469,11 +1841,15 @@ async function loadRunFiles(){
     groups.forEach(g => n += g.items.length);
     $('#run-files-hint').textContent = n + ' 个文件';
     let html = '';
-    const KIND_CN = {orders:'订单', ads:'广告', affiliate:'联盟', mapping:'映射', other:'其他'};
+    // 后端给的 kinds 键已经是中文（订单表 / 广告表 / 联盟佣金表），
+    // 以前这里按英文键去查表，查不到就渲染成 "undefined 1 · undefined 1"。
+    const KIND_CN = {orders:'订单', ads:'广告', affiliate:'联盟', mapping:'映射',
+                     other:'其他', 订单表:'订单', 广告表:'广告', 联盟佣金表:'联盟',
+                     商品映射表:'映射', 链接资料:'链接'};
     groups.forEach(g => {
       const k = g.kinds || {};
-      const kbits = Object.keys(k).filter(x => x !== 'other')
-        .map(x => KIND_CN[x] + ' ' + k[x]).join(' · ');
+      const kbits = Object.keys(k).filter(x => x !== 'other' && x !== '其他')
+        .map(x => (KIND_CN[x] || x) + ' ' + k[x]).join(' · ');
       html += `<div style="padding:13px 20px 6px;font-size:12.5px;color:var(--text-2);background:#fcfcfa;
         border-bottom:1px solid var(--line-soft)">${esc(g.name)}
         <span class="tag gray">${esc(g.country || '')}</span>
@@ -2019,13 +2395,18 @@ async function loadStores(){
       $('#store-list').innerHTML = '<div class="empty"><b>还没识别到店铺</b>在战斧里打开店铺页面，点扩展面板的「立即运行」，它会自动认出来</div>';
       return;
     }
-    let html = '<table><thead><tr><th style="width:210px">名字（可改）</th>'
-      + '<th style="width:170px">店铺 ID</th><th style="width:110px">国家</th>'
-      + '<th style="width:80px">数据</th><th style="width:190px"></th></tr></thead><tbody>';
+    let html = '<table><thead><tr><th style="width:200px">名字（可改）</th>'
+      + '<th style="width:180px">抓到的店名</th>'
+      + '<th style="width:160px">店铺 ID</th><th style="width:100px">国家</th>'
+      + '<th style="width:70px">数据</th><th style="width:180px"></th></tr></thead><tbody>';
     storesCache.forEach(s => {
+      const real = s.shop_name || '';
       html += `<tr>
         <td><input type="text" value="${esc(s.name || '')}" data-sid="${esc(s.id)}"
           style="width:100%;padding:6px 9px;font-size:13px;border:1px solid var(--line);border-radius:8px"></td>
+        <td class="muted" style="font-size:12.5px">${real
+          ? esc(real)
+          : '<span style="color:var(--text-3)">还没抓到</span>'}</td>
         <td class="mono muted" style="font-size:11.5px">${esc(s.id)}</td>
         <td class="muted">${esc(s.country || '—')}${s.auto ? ' <span class="tag">自动</span>' : ''}</td>
         <td class="muted">${s.inbox_count !== undefined ? s.inbox_count + ' 个' : '—'}</td>
