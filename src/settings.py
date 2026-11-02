@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -201,11 +202,25 @@ def copy_to_download_dir(src: Path, dest_dir: str) -> Path | None:
         d.mkdir(parents=True, exist_ok=True)
         target = d / src.name
         if target.exists():
-            stem, suf = target.stem, target.suffix
-            i = 2
-            while target.exists():
-                target = d / f"{stem} ({i}){suf}"
-                i += 1
+            # 同名 = 同一份报表重算了一次（区间、店名都没变）：
+            # 直接覆盖，别在下载目录里堆 (2)(3)(4)——用户找的是「最新那版」。
+            # 先写临时名再换，避免写到一半断电留下半截文件。
+            try:
+                tmp = d / f".{target.name}.tmp"
+                tmp.write_bytes(src.read_bytes())
+                os.replace(tmp, target)
+                return target
+            except OSError:
+                # 目标正被 Excel 打开：退回另存一份，至少这次下载不算失败
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                stem, suf = target.stem, target.suffix
+                i = 2
+                while target.exists():
+                    target = d / f"{stem} ({i}){suf}"
+                    i += 1
         target.write_bytes(src.read_bytes())
         return target
     except OSError:

@@ -36,7 +36,8 @@ if not getattr(sys, "frozen", False):
     if str(_root) not in sys.path:
         sys.path.insert(0, str(_root))
 
-from src import paths  # noqa: E402
+from src import paths
+from src import safeio  # noqa: E402
 
 ROOT = paths.ROOT
 CAPTURE_DIR = paths.CAPTURE
@@ -135,12 +136,20 @@ def _run_calc_cmd(cmd: list[str], timeout: int = 900) -> tuple[bool, str]:
     return True, text
 
 
-def _report_out(store_name: str, dfrom: str, dto: str, suffix: str = "") -> Path:
+def _report_out(store_name: str, dfrom: str, dto: str, suffix: str = "",
+                shop_id: str = "") -> Path:
+    """补算（订单晚到）用的报表路径——跟正常核算一样落在「自动」房间里。
+
+    以前这里写的是 `报表/<店名>/`（老布局）。补算一次就会在房间外多出一个
+    店名文件夹，报表页上看着是「自动」，磁盘上却不在 `报表/自动` 里，
+    迁移也只会在下次启动时跑一遍。
+    """
     # 目录名和文件名都要限长：店名是用户起的，200 字符的店名
     # 在 Windows 上直接抛「文件名或扩展名太长」(WinError 206)，
     # 报表出不来，而那家店的其他功能也跟着废。
     safe = paths._safe_folder(store_name or "未命名店铺", "未命名店铺")
-    out_dir = paths.OUTPUT / safe
+    out_dir = (paths.store_reports_dir(shop_id) if shop_id
+               else paths.report_room_dir("auto") / safe)
     out_dir.mkdir(parents=True, exist_ok=True)
     # 文件名也要洗一遍：店名是用户在后台起的，可能带 / : * 这类字符，
     # 目录洗了、文件名没洗的话，Windows 上直接抛「文件名语法不正确」。
@@ -203,7 +212,7 @@ def _pending_tick() -> None:
         if not _lk.acquire(blocking=False):
             continue
         try:
-            out = _report_out(store_name, dfrom, dto)
+            out = _report_out(store_name, dfrom, dto, shop_id=shop_id)
             _append_log(f"[auto] 订单已到，自动补算：{store_name} {dfrom}~{dto}")
             try:
                 ok, msg = _run_calc_cmd(_calc_cmd(shop_id, str(info.get("country") or ""),
@@ -483,8 +492,23 @@ def _append_log(msg: str) -> None:
             pass
 
 
+# 只有「自己人」才给跨域许可：扩展（chrome-extension://）和本机页面。
+# 以前是 `*`，等于任何网页都能读到桥的返回、也能发 JSON 过来——
+# 打开一个恶意页面就能让本机跑核算、往数据目录传文件。
+_ALLOW_ORIGIN = re.compile(r"^(chrome-extension|moz-extension|safari-web-extension)://[\w.-]+$"
+                           r"|^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$")
+
+
 def _cors(handler: BaseHTTPRequestHandler) -> None:
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    origin = (handler.headers.get("Origin") or "").strip()
+    # 没有 Origin ＝ 同源页面 / 扩展后台直连（带 host 权限时不走 CORS），不用发头
+    if origin and _ALLOW_ORIGIN.match(origin):
+        handler.send_header("Access-Control-Allow-Origin", origin)
+        handler.send_header("Vary", "Origin")
+    elif origin:
+        # 陌生网站：不给许可。浏览器会在预检阶段就拦下，
+        # 连 POST 都不会真的发过来（这才是防住 CSRF 的关键）
+        handler.send_header("Vary", "Origin")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
     handler.send_header("Access-Control-Allow-Headers", "Content-Type")
 
@@ -1320,7 +1344,13 @@ class Handler(BaseHTTPRequestHandler):
             from bridge import settings_api
             from urllib.parse import parse_qs, urlparse as _up
             q = parse_qs(_up(self.path).query)
-            _json(self, settings_api.report_view((q.get("name") or [""])[0]))
+            name = (q.get("name") or [""])[0]
+            rel = (q.get("rel") or [""])[0]
+            # 前端给的 name 可能就是「自动/店名/文件.xlsx」这种相对路径。
+            # 以前只传 name，_find_report 看到带 / 就当成非法名字 → 永远「找不到这个报表」。
+            if not rel and ("/" in name or "\\" in name):
+                rel = name.replace("\\", "/")
+            _json(self, settings_api.report_view(name if not rel else "", rel))
         elif self.path.startswith("/api/trends"):
             from bridge import ui
             _json(self, ui.trends())
@@ -1416,7 +1446,12 @@ class Handler(BaseHTTPRequestHandler):
                 from bridge import settings_api
                 from src import settings as cfg_settings
                 stg = cfg_settings.load().get("report", {})
-                raw_dir = str(payload.get("dir") or stg.get("download_dir") or "").strip()
+                # 空目录时按「哪个房间」退回各自的默认值：
+                # 手动报表不该因为输入框被清空就掉进自动报表的目录里
+                _room = "manual" if str(payload.get("room") or "") == "manual" else "auto"
+                _fallback = (stg.get("manual_download_dir") if _room == "manual"
+                             else stg.get("download_dir")) or ""
+                raw_dir = str(payload.get("dir") or _fallback).strip()
                 target = Path(raw_dir).expanduser() if raw_dir else Path.home() / "Desktop"
                 if not target.is_dir():
                     try:
@@ -1466,8 +1501,16 @@ class Handler(BaseHTTPRequestHandler):
                             continue
                         src = out
                     dst = target / src.name
-                    shutil.copy2(src, dst)
-                    saved.append(str(dst))
+                    # 单份存失败不能拖垮整批：目标被 Excel 占着、选的就是报表自己的
+                    # 目录（同一个文件）都会抛异常，以前整批就 500 了
+                    try:
+                        if src.resolve() == dst.resolve():
+                            saved.append(str(dst))
+                            continue
+                        shutil.copy2(src, dst)
+                        saved.append(str(dst))
+                    except OSError as e:
+                        failed.append(f"{rel}（{e}）")
                 for _d in tmp_dirs:
                     shutil.rmtree(_d, ignore_errors=True)
                 _append_log(f"[报表] 存了 {len(saved)} 份到 {target}")
@@ -1949,7 +1992,7 @@ class Handler(BaseHTTPRequestHandler):
             path = target_dir / f"手动导入-{stamp}-{safe} ({i}){suffix}"
             i += 1
         try:
-            path.write_bytes(data)
+            safeio.write_bytes(path, data, backup=False)
         except OSError as e:
             _json(self, {"ok": False, "error": f"写文件失败：{e}"}, 500)
             return
@@ -2276,13 +2319,23 @@ class Handler(BaseHTTPRequestHandler):
         if not key:
             _json(self, {"ok": False, "error": "缺少店铺"}, 400)
             return
-        _append_log(f"[手动核算] 开始计算 {key} "
-                    f"{payload.get('from') or '全部'}~{payload.get('to') or '全部'}")
-        r = manual_api.run(key,
-                           country=str(payload.get("country") or ""),
-                           dfrom=str(payload.get("from") or ""),
-                           dto=str(payload.get("to") or ""),
-                           with_formula=bool(payload.get("with_formula")))
+        # 同一家店只许算一个：连点两次、或开着两个窗口同时点，
+        # 两个子进程会往同一个文件名里写，报表有可能互相覆盖、数字还对不上。
+        # 用跟自动核算同一套按店锁（key 加 manual_ 前缀，两条线互不阻塞）。
+        _lk = _run_lock_for("manual_" + _canon_shop(key))
+        if not _lk.acquire(blocking=False):
+            _json(self, {"ok": False, "error": "这家店正在计算中，等它算完再点"})
+            return
+        try:
+            _append_log(f"[手动核算] 开始计算 {key} "
+                        f"{payload.get('from') or '全部'}~{payload.get('to') or '全部'}")
+            r = manual_api.run(key,
+                               country=str(payload.get("country") or ""),
+                               dfrom=str(payload.get("from") or ""),
+                               dto=str(payload.get("to") or ""),
+                               with_formula=bool(payload.get("with_formula")))
+        finally:
+            _lk.release()
         if r.get("ok"):
             _append_log(f"[手动核算] 完成：GMV {r.get('gmv')} 净利 {r.get('net_local')}"
                         f" → {r.get('report_name')}")
@@ -2828,6 +2881,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         _lk = None
+        _tmp_out: Path | None = None      # 重算时的临时产物，失败要删掉
         try:
             from src import settings as cfg_settings
 
@@ -3003,23 +3057,21 @@ class Handler(BaseHTTPRequestHandler):
                 store=store_name, shop_id=shop_id, shop_code=shop_code,
                 country=country, dfrom=dfrom or "", dto=dto or "",
             )
-            out = out_dir / f"{base_name}.xlsx"
+            final_out = out_dir / f"{base_name}.xlsx"
             # 重算（改了费率/成本后马上重来）默认覆盖同名报表。
             # 以前是「同名不覆盖、自动加 (2)」——取数一天只做一次，
             # 重算却可能做十次，两天下来「报表」页就堆满 (2)(3)(4)，
-            # 还分不清哪份是最后那版。旧文件挪进回收站，改错了能找回上一版。
+            # 还分不清哪份是最后那版。
+            #
+            # 关键：**先算到临时文件，算成功了才换名**。
+            # 早期版本在开算之前就把旧报表挪进回收站——算失败（表头不对、
+            # 文件被 Excel 占着）时报表页上就凭空少一份，数字还是旧的那版也没了。
             _replace = bool(payload.get("replace"))
-            if out.exists() and _replace:
-                try:
-                    # 带上微秒：一秒内连着重算两次时，同名目标会被判为「已存在」，
-                    # 那就会白白退回另存一份。
-                    _trash = paths.DATA / "回收站" / f"报表_{datetime.now():%Y%m%d_%H%M%S_%f}"
-                    _trash.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(out), str(_trash / out.name))
-                except OSError:
-                    # 文件正在 Excel/WPS 里开着就挪不动，退回另存一份，别让核算失败
-                    _replace = False
-            if out.exists():
+            out = final_out
+            if final_out.exists() and _replace:
+                out = out_dir / f".{base_name}.{os.getpid()}.calc.xlsx"
+                _tmp_out = out
+            elif final_out.exists():
                 i = 2
                 while out.exists():
                     out = out_dir / f"{base_name} ({i}).xlsx"
@@ -3094,6 +3146,11 @@ class Handler(BaseHTTPRequestHandler):
                     break
 
             if proc.returncode == 0 and summary:
+                if out != final_out and out.exists():
+                    out = safeio.swap_report(
+                        out, final_out,
+                        paths.DATA / "回收站" / f"报表_{datetime.now():%Y%m%d_%H%M%S_%f}")
+                    _tmp_out = None
                 # 检查用到的导出文件有没有太旧的：广告任务可能还没下来，
                 # 这时会静默沿用上一期文件，数字看着正常但其实是错的。
                 stale = []
@@ -3213,6 +3270,11 @@ class Handler(BaseHTTPRequestHandler):
             _append_log(f"[run] 异常：{e}")
             _json(self, {"ok": False, "error": str(e)})
         finally:
+            if _tmp_out is not None:
+                try:
+                    _tmp_out.unlink(missing_ok=True)
+                except OSError:
+                    pass
             if _lk is not None:
                 _lk.release()
 
@@ -3267,6 +3329,11 @@ WATCH_FILES = [
     ROOT / "bridge" / "config_page.py",
     ROOT / "bridge" / "costs_api.py",
     ROOT / "bridge" / "settings_api.py",
+    # 新加的模块也要盯：漏了它们，改了代码桥不提示重启，
+    # 「改了没反应」会白白查半天
+    ROOT / "bridge" / "manual_api.py",
+    ROOT / "src" / "capture.py",
+    ROOT / "src" / "safeio.py",
 ]
 
 def _code_stamp() -> tuple:

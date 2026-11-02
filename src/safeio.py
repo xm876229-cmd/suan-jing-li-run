@@ -86,6 +86,45 @@ def write_bytes(path: Path | str, data: bytes, *, backup: bool = True) -> bool:
         raise
 
 
+def swap_report(new: Path | str, final: Path | str, trash_dir: Path | str) -> Path:
+    """用刚算好的 `new` 顶掉正式报表 `final`，旧的挪进 `trash_dir`。
+
+    为什么不在算之前就把旧报表挪走：算到一半失败（表头不对、文件被 Excel 占着）
+    时旧报表已经进了回收站，报表页上就凭空少一份，用户还以为算成功了。
+    先算到临时文件、成功了再换名，失败最多多一个临时文件（调用方删掉）。
+
+    旧文件被占用挪不动时退回「另存一份 (2)」——Windows 上覆盖一个正开着的
+    xlsx 会直接失败，宁可多一份，也不要算完却拿不到结果。
+    返回最终落地的路径。
+    """
+    new, final, trash_dir = Path(new), Path(final), Path(trash_dir)
+    if new == final or not new.exists():
+        return final if final.exists() else new
+    if final.exists():
+        try:
+            trash_dir.mkdir(parents=True, exist_ok=True)
+            dst = trash_dir / final.name
+            if dst.exists():
+                dst = trash_dir / f"{final.stem} ({time.strftime('%H%M%S')}){final.suffix}"
+            shutil.move(str(final), str(dst))
+        except OSError:
+            i = 2
+            alt = final.with_name(f"{final.stem} ({i}){final.suffix}")
+            while alt.exists():
+                i += 1
+                alt = final.with_name(f"{final.stem} ({i}){final.suffix}")
+            try:
+                os.replace(new, alt)
+                return alt
+            except OSError:
+                return new
+    try:
+        os.replace(new, final)
+        return final
+    except OSError:
+        return new
+
+
 def write_text(path: Path | str, text: str, *, encoding: str = "utf-8",
                backup: bool = True) -> bool:
     """原子写文本。CSV 请先用 io.StringIO 拼好再交给这里，别自己 open("w")。"""

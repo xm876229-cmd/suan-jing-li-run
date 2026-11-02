@@ -110,6 +110,17 @@ def check() -> int:
 
 
 def sync(build: bool) -> int:
+    # 打包前先查一遍脚本符号：界面/扩展里「只有调用、没有定义」的函数
+    # 不会让语法检查报错，但运行时会静默失败（v0.24.10 的 fileToB64 就是这样）。
+    # 放在 build 之前：坏了就别打包，省得又发一版带病的出去。
+    try:
+        from scripts import check_ext
+        if check_ext.main() != 0:
+            print("\n脚本符号检查没通过，先修完再打包。")
+            return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"（脚本符号检查跳过：{e}）")
+
     if build:
         print("重打包（exe + 安装包 + 免安装 zip）…")
         r = subprocess.run([sys.executable, "-m", "scripts.build_app"], cwd=str(ROOT))

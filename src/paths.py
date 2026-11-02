@@ -573,8 +573,40 @@ def migrate_report_dirs(root: Path | str | None = None) -> list[str]:
         dirs = [d for d in base.iterdir() if d.is_dir()]
     except OSError:
         return moved
+    # 老的「手动临时 / 手动批次」目录：它们本来就属于手动房间，
+    # 别当成店名搬进「自动」里（曾经会搬成 自动/手动核算/…，看着莫名其妙）
+    manual_root = base / REPORT_ROOMS["manual"]
+    for legacy in ("临时手动", "手动核算"):
+        src_dir = base / legacy
+        if not src_dir.is_dir():
+            continue
+        for f in list(src_dir.rglob("*.xlsx")):
+            try:
+                if legacy == "临时手动":
+                    dst = manual_root / "临时" / f.name
+                else:
+                    rel_parent = f.parent.relative_to(src_dir)
+                    dst = manual_root / rel_parent / f.name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    continue
+                f.replace(dst)
+                moved.append(f"{legacy}/{f.name} → 手动/{dst.parent.name}/")
+            except OSError:
+                continue
+        for sub in sorted(src_dir.rglob("*"), key=lambda x: len(x.parts), reverse=True):
+            if sub.is_dir():
+                try:
+                    sub.rmdir()
+                except OSError:
+                    pass
+        try:
+            src_dir.rmdir()
+        except OSError:
+            pass
+
     for d in dirs:
-        if d.name in rooms or d.name.startswith("_"):
+        if d.name in rooms or d.name.startswith("_") or d.name in ("临时手动", "手动核算"):
             continue
         auto_dst = base / REPORT_ROOMS["auto"] / d.name
         manual_src = d / "手动"

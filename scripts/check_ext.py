@@ -38,6 +38,7 @@ XMLHttpRequest WebSocket Image Audio Option Event CustomEvent
 String.fromCharCode Array.from Object.entries Object.keys Object.assign Object.values
 console.log console.warn console.error console.info JSON.stringify JSON.parse
 resolve reject sendResponse next done cb callback fallback
+confirm prompt alert open close focus blur print
 """.split())
 
 # 常见的数组/字符串方法，出现在链式调用里会误报
@@ -61,43 +62,85 @@ def strip_literals(src: str) -> str:
     """
     src = re.sub(r"`(?:[^`\\]|\\.)*`", '""', src, flags=re.S)     # 模板字符串
     src = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', src)                # 双引号
+    # 正则字面量：/post_(a|b)/i 里的 post_ 不是函数名
+    src = re.sub(r"(?<![\w\)\]])\/(?![\/*])(?:[^\/\\\n]|\\.)+\/[gimsuy]*", '""', src)
     src = re.sub(r"'(?:[^'\\\n]|\\.)*'", '""', src)                # 单引号
     return src
 
 
-def check(path: Path) -> list[str]:
-    if not path.exists():
-        return []
-    src = path.read_text(encoding="utf-8")
+def check_text(src: str) -> list[str]:
+    """检查一段 JS 源码里有没有「只有调用、没有定义」的函数。"""
     code = strip_literals(src)
 
     defined = set(re.findall(r"(?:async\s+)?function\s+(\w+)", src))
+    # 具名函数 / 箭头函数的形参也算「已定义」：
+    # `const bind = (sel, key, cast) => {...}` 里的 cast 是参数，不是漏掉的函数
+    for params in re.findall(r"(?:function[^(]*\(([^)]*)\)|\(([^)]*)\)\s*=>)", code):
+        for part in (params if isinstance(params, str) else "").split(","):
+            nm = part.split("=")[0].strip()
+            if re.fullmatch(r"[A-Za-z_$][\w$]*", nm or ""):
+                defined.add(nm)
+    for grp in re.findall(r"(?:function[^(]*\(([^)]*)\)|\(([^)]*)\)\s*=>)", code):
+        for chunk in grp:
+            for part in chunk.split(","):
+                nm = part.split("=")[0].strip()
+                if re.fullmatch(r"[A-Za-z_$][\w$]*", nm or ""):
+                    defined.add(nm)
     defined |= set(re.findall(r"(?:const|let|var)\s+(\w+)\s*=", src))
     defined |= set(re.findall(r"class\s+(\w+)", src))
     defined |= set(re.findall(r"(\w+)\s*[:=]\s*(?:async\s*)?(?:function)?\s*\(", src))
     # 解构赋值里的变量名
-    for block in re.findall(r"(?:const|let)\s*\{([^}]*)\}", src):
+    for block in re.findall(r"(?:const|let)\s*[\[{]([^}\]]*)[\]}]\s*(?:of|in|\\=)", src):
         for part in block.split(","):
             name = part.split(":")[-1].strip().split("=")[0].strip()
             if re.fullmatch(r"\w+", name or ""):
                 defined.add(name)
 
     called = set(re.findall(r"(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(", code))
-    missing = sorted(
+    return sorted(
         c for c in called
         if c not in defined and c not in BUILTIN and c not in METHODS and len(c) > 3
     )
+
+
+def check(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    return check_text(path.read_text(encoding="utf-8"))
+
+
+def check_ui() -> list[str]:
+    """界面（bridge/ui.py）里那段内嵌 JS 也要查。
+
+    为什么单列：界面是「一大段 HTML 字符串」，删页面时很容易连带删掉
+    别的页面在用的函数（v0.24.10 就这么把 fileToB64 删了，
+    导致「导入数据」和「手动核算」两处都点不动，还没人看得出来）。
+    """
+    try:
+        from bridge import ui as _ui
+        html = _ui.render_html()
+    except Exception as e:  # noqa: BLE001
+        return [f"（界面渲染失败：{e}）"]
+    blocks = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
+    missing = check_text("\n".join(blocks))
+    # 导航里有这个页面，HTML 里却没有对应区块：点进去是空白，
+    # 而且脚本里对它的引用全是空转（v0.24.10 把「导入数据」整页删掉就是这样）
+    views = set(re.findall(r'data-view="([a-z0-9-]+)"', html))
+    pages = set(re.findall(r'id="view-([a-z0-9-]+)"', html))
+    for v in sorted(views - pages):
+        missing.append(f"（导航「{v}」没有对应页面区块 #view-{v}）")
     return missing
 
 
 def main() -> int:
     bad = 0
-    for rel in FILES:
-        missing = check(ROOT / rel)
+    targets = [(rel, check(ROOT / rel)) for rel in FILES]
+    targets.append(("bridge/ui.py（内嵌界面脚本）", check_ui()))
+    for rel, missing in targets:
         if missing:
             bad += 1
             print(f"[缺失] {rel}")
-            for m in missing:
+            for m in missing[:20]:
                 print(f"    {m}(")
         else:
             print(f"[OK]   {rel}")

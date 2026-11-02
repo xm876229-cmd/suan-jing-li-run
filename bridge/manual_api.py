@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -39,6 +40,11 @@ STORE_SUB = "手动导入"                # 店铺目录下手动数据的位置
 TMP_KEY = "_tmp"                     # 临时抽屉的 key
 TMP_DIR = "临时"
 RECORD = "手动记录.json"              # 每次算完记一笔（净利/报表名）
+
+# 记录文件的读-改-写要串起来：连传多个文件时（页面是并发的）
+# 两个请求各读一份旧记录、各写回去，后写的会把先写的条目抹掉，
+# 表现就是「明明传了订单表，卡片上却写着未识别」。
+_REC_LOCK = threading.Lock()
 
 KIND_CN = {
     "order": "订单表",
@@ -252,24 +258,29 @@ def save_file(key: str, filename: str, data: bytes, country: str = "") -> dict:
         return {"ok": False, "error": f"保存失败：{e}"}
 
     kind = _classify(target, country)
-    doc = load_record(d)
-    files = [f for f in (doc.get("files") or [])
-             if isinstance(f, dict) and f.get("name") != target.name]
-    files.append({"name": target.name, "kind": kind,
-                  "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
-    doc["files"] = files
-    if country and not doc.get("country"):
-        doc["country"] = country
-    try:
-        save_record(d, doc)
-    except OSError:
-        pass
+    with _REC_LOCK:
+        doc = load_record(d)
+        files = [f for f in (doc.get("files") or [])
+                 if isinstance(f, dict) and f.get("name") != target.name]
+        files.append({"name": target.name, "kind": kind,
+                      "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        doc["files"] = files
+        if country and not doc.get("country"):
+            doc["country"] = country
+        try:
+            save_record(d, doc)
+        except OSError:
+            pass
+        count = len(_file_records(d, doc))
     return {"ok": True, "name": target.name, "kind": kind,
-            "label": KIND_CN.get(kind, "未识别"), "count": len(_file_records(d, doc))}
+            "label": KIND_CN.get(kind, "未识别"), "count": count}
 
 
 def delete_file(key: str, filename: str) -> dict:
-    d = space_dir(key)
+    k = str(key or "").strip()
+    if k != TMP_KEY and k not in known_keys():
+        return {"ok": False, "error": "不认识的店铺"}
+    d = space_dir(k)
     p = d / Path(str(filename or "")).name
     if not p.is_file():
         return {"ok": False, "error": "文件已经不在了"}
@@ -278,13 +289,14 @@ def delete_file(key: str, filename: str) -> dict:
         p.replace(dst)
     except OSError as e:
         return {"ok": False, "error": f"删不掉（可能正被 Excel 打开）：{e}"}
-    doc = load_record(d)
-    doc["files"] = [f for f in (doc.get("files") or [])
-                    if isinstance(f, dict) and f.get("name") != p.name]
-    try:
-        save_record(d, doc)
-    except OSError:
-        pass
+    with _REC_LOCK:
+        doc = load_record(d)
+        doc["files"] = [f for f in (doc.get("files") or [])
+                        if isinstance(f, dict) and f.get("name") != p.name]
+        try:
+            save_record(d, doc)
+        except OSError:
+            pass
     return {"ok": True, "trash": str(dst)}
 
 
@@ -309,34 +321,15 @@ def clear_space(key: str) -> dict:
                 moved += 1
             except OSError:
                 continue
-    try:
-        save_record(d, {"version": 1, "files": [], "last": None})
-    except OSError:
-        pass
+    with _REC_LOCK:
+        try:
+            save_record(d, {"version": 1, "files": [], "last": None})
+        except OSError:
+            pass
     return {"ok": True, "moved": moved, "trash": str(trash)}
 
 
 # ---------------- 计算 ----------------
-
-def _unique_report(out: Path) -> Path:
-    """同名报表：旧的挪进回收站，用回同一个名字。
-
-    手动报表按「店名 + 区间 + _手动」命名，重算同一段就该覆盖，
-    不然点三次就 (2)(3)(4)——自动核算那边踩过这个坑。
-    """
-    if not out.exists():
-        return out
-    try:
-        shutil.move(str(out), str(_recycle("报表") / out.name))
-        return out
-    except OSError:
-        i = 2
-        stem, suf = out.stem, out.suffix
-        while out.exists():
-            out = out.parent / f"{stem} ({i}){suf}"
-            i += 1
-        return out
-
 
 def _report_target(key: str, label: str) -> tuple[Path, str]:
     """手动报表放哪：`报表\\手动\\<店名>\\`，临时数据放 `报表\\手动\\临时\\`。"""
@@ -378,7 +371,13 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
         a, b = b, a
     label = f"{a}_{b}" if (a and b) else "全部"
     out_dir, base = _report_target(k, label)
-    out = _unique_report(out_dir / f"{base}.xlsx")
+    # 先算到临时文件，成功了才顶掉旧报表（见 safeio.swap_report）。
+    # 以前的 _unique_report 是「开算之前就把旧的挪走」——算失败时
+    # 报表页上少一份，用户还以为算成功了、只是数字没变。
+    final_out = out_dir / f"{base}.xlsx"
+    out = final_out
+    if final_out.exists():
+        out = out_dir / f".{base}.{os.getpid()}.calc.xlsx"
 
     if paths.is_frozen():
         cmd = [sys.executable, "run"]
@@ -429,6 +428,12 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
             break
 
     if proc.returncode != 0 or not summary:
+        # 失败：临时文件不能留在报表目录里（报表页会把它当成一份真报表）
+        if out != final_out:
+            try:
+                out.unlink(missing_ok=True)
+            except OSError:
+                pass
         tail = "\n".join((stdout + "\n" + stderr).strip().splitlines()[-8:])
         if "没有解析出任何订单行" in tail:
             brief = "订单表里没有可用的行（表头不对，或者这批文件不是订单导出）"
@@ -439,6 +444,11 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
         else:
             brief = tail or "核算失败"
         return {"ok": False, "error": brief}
+
+    if out != final_out and out.exists():
+        out = safeio.swap_report(
+            out, final_out,
+            paths.DATA / "回收站" / f"报表_{datetime.now():%Y%m%d_%H%M%S_%f}")
 
     summary["report_path"] = str(out)
     summary["report_name"] = out.name
@@ -455,22 +465,23 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
     if copied:
         summary["copied_to"] = str(copied)
 
-    doc = load_record(d)
-    doc["from"], doc["to"] = a, b
-    if country:
-        doc["country"] = country
-    doc["last"] = {
-        "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "from": a, "to": b,
-        "net": summary.get("net_local"),
-        "net_cny": summary.get("net_cny"),
-        "gmv": summary.get("gmv"),
-        "margin": summary.get("net_margin"),
-        "report": out.name,
-    }
-    try:
-        save_record(d, doc)
-    except OSError:
-        pass
+    with _REC_LOCK:
+        doc = load_record(d)
+        doc["from"], doc["to"] = a, b
+        if country:
+            doc["country"] = country
+        doc["last"] = {
+            "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "from": a, "to": b,
+            "net": summary.get("net_local"),
+            "net_cny": summary.get("net_cny"),
+            "gmv": summary.get("gmv"),
+            "margin": summary.get("net_margin"),
+            "report": out.name,
+        }
+        try:
+            save_record(d, doc)
+        except OSError:
+            pass
     summary["key"] = k
     return {"ok": True, **summary}

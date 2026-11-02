@@ -100,8 +100,11 @@ def _all_reports() -> list[dict]:
     out: list[dict] = []
     try:
         for p in paths.OUTPUT.rglob("*.xlsx"):
-            # 回收站里的不算「已有报表」，否则删完还在列表里，看着像没删掉
-            if "_已删除" in p.parts:
+            # 回收站里的不算「已有报表」，否则删完还在列表里，看着像没删掉。
+            # 下划线开头的目录（_已删除 / _隔离_日期）都不是给人看的报表；
+            # ~$ 开头的是 Excel 打开时自己生成的锁文件，点开会报「文件损坏」。
+            if (any(part.startswith("_") for part in p.parts)
+                    or p.name.startswith(("~$", "."))):   # ~$ 是 Excel 锁文件，. 开头是算到一半的临时文件
                 continue
             st = p.stat()
             rel = p.relative_to(paths.OUTPUT)
@@ -1056,7 +1059,71 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="body" id="trend"><div class="empty">还没有核算记录</div></div></div>
     </section>
 
-    <section class="page" id="view-manual" hidden>
+<section class="page" id="view-import" hidden>
+      <div class="head"><h1>导入数据<span class="tag">补进店铺，参与自动核算</span></h1>
+        <p>这里传的表会进<b>所选店铺的收件箱</b>，跟扩展自动取到的数据一起参与核算——
+           用在「自动取数没拿到、手工补一张」的场景。<br>
+           想拿一批表<b>单独算</b>、不掺店里数据，去左边的<b>「手动核算」</b>。</p></div>
+
+      <div class="card"><h2>① 这份数据是哪家店、哪个国家<span class="hint">选错国家，列名认不出、费率也套错</span></h2>
+        <div class="body">
+          <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap">
+            <div class="field" style="flex:1;min-width:240px"><label>店铺</label>
+              <select id="imp2-store"><option value="">未识别店铺（公共目录）</option></select></div>
+            <div class="field" style="min-width:190px"><label>国家（决定费率与列名）</label>
+              <select id="imp2-country"><option value="">跟随店铺</option></select></div>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:10px 0 0">
+            选店铺后国家会自动带上，一般不用改。订单表的列名按国家/语言分（马来站和菲律宾站不一样），
+            费率也按国家分——<b>选错了不会报错，但数字会全错</b>。
+          </p>
+        </div></div>
+
+      <div class="card"><h2>② 把表拖进来<span class="hint">可一次多选，程序自动认是哪种表</span></h2>
+        <div class="body">
+          <div class="dropzone" id="imp2-drop">
+            <svg width="26" height="26" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                 stroke-width="1.3" style="color:var(--text-3)"><path d="M8 2.6v7.2M5.2 7l2.8 2.8L10.8 7"
+                 stroke-linecap="round" stroke-linejoin="round"/><path d="M2.8 11.2v1.4a1.6 1.6 0 001.6 1.6h7.2a1.6 1.6 0 001.6-1.6v-1.4" stroke-linecap="round"/></svg>
+            <div style="margin:6px 0 2px"><b>把导出的文件拖到这里</b></div>
+            <div class="muted" style="font-size:12.5px">
+              或者 <label class="mini-btn" style="margin:0">选择文件
+                <input type="file" id="imp2-file" multiple hidden accept=".csv,.xlsx,.xls,.txt,.json"></label>
+              （csv / xlsx / xls，可多选）
+            </div>
+            <div class="muted" style="font-size:12px;margin-top:10px">
+              订单表 · 广告表 · 联盟佣金表 · 商品映射表 都能认
+            </div>
+          </div>
+          <input type="file" id="imp2-link-file" accept=".xlsx,.xls,.csv" hidden>
+          <input type="file" id="imp2-map-file" accept=".xlsx,.xls,.csv" hidden>
+          <div class="tools" style="margin-top:12px;flex-wrap:wrap">
+            <button class="ghost" id="btn-imp2-map">单独导入「商品映射表」（SKU → 商品ID）</button>
+            <button class="ghost" id="btn-imp2-link">单独导入「链接资料」（款式编码）</button>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:10px 0 0">
+            <b>商品映射表很关键</b>：订单导出表里只有 SKU ID / 商家 SKU，<b>没有商品 ID</b>，
+            所以「哪笔订单属于哪条链接」全靠这张映射表。不传的话程序只能按 SKU 猜，
+            猜不出来的全归到「无ID」——汇总页就只剩一行，看不出是哪个链接赚的。<br>
+            从店铺后台「商品 → 批量编辑 / 导出」下载商品表（里面要有 <span class="mono">Product ID</span>
+            和 <span class="mono">SKU ID</span> 两列），点上面这个按钮传上来即可。<br>
+            链接资料是全局的、不分店铺；不传就按商家 SKU 自动推款式编码
+            （<span class="mono">V27-White</span> → <span class="mono">V27</span>）。
+          </p>
+          <div class="note" id="imp2-note"></div>
+          <div id="imp2-result"></div>
+        </div></div>
+
+      <div class="card"><h2>③ 已经传了哪些<span class="hint" id="imp2-hint"></span></h2>
+        <div class="body tight" id="imp2-files"><div class="empty">读取中…</div></div>
+        <div class="body" style="border-top:1px solid var(--line-soft);padding-top:12px">
+          <div class="row">
+            <button onclick="go('stores')">管理店铺</button>
+          </div>
+        </div></div>
+    </section>
+
+        <section class="page" id="view-manual" hidden>
       <div class="head"><h1>手动核算<span class="tag">独立数据区</span></h1>
         <p>每张卡就是一家店：<b>在哪张卡导入，数据就属于哪家店</b>，跟驾驶舱的自动取数完全隔开。
            文件放 <span class="mono">数据\店铺\&lt;店名&gt;\手动导入\</span>，
@@ -2468,16 +2535,6 @@ async function loadStatus(){
         <div class="s">在「报表」页可查看</div></div>`;
     $('#foot-stores').textContent = j.store_count + ' 家';
     storesCache = j.stores || [];
-    const sel = $('#store');
-    if(sel){
-      sel.innerHTML = '<option value="">全部店铺（逐个核算）</option>';
-      storesCache.forEach(s => {
-        const o = document.createElement('option');
-        o.value = s.id;
-        o.textContent = (s.name || s.id) + (s.country ? '（' + s.country + '）' : '');
-        sel.append(o);
-      });
-    }
   }catch(e){}
 }
 
@@ -2623,6 +2680,40 @@ const KIND_CN = {orders:'订单', ads:'广告', affiliate:'联盟', mapping:'映
                  other:'其他', 订单表:'订单', 广告表:'广告', 联盟佣金表:'联盟',
                  商品映射表:'映射', 商品SKU表:'SKU', 链接资料:'链接'};
 function kindLabel(x){ return KIND_CN[x] || x; }   // 认不出就直接显示目录名
+
+/** 填导入页的两个下拉：店铺、国家。
+ *  直接进「导入数据」页时缓存可能是空的，自己补一次。 */
+async function loadImportOptions(){
+  try{
+    if(!storesCache.length){
+      try{ storesCache = (await (await fetch('/api/stores')).json()).stores || []; }catch(e){}
+    }
+    const sel = $('#imp2-store');
+    if(sel){
+      const keep = sel.value;
+      sel.innerHTML = '<option value="">未识别店铺（公共目录）</option>';
+      storesCache.forEach(s => {
+        const o = document.createElement('option');
+        o.value = s.id;
+        o.textContent = (s.name || s.id) + (s.country ? '（' + s.country + '）' : '');
+        sel.append(o);
+      });
+      if(keep) sel.value = keep;
+    }
+    const r = await (await fetch('/api/rates')).json();
+    const cs = $('#imp2-country');
+    if(cs){
+      const keep = cs.value;
+      cs.innerHTML = '<option value="">跟随店铺</option>';
+      Object.keys(r.countries || {}).forEach(c => {
+        const o = document.createElement('option');
+        o.value = c; o.textContent = c;
+        cs.append(o);
+      });
+      if(keep) cs.value = keep;
+    }
+  }catch(e){ /* 拉不到就留空，用户仍可以传，只是不能选店 */ }
+}
 
 async function loadImportFiles(){
   const box = $('#imp2-files'), hint = $('#imp2-hint');
@@ -3027,12 +3118,13 @@ async function saveReports(names, btn){
   try{
     const r = await fetch('/api/reports/save', {method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({names, with_formula: wf, dir: dir.trim()})});
+      body: JSON.stringify({names, with_formula: wf, dir: dir.trim(), room: repRoom})});
     const j = await r.json();
     if(j.ok){
       toast('已存 ' + (j.saved||[]).length + ' 份到 ' + j.dir
             + ((j.failed||[]).length ? '；' + j.failed.length + ' 份没成功' : ''));
-      if(dir.trim()) saveRepDir(dir.trim());   // 记住这次用的目录
+      // 记住这次用的目录（清空也要记，不然下次又冒出旧路径）
+      saveRepDir(dir.trim());
     }else{
       toast('没存成：' + (j.error || (j.failed||[]).join('；') || '未知原因'));
     }
@@ -3040,13 +3132,14 @@ async function saveReports(names, btn){
   if(btn) btn.disabled = false;
 }
 
-async function viewReport(name){
+async function viewReport(rel){
+  const name = String(rel).split('/').pop();
   $('#modal').classList.add('show');
   $('#modal-title').textContent = name;
   $('#modal-sub').textContent = '';
   $('#modal-body').innerHTML = '<div class="empty">读取中…</div>';
   try{
-    const j = await (await fetch('/api/report-view?name=' + encodeURIComponent(name))).json();
+    const j = await (await fetch('/api/report-view?rel=' + encodeURIComponent(rel))).json();
     if(!j.ok){ $('#modal-body').innerHTML = '<div class="empty">' + esc(j.error || '读取失败') + '</div>'; return; }
     $('#modal-sub').textContent = j.modified + '　' + j.size_kb + ' KB';
     const total = j.total || {};
