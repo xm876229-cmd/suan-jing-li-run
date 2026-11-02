@@ -210,6 +210,8 @@ def build_app() -> Path:
         # 显式声明一份，免得打包版少了这个模块——表现是「复用不生效」，
         # 只会让人觉得「怎么又重导了一遍」，根本查不到原因
         "--hidden-import", "src.capture",
+        # 手动核算：独立数据区那套接口，同样是函数内导入
+        "--hidden-import", "bridge.manual_api",
         # 桌面窗口：pywebview 的后端是运行时才导入的，
         # PyInstaller 静态扫不到，不显式声明就会打包出一个「点了没反应」的 exe
         "--hidden-import", "src.desktop",

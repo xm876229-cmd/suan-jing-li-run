@@ -936,6 +936,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <path d="M12 3v11"/><path d="M7.6 10.4L12 14.8l4.4-4.4"/>
           <path d="M4 16v3.4A1.6 1.6 0 005.6 21h12.8a1.6 1.6 0 001.6-1.6V16"/>
         </svg><span>导入数据</span></a>
+      <a href="#/manual" data-view="manual">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3.2" y="4.2" width="17.6" height="15.6" rx="2.6"/>
+          <path d="M3.2 9.4h17.6M9.2 9.4v10.4M15.4 9.4v10.4"/>
+        </svg><span>手动核算</span></a>
       <a href="#/stores" data-view="stores">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
              stroke-linecap="round" stroke-linejoin="round">
@@ -1044,19 +1050,17 @@ _TEMPLATE = r"""<!DOCTYPE html>
           改了佣金费率、成本表、汇率之后，在这儿点「重新计算」就行，几十秒出新数字。<br>
           要去平台重新导一遍，回「驾驶舱」点运行。</p></div>
 
-      <div class="card"><h2>① 用哪批数据<span class="hint">不勾就按当前最新的一份</span></h2>
+      <div class="card"><h2>数据从哪来<span class="hint">这里不用选，也选不了</span></h2>
         <div class="body">
-          <div class="snap-list" id="snap-list"><div class="empty">读取中…</div></div>
-          <div class="chips tight" id="snap-chips" style="margin:10px 0 0">
-            <button data-sel="latest">仅最新</button>
-            <button data-sel="all">全部</button>
-            <button data-sel="last3">近 3 次</button>
-            <button data-sel="none">不指定</button></div>
-          <p class="muted" style="font-size:12.5px;margin:10px 0 0">
-            每取一次数会自动存一份快照。勾多份 = 把它们合并起来算；不勾 = 用当前目录里最新的数据。</p>
+          <p style="margin:0;font-size:13px;line-height:1.7">
+            只用<b>这家店收件箱里、盖得住所选时间段的最新一份自动取数数据</b>
+            （也就是驾驶舱「运行」取回来的那批）。<br>
+            <span class="muted">想拿别的表格单独算——供应商给的、别人电脑上拷来的——
+            去左边的<b>「手动核算」</b>：那里自己建一批、自己传表、单独出报表，跟店铺数据完全隔开。</span>
+          </p>
         </div></div>
 
-      <div class="card"><h2>② 算哪家店、哪段时间</h2>
+      <div class="card"><h2>① 算哪家店、哪段时间</h2>
         <div class="body">
           <div class="row" style="align-items:flex-end;gap:16px">
             <div class="field" style="min-width:230px"><label>店铺</label>
@@ -1077,7 +1081,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
             区间只影响「哪些订单算进来」，不会去平台重新导出。选「全部」= 不按日期过滤。</p>
         </div></div>
 
-      <div class="card"><h2>③ 出报表</h2>
+      <div class="card"><h2>② 出报表</h2>
         <div class="body">
           <label class="switch">
             <input type="checkbox" id="with-formula">
@@ -1098,16 +1102,17 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="body tight" id="run-files"><div class="empty">读取中…</div></div>
         <div class="body" style="border-top:1px solid var(--line-soft);padding-top:12px">
           <div class="row" style="gap:12px;align-items:center">
-            <button class="ghost" style="width:auto;padding:7px 16px;margin:0" onclick="go('import')">＋ 导入我自己导出的表</button>
-            <span class="muted" style="font-size:12.5px">自动取数没拿到？去「导入数据」页直接传订单 / 广告 / 联盟佣金 / 链接资料，算法完全一样</span>
+            <button class="ghost" style="width:auto;padding:7px 16px;margin:0" onclick="go('manual')">＋ 拿一批表单独算（手动核算）</button>
+            <span class="muted" style="font-size:12.5px">不想掺进店铺数据？去「手动核算」自己建一批，单独出报表</span>
           </div>
         </div></div>
     </section>
 
     <section class="page" id="view-import" hidden>
-      <div class="head"><h1>导入数据</h1>
-        <p>不经过插件也能算：你自己在店铺后台把表导出来，在这里传上来。
-           订单 / 广告 / 联盟佣金 / 链接资料都收，之后跟自动取到的数据<b>走同一套算法</b>。</p></div>
+      <div class="head"><h1>导入数据<span class="tag">补进店铺，参与自动核算</span></h1>
+        <p>这里传的表会进<b>所选店铺的收件箱</b>，跟扩展自动取到的数据一起参与核算——
+           用在「自动取数没拿到、手工补一张」的场景。<br>
+           想拿一批表<b>单独算</b>、不掺店里数据，去左边的<b>「手动核算」</b>。</p></div>
 
       <div class="card"><h2>① 这份数据是哪家店、哪个国家<span class="hint">选错国家，列名认不出、费率也套错</span></h2>
         <div class="body">
@@ -1162,9 +1167,82 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="body tight" id="imp2-files"><div class="empty">读取中…</div></div>
         <div class="body" style="border-top:1px solid var(--line-soft);padding-top:12px">
           <div class="row">
-            <button class="primary" onclick="go('run')">传完了，去核算</button>
             <button onclick="go('stores')">管理店铺</button>
           </div>
+        </div></div>
+    </section>
+
+    <section class="page" id="view-manual" hidden>
+      <div class="head"><h1>手动核算<span class="tag">独立数据区</span></h1>
+        <p>自己传一批表，<b>单独算一份</b>，跟店铺的自动取数数据完全隔开：
+           这批文件放在 <span class="mono">数据\手动核算\&lt;批次&gt;\</span>，
+           报表出在 <span class="mono">报表\手动核算\&lt;批次&gt;\</span>。<br>
+           驾驶舱的「重算」永远只读店铺收件箱，这里的表不会掺进去，反过来也一样。</p></div>
+
+      <div class="card"><h2>这批数据叫什么<span class="hint">换一批就换一个名字，互不干扰</span></h2>
+        <div class="body">
+          <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap">
+            <div class="field" style="flex:1;min-width:240px"><label>当前批次</label>
+              <select id="mn-batch"></select></div>
+            <div class="field" style="min-width:220px"><label>新批次的名字（可留空）</label>
+              <input type="text" id="mn-new-name" placeholder="例如 供应商对账_10月"></div>
+            <button class="ghost" id="mn-new" style="margin-bottom:1px">＋ 新建一批</button>
+            <button class="danger" id="mn-del" style="margin-bottom:1px">删除这批</button>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:10px 0 0" id="mn-hint"></p>
+        </div></div>
+
+      <div class="card"><h2>① 把表传进这批<span class="hint">订单表必须有；广告 / 佣金 / SKU 选填</span></h2>
+        <div class="body">
+          <div class="dropzone" id="mn-drop">
+            <svg width="26" height="26" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                 stroke-width="1.3" style="color:var(--text-3)"><path d="M8 2.6v7.2M5.2 7l2.8 2.8L10.8 7"
+                 stroke-linecap="round" stroke-linejoin="round"/><path d="M2.8 11.2v1.4a1.6 1.6 0 001.6 1.6h7.2a1.6 1.6 0 001.6-1.6v-1.4" stroke-linecap="round"/></svg>
+            <div style="margin:6px 0 2px"><b>把这一批要用的表拖到这里</b></div>
+            <div class="muted" style="font-size:12.5px">
+              或者 <label class="mini-btn" style="margin:0">选择文件
+                <input type="file" id="mn-file" multiple hidden accept=".csv,.xlsx,.xls,.txt,.json"></label>
+              （csv / xlsx / xls，可多选）
+            </div>
+            <div class="muted" style="font-size:12px;margin-top:10px">
+              只进这一批，不进店铺收件箱；传错了可以单个删
+            </div>
+          </div>
+          <div class="note" id="mn-note"></div>
+        </div></div>
+
+      <div class="card"><h2>② 这批里有哪些文件<span class="hint" id="mn-files-hint"></span></h2>
+        <div class="body tight" id="mn-files"><div class="empty">读取中…</div></div>
+      </div>
+
+      <div class="card"><h2>③ 算这一批</h2>
+        <div class="body">
+          <div class="row" style="align-items:flex-end;gap:16px;flex-wrap:wrap">
+            <div class="field" style="min-width:190px"><label>国家（决定费率与列名）</label>
+              <select id="mn-country"></select></div>
+            <div class="field"><label>时间区间</label>
+              <button class="rbtn" id="mn-range" title="点一次，起止日期一起选">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="4.6" width="18" height="16.4" rx="3"/><path d="M3 10h18M8 2.6v4M16 2.6v4"/>
+                </svg><span id="mn-range-txt">全部数据</span>
+              </button></div>
+            <div class="chips" id="mn-chips" style="margin:0 0 2px">
+              <button data-k="all" class="on">全部</button>
+              <button data-k="month">本月</button><button data-k="lastmonth">上月</button>
+            </div>
+          </div>
+          <label class="switch" style="margin-top:14px">
+            <input type="checkbox" id="mn-formula">
+            <span><b>导出带公式的报表</b>
+              <em>和「重新计算」那边一致：带公式能在 Excel 里自己切含/不含样品，文件更大、打开更慢。</em></span>
+          </label>
+          <div class="row" style="margin-top:16px;align-items:center;gap:14px">
+            <button class="primary" id="mn-run" style="padding:10px 26px">计算这一批</button>
+            <span class="muted" style="font-size:12.5px">只读这一批自己的文件，不碰店铺收件箱 ·
+              成本表 / 费率 / 计算参数用的是全局那一套</span>
+          </div>
+          <div class="note" id="mn-result"></div>
         </div></div>
     </section>
 
@@ -1714,6 +1792,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <div>同一天重复跑</div><div>同一天、<b>同一个起止日期</b>再跑一次，会直接复用当天第一次导的数据（快）。
             <b>换区间就要重新取数</b>——数据是平台按区间导的，不能拿一段充另一段。</div>
           <div>数据确实变了</div><div>勾上驾驶舱工具条上的<b>「强制重新取数」</b>，就忽略当天的记录，重新去平台导一遍。</div>
+          <div>数据分两条线</div><div><b>驾驶舱 / 重新计算</b>只认店铺收件箱里自动取到的数据；
+            <b>「手动核算」</b>是独立的一块：自己建批次、自己传表，报表单独放在
+            <span class="mono">报表\手动核算\&lt;批次&gt;</span>。两边不互相掺，
+            手动传的表不会进店铺、也不会被下次自动核算带上。</div>
         </div></div></div>
 
       <div class="card"><h2>常见问题</h2>
@@ -2506,8 +2588,9 @@ function go(view){
   if(view === 'plan') loadPlan();
   if(view === 'debug') loadDebug();
   if(view === 'stores') loadStores();
-  if(view === 'run'){ loadRunFiles(); loadSnapshots(); }
+  if(view === 'run'){ loadRunFiles(); }
   if(view === 'import'){ loadImportOptions(); loadImportFiles(); }
+  if(view === 'manual'){ loadImportOptions(); loadManual(); }
   if(view === 'overview') initHome(); else stopLive();
   if(location.hash !== '#/' + view) location.hash = '#/' + view;
 }
@@ -2677,7 +2760,7 @@ async function loadRunFiles(){
 
 /** 换店铺时刷新快照列表与文件清单：快照是按店分开存的，
  *  A 店的快照在 B 店下拉里不该出现。 */
-if($('#store')) $('#store').onchange = () => { loadSnapshots(); loadRunFiles(); };
+if($('#store')) $('#store').onchange = () => { loadRunFiles(); };
 
 /* ---------------- 手动导入 ---------------- */
 /* 自动取数这条路依赖平台接口和风控参数，平台一改版就可能断。
@@ -2714,6 +2797,20 @@ async function loadImportOptions(){
         cs.append(o);
       });
       if(keep) cs.value = keep;
+    }
+    // 手动核算那边的国家下拉：没有「跟随店铺」，就是个纯国家选择
+    const mc = $('#mn-country');
+    if(mc){
+      const keep = mc.value;
+      mc.innerHTML = '';
+      Object.keys(r.countries || {}).forEach(c => {
+        const o = document.createElement('option');
+        o.value = c; o.textContent = c;
+        mc.append(o);
+      });
+      const def = (r.default && Object.keys(r.countries || {}).includes(r.default))
+        ? r.default : (Object.keys(r.countries || {})[0] || '');
+      mc.value = keep || def;
     }
   }catch(e){}
 }
@@ -2775,7 +2872,7 @@ async function importFiles(files, kindHint){
   }
   note(n, lines.join('<br>'), 'ok');
   // 导入完立刻刷新：本页清单、核算页文件、快照、总览数字
-  loadImportFiles(); loadRunFiles(); loadSnapshots(); loadStatus();
+  loadImportFiles(); loadRunFiles(); loadStatus();
 }
 
 if($('#imp2-file')) $('#imp2-file').onchange = (e) => {
@@ -3012,65 +3109,6 @@ if($('#btn-link-import')) $('#btn-link-import').onclick = async () => {
   if(inp) inp.value = "";
 };
 
-/** 列出这家店已有的取数快照，供「用哪次数据」多选使用。
- *  可勾选多份一起算——跨快照重复的订单只算一次（重叠以最新为准）。 */
-let snapStore = '';
-async function loadSnapshots(){
-  try{
-    const store = $('#store') ? $('#store').value : '';
-    const j = await (await fetch('/api/snapshots?store=' + encodeURIComponent(store))).json();
-    const box = $('#snap-list');
-    if(!box) return;
-    const items = j.items || [];
-    // 换店铺就换一批快照，之前的勾选不再保留（保留也是对不上号的 id）
-    const prev = (store === snapStore) ? selectedSnaps() : [];
-    snapStore = store;
-    if(!items.length){
-      box.innerHTML = '<div class="empty">还没有快照，取一次数就会自动存一份</div>';
-      const hint = $('#run-files-hint');
-      if(hint) hint.textContent = '取一次数就会自动存一份快照';
-      return;
-    }
-    box.innerHTML = items.map(it => {
-      const kinds = it.kinds || {};
-      const bits = [];
-      if(kinds.orders) bits.push('订单 ' + kinds.orders + ' 行');
-      if(kinds.ads) bits.push('广告 ' + kinds.ads + ' 行');
-      if(kinds.affiliate) bits.push('联盟 ' + kinds.affiliate + ' 行');
-      if(!bits.length) bits.push(it.file_count + ' 个文件');
-      const on = prev.length ? prev.includes(it.id) : it.id === items[0].id;
-      return `<label class="snap-item"><input type="checkbox" value="${esc(it.id)}" ${on?'checked':''}>
-        <span><b>${esc(it.range)}</b><em>${esc(it.at)} · ${esc(bits.join(' / '))}</em></span></label>`;
-    }).join('');
-    const hint = $('#run-files-hint');
-    if(hint) hint.textContent = items.length + ' 份快照，勾选多份可合并计算';
-  }catch(e){}
-}
-
-/** 当前勾选的快照 id 列表 */
-function selectedSnaps(){
-  const box = $('#snap-list');
-  if(!box) return [];
-  return Array.from(box.querySelectorAll('input[type=checkbox]:checked')).map(x => x.value);
-}
-
-/** 快照快捷选择：仅最新 / 全部 / 近 3 次 / 不指定 */
-function pickSnaps(mode){
-  const box = $('#snap-list');
-  if(!box) return;
-  const boxes = Array.from(box.querySelectorAll('input[type=checkbox]'));
-  boxes.forEach((b, i) => {
-    if(mode === 'latest') b.checked = (i === 0);
-    else if(mode === 'all') b.checked = true;
-    else if(mode === 'last3') b.checked = (i < 3);
-    else b.checked = false;
-  });
-}
-
-document.querySelectorAll('#snap-chips button').forEach(b => {
-  b.onclick = () => pickSnaps(b.dataset.sel);
-});
-
 // 手动动过「带公式」就记一笔：驾驶舱的「重算」据此判断要不要沿用这个选择
 $('#with-formula') && ($('#with-formula').onchange = () => {
   $('#with-formula').dataset.touched = '1';
@@ -3079,21 +3117,18 @@ $('#with-formula') && ($('#with-formula').onchange = () => {
 $('#btn-run').onclick = async () => {
   const btn = $('#btn-run'), n = $('#run-note');
   const store = $('#store').value;
-  const snaps = selectedSnaps();
   const ids = store ? [store] : storesCache.map(s => s.id).filter(Boolean);
   if(!ids.length){ note(n, '没有可核算的店铺，先去「店铺」页看看识别到没有', 'err'); return; }
   btn.disabled = true;
   const results = [];
   const runRg = {startDate: RUN_RANGE ? RUN_RANGE.startDate : '', to: RUN_RANGE ? RUN_RANGE.to : ''};
   for(let i = 0; i < ids.length; i++){
-    const how = snaps.length > 1 ? ('合并 ' + snaps.length + ' 份快照核算') : (snaps.length ? '按选定快照核算' : '按实时数据核算');
-    note(n, how + '（' + (i+1) + '/' + ids.length + '）…', 'ok');
+    note(n, '正在重算（' + (i+1) + '/' + ids.length + '）…', 'ok');
     try{
       const r = await fetch('/run', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({store: ids[i],
                              from: RUN_RANGE ? RUN_RANGE.startDate : null,
                              to: RUN_RANGE ? RUN_RANGE.to : null,
-                             snapshots: snaps.length ? snaps : null,
                              // 这里本来就是「只算不取数」，同名报表直接替换，
                              // 不然改一次费率就多一份 (2)(3)，报表页没法看
                              replace: true,
@@ -3465,6 +3500,236 @@ const normParams = list => (list || []).map(p => ({
 
 function cur(){ return scopeData[scope] || scopeData[""]; }
 function rowsOf(){ return cur().params; }
+
+/* ---------------- 手动核算 ----------------
+   自己传一批表单独算：文件在 数据\手动核算\<批次>\，报表在 报表\手动核算\<批次>\。
+   和驾驶舱那条线（店铺收件箱）完全不交叉——重算读不到这里的表，
+   这里的计算也不会去读店铺的数据。 */
+const MN = {items: [], cur: ''};
+let MN_RANGE = null;            // null = 全部（不按日期过滤）
+
+function mnCurrent(){
+  return MN.items.find(x => x.name === MN.cur) || null;
+}
+
+async function loadManual(keep){
+  const sel = $('#mn-batch');
+  if(!sel) return;
+  // 国家下拉是另一处填的，第一次进来可能还没填完——不等它，批次里存的
+  // 国家就选不上，会被默认值盖掉
+  if($('#mn-country') && !$('#mn-country').options.length) await loadImportOptions();
+  try{
+    const j = await (await fetch('/api/manual')).json();
+    MN.items = j.items || [];
+  }catch(e){ MN.items = []; }
+  if(!MN.items.length){
+    MN.cur = '';
+    sel.innerHTML = '<option value="">（还没有批次，先新建一批）</option>';
+  }else{
+    const want = keep || MN.cur || MN.items[0].name;
+    MN.cur = MN.items.some(x => x.name === want) ? want : MN.items[0].name;
+    sel.innerHTML = MN.items.map(x =>
+      `<option value="${esc(x.name)}"${x.name === MN.cur ? ' selected' : ''}>${esc(x.name)}</option>`).join('');
+  }
+  applyManualBatch();
+}
+
+function applyManualBatch(){
+  const it = mnCurrent();
+  const del = $('#mn-del'); if(del) del.disabled = !it;
+
+  // 国家：沿用这批上次用的，没有就用下拉里的默认值
+  const cs = $('#mn-country');
+  if(cs && it && it.country && [...cs.options].some(o => o.value === it.country)){
+    cs.value = it.country;
+  }
+
+  // 区间：沿用这批上次算的那一段；没算过就是「全部」
+  if(it && it.from && it.to) MN_RANGE = {startDate: it.from, to: it.to};
+  else if(it) MN_RANGE = null;
+  paintMnRange();
+
+  const hint = $('#mn-hint');
+  if(hint){
+    hint.textContent = it
+      ? `${it.count} 个文件 · 建于 ${it.created}`
+        + (it.last ? ` · 上次算于 ${it.last.at}：净利 ${fmt2(it.last.net)}` : ' · 还没算过')
+      : '还没有批次。给这批起个名字（或留空自动起），点「新建一批」。';
+  }
+  renderManualFiles(it);
+}
+
+function paintMnRange(){
+  const t = $('#mn-range-txt');
+  if(!t) return;
+  t.textContent = MN_RANGE ? (MN_RANGE.startDate + ' ~ ' + (MN_RANGE.to || '今天')) : '全部数据';
+  document.querySelectorAll('#mn-chips button').forEach(b => {
+    const k = b.dataset.k;
+    let on = false;
+    if(k === 'all') on = !MN_RANGE;
+    else if(MN_RANGE) { const [a, c] = rangeOf(k); on = (a === MN_RANGE.startDate && c === MN_RANGE.to); }
+    b.classList.toggle('on', on);
+  });
+}
+
+function renderManualFiles(it){
+  const box = $('#mn-files'), hint = $('#mn-files-hint');
+  if(!box) return;
+  if(!it){ box.innerHTML = '<div class="empty">先新建一批</div>'; if(hint) hint.textContent = ''; return; }
+  const files = it.files || [];
+  if(hint) hint.textContent = files.length ? (files.length + ' 个文件') : '';
+  if(!files.length){
+    box.innerHTML = '<div class="empty"><b>这批还是空的</b>把订单表拖上来（订单表必须有，广告 / 佣金 / SKU 选填）</div>';
+    return;
+  }
+  box.innerHTML = '<table><thead><tr><th>文件名</th><th style="width:120px">识别为</th>'
+    + '<th style="width:84px">大小</th><th style="width:130px">上传时间</th><th style="width:64px"></th>'
+    + '</tr></thead><tbody>' + files.map(f => `<tr>
+        <td>${esc(f.name)}</td>
+        <td>${f.kind ? '<span class="tag">' + esc(f.label) + '</span>'
+                    : '<span class="tag warn">未识别</span>'}</td>
+        <td class="muted">${f.size_kb} KB</td>
+        <td class="muted">${esc(f.at)}</td>
+        <td><button class="mini" data-mn-rm="${esc(f.name)}">删</button></td></tr>`).join('')
+    + '</tbody></table>';
+
+  box.querySelectorAll('[data-mn-rm]').forEach(b => {
+    b.onclick = async () => {
+      if(!MN.cur) return;
+      if(!confirm('把这个文件从这批里移走？\n\n会挪进「数据\\回收站」，不是真删。')) return;
+      try{
+        const j = await (await fetch('/api/manual/delete', {method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({batch: MN.cur, file: b.dataset.mnRm})})).json();
+        if(!j.ok) toast('删不掉：' + (j.error || ''));
+      }catch(e){ toast('删不掉：' + e.message); }
+      loadManual(MN.cur);
+    };
+  });
+}
+
+async function mnUpload(files){
+  const n = $('#mn-note');
+  if(!MN.cur){ note(n, '先新建一批，再往这批里传表', 'err'); return; }
+  if(!files || !files.length) return;
+  note(n, '正在传（' + files.length + ' 个文件）…', 'ok');
+  const country = ($('#mn-country') && $('#mn-country').value) || '';
+  const lines = [];
+  for(const f of files){
+    try{
+      const b64 = await fileToB64(f);
+      const j = await (await fetch('/api/manual/upload', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({batch: MN.cur, name: f.name, b64, country})})).json();
+      if(j.ok){
+        lines.push(`✓ ${esc(f.name)} → <b>${esc(j.label || '未识别')}</b>`
+          + (j.kind ? '' : ' <span style="color:#B45309">（表头没认出来，确认下是不是这类表）</span>'));
+      }else{
+        lines.push(`✕ ${esc(f.name)} → <span style="color:#C0392B">${esc(j.error || '失败')}</span>`);
+      }
+    }catch(err){
+      lines.push(`✕ ${esc(f.name)} → <span style="color:#C0392B">${esc(err.message || String(err))}</span>`);
+    }
+  }
+  note(n, lines.join('<br>'), 'ok');
+  loadManual(MN.cur);
+}
+
+(function bindManualUi(){
+  if(!$('#mn-batch')) return;
+
+  $('#mn-batch').onchange = () => { MN.cur = $('#mn-batch').value; applyManualBatch(); };
+
+  $('#mn-new').onclick = async () => {
+    const name = (($('#mn-new-name') && $('#mn-new-name').value) || '').trim();
+    try{
+      const j = await (await fetch('/api/manual/new', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name})})).json();
+      if(!j.ok){ toast('新建失败：' + (j.error || '')); return; }
+      if($('#mn-new-name')) $('#mn-new-name').value = '';
+      MN.cur = (j.batch || {}).name || '';
+      await loadManual(MN.cur);
+      toast('已新建：' + MN.cur + '，可以把表传进来了');
+    }catch(e){ toast('新建失败：' + e.message); }
+  };
+
+  $('#mn-del').onclick = async () => {
+    if(!MN.cur) return;
+    if(!confirm('删除整批「' + MN.cur + '」？\n\n· 这批文件会挪进「数据\\回收站」，能找回\n'
+                + '· 已经生成的报表不受影响')) return;
+    try{
+      const j = await (await fetch('/api/manual/delete', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({batch: MN.cur})})).json();
+      if(!j.ok){ toast('删不掉：' + (j.error || '')); return; }
+      MN.cur = '';
+      await loadManual();
+      toast('这批已删除（在回收站里能找回）');
+    }catch(e){ toast('删不掉：' + e.message); }
+  };
+
+  $('#mn-file').onchange = (e) => {
+    mnUpload(Array.from(e.target.files || []));
+    e.target.value = '';
+  };
+
+  // 拖放整块都能接
+  const dz = $('#mn-drop');
+  const stop = e => { e.preventDefault(); e.stopPropagation(); };
+  ['dragenter', 'dragover'].forEach(ev =>
+    dz.addEventListener(ev, e => { stop(e); dz.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev =>
+    dz.addEventListener(ev, e => { stop(e); dz.classList.remove('over'); }));
+  dz.addEventListener('drop', e => {
+    const fs = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if(fs.length) mnUpload(fs);
+  });
+  dz.addEventListener('click', e => {
+    if(e.target.closest('label')) return;
+    const inp = $('#mn-file'); if(inp) inp.click();
+  });
+
+  $('#mn-range').onclick = () => {
+    openRangePicker($('#mn-range'), MN_RANGE, r => { MN_RANGE = r; paintMnRange(); });
+  };
+
+  document.querySelectorAll('#mn-chips button').forEach(b => {
+    b.onclick = () => {
+      const k = b.dataset.k;
+      if(k === 'all') MN_RANGE = null;
+      else { const [a, c] = rangeOf(k); MN_RANGE = {startDate: a, to: c}; }
+      paintMnRange();
+    };
+  });
+
+  $('#mn-run').onclick = async () => {
+    const btn = $('#mn-run'), n = $('#mn-result');
+    if(!MN.cur){ note(n, '先新建一批（或在上面选中已有的一批）', 'err'); return; }
+    const country = ($('#mn-country') && $('#mn-country').value) || '';
+    btn.disabled = true;
+    note(n, '正在算这一批，几十秒…', 'ok');
+    try{
+      const j = await (await fetch('/api/manual/run', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({batch: MN.cur, country,
+                              from: MN_RANGE ? MN_RANGE.startDate : '',
+                              to: MN_RANGE ? MN_RANGE.to : '',
+                              with_formula: !!($('#mn-formula') && $('#mn-formula').checked)})})).json();
+      if(j.ok){
+        note(n, `<b>算完了</b><br>GMV ${fmt2(j.gmv)}　净利 <b>${fmt2(j.net_local)}</b>`
+          + `（人民币 ${fmt2(j.net_cny)}）　净利率 ${(Number(j.net_margin) * 100).toFixed(2)}%<br>`
+          + `商品 ${j.products}　订单 ${j.orders}　异常 ${j.issues} 条<br>`
+          + `报表：${esc(j.report_name)}<span class="muted">（在「报表」页的「手动核算/${esc(j.batch)}」下）</span>`,
+          'ok');
+        loadManual(MN.cur);
+      }else{
+        note(n, '算不出来：' + esc(j.error || '未知原因'), 'err');
+      }
+    }catch(e){ note(n, '出错：' + esc(e.message), 'err'); }
+    btn.disabled = false;
+  };
+})();
 
 /* ---------------- 预设 ---------------- */
 /* 一整套口径的命名快照：参数表 + 公式 + 列标题 + （可选）各国费率。

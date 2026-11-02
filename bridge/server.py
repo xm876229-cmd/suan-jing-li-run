@@ -1289,6 +1289,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/order-headers"):
             from bridge import config_page
             _json(self, config_page.order_headers())
+        elif self.path.startswith("/api/manual"):
+            # 手动核算：自己传一批表单独算，跟店铺收件箱完全隔开
+            from bridge import manual_api
+            _json(self, {"ok": True, "items": manual_api.list_batches(),
+                         "root": str(manual_api.root())})
         elif self.path.startswith("/api/capture"):
             # 「今天这个区间取过没有」——扩展跑之前问一句，取过的就不再导。
             # 参数：shop / from / to，缺区间就直说判断不了（照常全部重取）。
@@ -1515,6 +1520,14 @@ class Handler(BaseHTTPRequestHandler):
                 _json(self, {"ok": False, "error": f"删除失败：{e}"}, 500)
         elif self.path.startswith("/api/data-import"):
             self._post_data_import()
+        elif self.path.startswith("/api/manual/new"):
+            self._post_manual_new()
+        elif self.path.startswith("/api/manual/upload"):
+            self._post_manual_upload()
+        elif self.path.startswith("/api/manual/delete"):
+            self._post_manual_delete()
+        elif self.path.startswith("/api/manual/run"):
+            self._post_manual_run()
         elif self.path.startswith("/api/link-info"):
             self._post_link_import()
         elif self.path.startswith("/api/presets/"):
@@ -2123,6 +2136,95 @@ class Handler(BaseHTTPRequestHandler):
             _append_log(f"[进度] {sid} {STEP_LABELS.get(step, step)} → {state}"
                         + (f"（{p.get('detail')}）" if p.get("detail") else ""))
         _json(self, {"ok": True})
+
+    # ---------------- 手动核算（独立数据区，不碰店铺收件箱） ----------------
+
+    def _post_manual_new(self):
+        from bridge import manual_api
+
+        try:
+            payload = self._read_payload()
+            if payload is None:
+                return
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+        r = manual_api.create(str(payload.get("name") or ""))
+        if r.get("ok"):
+            _append_log(f"[手动核算] 新建批次：{(r.get('batch') or {}).get('name', '?')}")
+        _json(self, r)
+
+    def _post_manual_upload(self):
+        from bridge import manual_api
+
+        try:
+            payload = self._read_payload(MAX_UPLOAD_BODY)
+            if payload is None:
+                return
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+        batch = str(payload.get("batch") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        b64 = payload.get("b64") or ""
+        if not batch or not name or not b64:
+            _json(self, {"ok": False, "error": "缺少批次、文件名或内容"}, 400)
+            return
+        try:
+            data = base64.b64decode(b64)
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"内容解码失败：{e}"}, 400)
+            return
+        r = manual_api.save_file(batch, name, data, str(payload.get("country") or ""))
+        if r.get("ok"):
+            _append_log(f"[手动核算] {batch} ← {r.get('name')}（{r.get('label')}）")
+        _json(self, r)
+
+    def _post_manual_delete(self):
+        from bridge import manual_api
+
+        try:
+            payload = self._read_payload()
+            if payload is None:
+                return
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+        batch = str(payload.get("batch") or "").strip()
+        fname = str(payload.get("file") or "").strip()
+        if not batch:
+            _json(self, {"ok": False, "error": "缺少批次"}, 400)
+            return
+        r = manual_api.delete_file(batch, fname) if fname else manual_api.delete_batch(batch)
+        if r.get("ok"):
+            _append_log(f"[手动核算] 删除 {batch}"
+                        f"{('/' + fname) if fname else '（整批）'} → 回收站")
+        _json(self, r)
+
+    def _post_manual_run(self):
+        from bridge import manual_api
+
+        try:
+            payload = self._read_payload()
+            if payload is None:
+                return
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+        batch = str(payload.get("batch") or "").strip()
+        if not batch:
+            _json(self, {"ok": False, "error": "缺少批次"}, 400)
+            return
+        _append_log(f"[手动核算] 开始计算 {batch} "
+                    f"{payload.get('from') or '全部'}~{payload.get('to') or '全部'}")
+        r = manual_api.run(batch,
+                           country=str(payload.get("country") or ""),
+                           dfrom=str(payload.get("from") or ""),
+                           dto=str(payload.get("to") or ""),
+                           with_formula=bool(payload.get("with_formula")))
+        if r.get("ok"):
+            _append_log(f"[手动核算] 完成：GMV {r.get('gmv')} 净利 {r.get('net_local')}"
+                        f" → {r.get('report_name')}")
+        else:
+            _append_log(f"[手动核算] 失败：{str(r.get('error') or '')[:120]}")
+        _json(self, r)
 
     def _post_run_stores(self):
         """界面点「运行」：给勾选的每家店各派一个任务。
