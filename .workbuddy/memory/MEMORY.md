@@ -27,6 +27,22 @@
 - 一家店一个浏览器、各装一份扩展；核算锁按 shop_id 分开，可并行
 - 店铺名以「浏览器实际登录的店铺」为准，弹窗选错不会串店
 
+## 落盘与自愈（0.24.2 起）
+- **所有配置/状态/成本表必须用 `src/safeio.py` 写**：`write_json/write_text/write_bytes`
+  （tmp → fsync → os.replace，自动留 `.bak`）。别再写 `path.write_text(...)`。
+- 读：`safeio.read_json(path, default=...)` 会自己从 `.bak` 恢复，并隔离坏文件到 `_损坏文件/`
+- 启动自检 `src/selfcheck.py::run()` 已在 `bridge/server.py::main()` 调用；
+  手动入口 `POST /api/selfcheck`，界面在「调试 → 自检与修复」
+- 异常退出标记：`数据/.running`（启动写、正常退出删）；在标记 = 上次是断电/强杀
+- 报表/快照/安装包一律「先写临时名再改名」，不要直接往最终文件名里写
+
+## 模块边界（防止两套逻辑打架）
+- **定时只认桥的「计划任务」**：扩展 `checkSchedule()` 在桥在线时直接 return
+- 任务队列 TTL：`_AUTO_JOB_TTL_MS`=12h（计划）、`_JOB_TTL_MS`=30min（手动）
+- 按店锁 key 一律过 `_canon_shop()`（shop_id / 别名 / 目录名统一成 shop_id）
+- 计划状态文件读写必须持 `_SCHED_STATE_LOCK`
+- 报表目录/公式：手动看 `settings.report`，计划看规则本身，**不要再回落 `settings.auto`**
+
 ## 计划任务（0.24.1）
 - 规则存在 `配置/settings.json` 的 `schedules[]`；状态在 `数据/schedule_state.json`
 - 一条规则 = 触发(每天/每周几/每月几号+时间) + 周期(day/week/month/last7/all) + 偏移(0本期) + 截到哪天(end/today/day)
