@@ -4267,7 +4267,18 @@ async function executeTask(task, range, log, opts = {}) {
     return { ok: false, error: err };
   } finally {
     stopKeepAlive();
-    setTimeout(() => skSet({ running: null }), 1500);
+    // 立即清掉运行标记，同时告诉桥「我跑完了」。
+    //
+    // 原来这里是 setTimeout(…, 1500)：延迟 1.5 秒再清。
+    // MV3 的后台随时可能被浏览器回收，那 1.5 秒里正好被回收的话，
+    // setTimeout 永远不会执行 —— running 就永久留在 storage 里，
+    // 扩展接下来一直「以为自己在跑」，不再领新任务。
+    // 兜底清理虽然能救（见 consumePending），但要等 30 分钟，
+    // 用户看到的就是「点了没反应，过半小时自己好了」。
+    try {
+      await skSet({ running: null });
+    } catch (e) { /* storage 出错也不能挡后面 */ }
+    beatBridge(null);
   }
 }
 
@@ -4288,12 +4299,13 @@ async function consumePending() {
   // 而且不报错，极难发现。改成 FIFO 后两个都会依次执行。
   const { running } = await skGet({ running: null });
   if (running) {
-    // 上次跑到一半断电/关浏览器，running 标记会一直留在 storage 里。
+    // 上次跑到一半断电/关浏览器/后台被回收，running 标记会留在 storage 里。
     // 以前只要它有值就 return，结果**重启之后扩展再也不领任务**，
     // 界面上看着「在线」，就是不动——这种状态最难查。
-    // 超过 40 分钟一律当残留清掉（单店最长也就十几分钟）。
+    // 单次任务最长也就十几分钟（大店订单导出约 5 分钟），
+    // 超过 30 分钟一定是残留，清掉继续领。
     const age = Date.now() - Number(running.at || 0);
-    if (age < 40 * 60 * 1000) return null;   // 真在跑，等它跑完再领下一个
+    if (age < 30 * 60 * 1000) return null;   // 真在跑，等它跑完再领下一个
     await skSet({ running: null });
     appendTaskLog("上次任务没跑完（断电或中途关了浏览器），已清掉运行标记，继续领任务");
   }

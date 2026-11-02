@@ -197,7 +197,25 @@ def safe_eval(expr: str, ctx: dict) -> tuple[float, set[str]]:
     except SyntaxError as e:
         raise FormulaError(f"公式语法错：{text}（{e.msg}）") from None
     ev = _Evaluator(ctx)
-    val = ev.eval(tree)
+    try:
+        val = ev.eval(tree)
+    except FormulaError:
+        raise
+    except ZeroDivisionError:
+        # 普通除法在 _Evaluator 里已经按 0 处理了，但 0 ** -1 这种
+        # 是 Python 自己在算幂的时候抛的，走不到那个分支。
+        # 以前它会一路穿到核算主流程 —— 上层只 catch FormulaError，
+        # 于是整个核算失败，报的还是一句英文 ZeroDivisionError。
+        return 0.0, ev.used
+    except (OverflowError, RecursionError) as e:
+        raise FormulaError(
+            f"公式算不出来（{type(e).__name__}）：嵌套太深或数值太大"
+        ) from None
+    except Exception as e:  # noqa: BLE001
+        # 兜底：任何求值期的意外都转成 FormulaError。
+        # 上层的容错是按「这一项按 0 计 + 在异常页记一条」来做的，
+        # 抛别的类型就变成整次核算崩掉。
+        raise FormulaError(f"公式求值出错（{type(e).__name__}: {e}）") from None
     return _to_num(val), ev.used
 
 

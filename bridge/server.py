@@ -132,7 +132,10 @@ def _run_calc_cmd(cmd: list[str], timeout: int = 900) -> tuple[bool, str]:
 
 
 def _report_out(store_name: str, dfrom: str, dto: str, suffix: str = "") -> Path:
-    safe = re.sub(r'[\\/:*?"<>|]', "_", store_name or "未命名店铺")
+    # 目录名和文件名都要限长：店名是用户起的，200 字符的店名
+    # 在 Windows 上直接抛「文件名或扩展名太长」(WinError 206)，
+    # 报表出不来，而那家店的其他功能也跟着废。
+    safe = paths._safe_folder(store_name or "未命名店铺", "未命名店铺")
     out_dir = paths.OUTPUT / safe
     out_dir.mkdir(parents=True, exist_ok=True)
     # 文件名也要洗一遍：店名是用户在后台起的，可能带 / : * 这类字符，
@@ -141,6 +144,11 @@ def _report_out(store_name: str, dfrom: str, dto: str, suffix: str = "") -> Path
                   f"{store_name}_{dfrom or '全量'}_{dto or '全量'}{suffix}").strip(" .")
     if not base:
         base = "净利报表"
+    # 文件名上限比目录更紧：还要留 ".xlsx" 和 " (12)" 的位置
+    if len(base) > 110:
+        import hashlib
+        h = hashlib.sha1(base.encode("utf-8")).hexdigest()[:6]
+        base = base[:100].rstrip(" .") + "_" + h
     p = out_dir / f"{base}.xlsx"
     i = 2
     while p.exists():
@@ -300,9 +308,23 @@ def _enqueue(store: str, rng: dict, *, task: str = "all", auto: bool = False,
             keep = []
             replaced = 0
             for old_job in _PENDING:
-                if (isinstance(old_job, dict)
-                        and old_job.get("store") == job["store"]
-                        and old_job.get("task") == job["task"]):
+                if not isinstance(old_job, dict):
+                    keep.append(old_job)
+                    continue
+                if old_job.get("store") != job["store"] or old_job.get("task") != job["task"]:
+                    keep.append(old_job)
+                    continue
+                # 同一家店、同一类任务：要不要顶掉旧的那个，看是谁派的。
+                #
+                # 手动点「运行」：无条件顶掉。用户连点、或者改了区间重点，
+                #   他要的就是「按我最后这次的区间跑」，旧的留着只会跑两遍。
+                # 计划任务：只有区间完全一样才顶掉（那就是同一条计划重复触发）。
+                #   区间不一样说明是两条计划撞在同一天（比如「每月 1 号导上月」
+                #   和「每周一导上周」正好都是今天），两个区间都得跑。
+                #   以前一律顶掉，后一条会把前一条悄悄吃掉，
+                #   但界面上两条都显示「已执行」——数据就少了一个区间。
+                same_range = old_job.get("range") == job["range"]
+                if job.get("manual") or same_range:
                     replaced += 1
                     continue
                 keep.append(old_job)
@@ -369,6 +391,15 @@ def _canon_shop(key: str) -> str:
     for sid, nm in names.items():
         if nm == k:
             return sid
+    # 目录里查不到（新店第一次核算，目录还没建），再从 stores.json 的别名反查。
+    # 不查这一步的话，界面传「马来一号店」、扩展传 shop_id 会落到两把不同的锁上，
+    # 两个核算进程同时跑同一家店 —— 两份报表互相覆盖、还抢映射主表。
+    try:
+        for sid, nm in paths._load_store_names().items():
+            if nm == k:
+                return sid
+    except Exception:  # noqa: BLE001
+        pass
     return k
 
 

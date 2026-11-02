@@ -309,12 +309,29 @@ RATES_FILE = CONFIG / "rates.json"
 STORES_FILE = CONFIG / "stores.json"
 
 
+# 单个目录名最长多少。
+# Windows 单个路径段上限 255，但**整条路径**只有 260：
+#   C://Users//xxx//Desktop//公司资料//净利助手//数据//店铺//<店名>//收件箱//订单表//<文件名>
+# 本身就已经一百多个字符了，店名再长一点就爆。
+# 60 个字符足够认出是哪家店；超出的截断并加短哈希，
+# 免得两个长名字被截成同一个目录。
+FOLDER_NAME_MAX = 60
+
+
 def _safe_folder(name: str, fallback: str) -> str:
     """把名字整理成能当文件夹名的。
 
     文件系统不允许 \\ / : * ? " < > | 这些字符，中文没问题。
+    太长的要截断（见 FOLDER_NAME_MAX 的说明）。
     """
     s = re.sub(r'[\\/:*?"<>|]', "_", (name or "").strip()).strip(" .")
+    if not s:
+        return fallback
+    if len(s) > FOLDER_NAME_MAX:
+        import hashlib
+        h = hashlib.sha1(s.encode("utf-8")).hexdigest()[:6]
+        keep = FOLDER_NAME_MAX - len(h) - 1
+        s = s[:keep].rstrip(" .") + "_" + h
     return s or fallback
 
 

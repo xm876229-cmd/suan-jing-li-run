@@ -61,6 +61,22 @@ def _widths(ws: Worksheet, widths: dict[int, int]) -> None:
         ws.column_dimensions[get_column_letter(col)].width = w
 
 
+def _w(ws, row: int, col: int, value):
+    """写一个**数据**单元格（不是公式）。
+
+    openpyxl 见到以 `=` 开头的字符串就当成公式写进去：
+    商品名写成 "=SALE= 清仓"，用 Excel 打开显示的是 #NAME?；
+    更糟的是 "=cmd|' /C calc'!A0" 这种，会触发 Excel 的 DDE 安全警告。
+    这些都是用户自己的数据，一律按纯文本写。
+
+    注意：真正的公式（SUMIFS 那些）不要走这里，直接用 ws.cell(..., value=f)。
+    """
+    cell = ws.cell(row=row, column=col, value=value)
+    if isinstance(value, str) and value[:1] == "=":
+        cell.data_type = "s"
+    return cell
+
+
 def _fmt_row(ws: Worksheet, row: int, money_cols: list[int], pct_cols: list[int],
              int_cols: list[int] = ()) -> None:
     for c in money_cols:
@@ -645,7 +661,7 @@ def _sample_compare(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
     for r_i, vals in enumerate(rows, 3):
         is_total = vals[0] == "合计"
         for c, v in enumerate(vals, 1):
-            cell = ws.cell(row=r_i, column=c, value=v)
+            cell = _w(ws, r_i, c, v)
             cell.border = BORDER
             if is_total:
                 cell.fill = TOTAL_FILL
@@ -681,7 +697,7 @@ def _fee_breakdown(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
                     (val / p.gmv if p.gmv else 0),
                     (val / total_fee if total_fee else 0)]
             for c, v in enumerate(vals, 1):
-                ws.cell(row=row, column=c, value=v).border = BORDER
+                _w(ws, row, c, v).border = BORDER
             _fmt_row(ws, row, [4], [5, 6])
             row += 1
     ws.freeze_panes = "A3"
@@ -723,7 +739,7 @@ def _daily(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: str
         vals = [key, gmv, day_orders.get(key, 0), day_paid.get(key, 0),
                 gmv * overall_margin, overall_margin]
         for c, v in enumerate(vals, 1):
-            ws.cell(row=row, column=c, value=v).border = BORDER
+            _w(ws, row, c, v).border = BORDER
         _fmt_row(ws, row, [2, 4, 5], [6])
         row += 1
     ws.freeze_panes = "A3"
@@ -806,7 +822,7 @@ def _issues(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: st
     for (cat, obj), n in sorted(detail.items(), key=lambda x: (-x[1], x[0])):
         d, a = desc.get(cat, ("", ""))
         for c, v in enumerate([cat, obj, n, d, a], 1):
-            ws.cell(row=row, column=c, value=v).border = BORDER
+            _w(ws, row, c, v).border = BORDER
         ws.cell(row=row, column=3).number_format = INT
         ws.cell(row=row, column=2).font = Font(color="C0392B")
         row += 1
@@ -814,7 +830,7 @@ def _issues(ws: Worksheet, lines: list[OrderLine], res: CalcResult, subtitle: st
     for cat, n in summary.items():
         d, a = desc.get(cat, ("", ""))
         for c, v in enumerate([cat, "全部相关订单", n, d, a], 1):
-            ws.cell(row=row, column=c, value=v).border = BORDER
+            _w(ws, row, c, v).border = BORDER
         ws.cell(row=row, column=3).number_format = INT
         row += 1
 
@@ -955,7 +971,7 @@ def _detail(ws: Worksheet, lines: list[OrderLine], res: CalcResult,
                      _row_net(l, k, res.params, _cfg_w),
                      _row_net(l, k, res.params, _cfg_wo)]
         for c, v in enumerate(vals, 1):
-            ws.cell(row=row, column=c, value=v).border = BORDER
+            _w(ws, row, c, v).border = BORDER
         _fmt_row(ws, row,
                  [9, 10, 13, 14] + ([19, 22, 23, 24, 25] if with_formula else []),
                  [], [8, 12] + ([18, 20, 21] if with_formula else []))
