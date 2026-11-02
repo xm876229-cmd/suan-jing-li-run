@@ -712,6 +712,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .bar input[type=date]{font:inherit;font-size:13px;padding:6px 9px;
     border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}
   .bar .inline{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text-2)}
+  /* 工具条上的「重算」是次要动作：白底描边，别跟主按钮抢 */
+  .bar button.ghost{background:var(--panel);border:1px solid var(--line);color:var(--text-2);
+    padding:7px 16px}
+  .bar button.ghost:hover{border-color:var(--accent);color:var(--accent);background:#fff}
 
   .seg{display:inline-flex;background:var(--line-soft);border-radius:9px;padding:3px;gap:2px}
   .seg button{border:0;background:transparent;color:var(--text-2);font:inherit;font-size:13px;
@@ -909,9 +913,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <a href="#/run" data-view="run">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
              stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="9"/>
-          <path d="M10.2 8.4l5.6 3.6-5.6 3.6z"/>
-        </svg><span>开始核算</span></a>
+          <path d="M20.2 12a8.2 8.2 0 11-2.6-6"/>
+          <path d="M20.4 4.4v4.2h-4.2"/>
+        </svg><span>重新计算</span></a>
       <a href="#/plan" data-view="plan">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
              stroke-linecap="round" stroke-linejoin="round">
@@ -1019,6 +1023,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
 勾上：忽略记录，重新去平台导一遍（数据确实变了才勾）">
           <input type="checkbox" id="force-fetch"> 强制重新取数
         </label>
+        <button id="btn-recalc-picked" class="ghost"
+                title="用已经在本机的数据重算勾选的店，不重新取数。
+改了佣金费率 / 成本表 / 汇率之后点这个">重算</button>
         <button class="primary" id="btn-run-picked">运行勾选的</button>
       </div>
 
@@ -1032,9 +1039,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
     </section>
 
     <section class="page" id="view-run" hidden>
-      <div class="head"><h1>开始核算</h1>
+      <div class="head"><h1>重新计算</h1>
         <p>用<b>已经在本机上的数据</b>出报表，不会重新去店铺抓数。
-          改了佣金费率、成本表、汇率之后，回这里点一次就行，几十秒出新数字。<br>
+          改了佣金费率、成本表、汇率之后，在这儿点「重新计算」就行，几十秒出新数字。<br>
           要去平台重新导一遍，回「驾驶舱」点运行。</p></div>
 
       <div class="card"><h2>① 用哪批数据<span class="hint">不勾就按当前最新的一份</span></h2>
@@ -2295,6 +2302,9 @@ function initHome(){
     };
     const runBtn = $('#btn-run-picked');
     if(runBtn) runBtn.onclick = (e) => runStores([...PICKED], e.currentTarget, homeRange());
+    // 工具条上的「重算」：勾了哪几家就重算哪几家，用的是已经在本机的数据
+    const rcBtn = $('#btn-recalc-picked');
+    if(rcBtn) rcBtn.onclick = (e) => recalcPicked(e.currentTarget);
   }
   loadStatus();
   loadTrend();
@@ -2402,10 +2412,47 @@ async function recalcMany(ids, rg, onProgress){
                               // 重算覆盖同一份报表，别再堆 (2)(3)——一天改几次费率
                               // 就能堆出十几份，报表页直接没法看。
                               replace: true})});
-      out.push(await r.json());
-    }catch(e){ out.push({ok:false, store: ids[i], error: e.message}); }
+      out.push({ ...(await r.json()), _id: ids[i] });
+    }catch(e){ out.push({ok:false, store: ids[i], _id: ids[i], error: e.message}); }
   }
   return out;
+}
+
+/** 重算完成后统一收尾：新数字写回各店卡片、返回成功/失败分组。 */
+function applyRecalc(results){
+  const ok = results.filter(x => x.ok), bad = results.filter(x => !x.ok);
+  const hhmm = new Date().toTimeString().slice(0, 5);
+  ok.forEach(x => { if(x._id) CARD_RECALC[x._id] = {net: x.net_local, hhmm}; });
+  if(ok.length) renderCards();
+  return {ok, bad};
+}
+
+/** 驾驶舱工具条上的「重算」：勾了哪几家就重算哪几家，不重新取数。 */
+async function recalcPicked(btn){
+  const ids = [...PICKED];
+  if(!ids.length){ toast('先勾选要重算的店铺'); return; }
+  const old = btn.textContent;
+  btn.disabled = true;
+  const all = [];
+  for(let i = 0; i < ids.length; i++){
+    btn.textContent = '重算 ' + (i + 1) + '/' + ids.length;
+    const rg = HOME_MODE === 'single' ? (cardRange(ids[i]) || homeRange()) : homeRange();
+    all.push(...await recalcMany([ids[i]], rg, null));
+  }
+  btn.disabled = false;
+  btn.textContent = old;
+  const {ok, bad} = applyRecalc(all);
+  if(ok.length && !bad.length){
+    toast(ok.length === 1
+      ? ('已重算：净利 ' + fmt2(ok[0].net_local)
+         + '（' + (Number(ok[0].net_margin) * 100).toFixed(2) + '%）')
+      : ('已重算 ' + ok.length + ' 家'));
+  }else if(bad.length){
+    toast('重算失败 ' + bad.length + ' 家：' + String(bad[0].error || '未知原因').slice(0, 60));
+  }
+  // 单店模式下各店区间不同，没法记成「上次的区间」，就别记
+  if(ok.length && !bad.length && HOME_MODE !== 'single') rememberRun(homeRange());
+  loadStatus(); loadTrend();
 }
 
 /** 一句话说清重算结果，成功失败都给人能看懂的。 */
@@ -2440,10 +2487,11 @@ $('#recalc-go') && ($('#recalc-go').onclick = async () => {
     $('#recalc-sub').textContent = '正在重算（' + (i + 1) + '/' + n + '）…';
   });
   btn.disabled = false;
+  const {ok, bad} = applyRecalc(res);
   const s = recalcNote(res);
   toast((s.ok ? ('重算完成 ' + s.ok + ' 家，报表已更新') : '重算失败')
         + (s.bad ? ('，' + s.bad + ' 家没算成') : ''));
-  if(s.ok && !s.bad) hideRecalcBar();
+  if(ok.length && !bad.length){ hideRecalcBar(); rememberRun(rg); }
   loadStatus(); loadTrend();
 });
 
@@ -3088,7 +3136,7 @@ async function loadReports(){
     }
     const items = repStore ? repAll.filter(x => (x.group||'') === repStore) : repAll;
     if(!items.length){
-      $('#rep-list').innerHTML = '<div class="empty"><b>这里还没有报表</b>去「开始核算」跑一次</div>';
+      $('#rep-list').innerHTML = '<div class="empty"><b>这里还没有报表</b>去「重新计算」跑一次</div>';
       return;
     }
     $('#rep-list').innerHTML = '<table><thead><tr><th style="width:34px"></th><th>文件名</th>'
