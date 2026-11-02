@@ -2503,6 +2503,292 @@ async function loadTrend(){
   }catch(e){}
 }
 
+// 单个文件上限。base64 本身要占 1.34 倍，再加上中间那层字符串，
+// 传一个 300MB 的订单表能让标签页直接崩掉（而且崩得莫名其妙）。
+// 订单表正常几十 MB，200MB 足够宽裕。
+const MAX_UPLOAD = 200 * 1024 * 1024;
+
+async function fileToB64(f){
+  if(f.size > MAX_UPLOAD){
+    throw new Error(`文件有 ${(f.size/1024/1024).toFixed(0)} MB，超过 `
+      + `${MAX_UPLOAD/1024/1024} MB 上限。请在平台上把时间区间改小一点，分几次导出`);
+  }
+  const buf = new Uint8Array(await f.arrayBuffer());
+  let bin = "";
+  const CH = 0x8000;
+  for(let i = 0; i < buf.length; i += CH){
+    bin += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
+  }
+  return btoa(bin);
+}
+
+async function importFiles(files, kindHint){
+  const n = $('#imp2-note'), box = $('#imp2-result');
+  if(!files || !files.length) return;
+  note(n, '导入中…（' + files.length + ' 个文件）', 'ok');
+  if(box) box.innerHTML = '';
+  const lines = [];
+  for(const f of files){
+    try{
+      const b64 = await fileToB64(f);
+      const r = await fetch('/api/data-import', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          name: f.name, b64,
+          shop_id: ($('#imp2-store') ? $('#imp2-store').value : '') || '',
+          country: ($('#imp2-country') ? $('#imp2-country').value : '') || '',
+          kind: kindHint || '',
+        }),
+      });
+      const j = await r.json();
+      const warn = j.warning ? ` <span style="color:#B45309">⚠ ${esc(j.warning)}</span>` : '';
+      lines.push(j.ok
+        ? `✓ ${esc(f.name)} → <b>${esc(j.label)}</b>`
+          + `<span class="muted">（按${esc(j.country || '默认')}的列标题识别）</span>${warn}`
+        : `✕ ${esc(f.name)} → <span style="color:#C0392B">失败：${esc(j.error || '')}</span>`);
+    }catch(err){
+      lines.push(`✕ ${esc(f.name)} → <span style="color:#C0392B">失败：${esc(err.message || String(err))}</span>`);
+    }
+  }
+  note(n, lines.join('<br>'), 'ok');
+  // 导入完立刻刷新：本页清单、核算页文件、快照、总览数字
+  loadImportFiles(); loadStatus();
+}
+
+if($('#imp2-file')) $('#imp2-file').onchange = (e) => {
+  importFiles(Array.from(e.target.files || []));
+  e.target.value = "";            // 清空，同一个文件才能再选一次
+};
+
+/* 拖放：整块区域都能接文件，不用先点按钮再翻路径 */
+(function bindImportDrop(){
+  const dz = $('#imp2-drop');
+  if(!dz) return;
+  const stop = e => { e.preventDefault(); e.stopPropagation(); };
+  ['dragenter', 'dragover'].forEach(ev =>
+    dz.addEventListener(ev, e => { stop(e); dz.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev =>
+    dz.addEventListener(ev, e => { stop(e); dz.classList.remove('over'); }));
+  dz.addEventListener('drop', e => {
+    const fs = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if(fs.length) importFiles(fs);
+  });
+  dz.addEventListener('click', e => {
+    if(e.target.closest('label')) return;   // 点「选择文件」让它自己弹
+    const inp = $('#imp2-file');
+    if(inp) inp.click();
+  });
+})();
+
+/** 单独导入「商品映射表」（SKU → 商品ID）：强制按映射表存，不靠表头猜 */
+if($('#btn-imp2-map')) $('#btn-imp2-map').onclick = () => {
+  const inp = $('#imp2-map-file');
+  if(inp) inp.click();
+};
+if($('#imp2-map-file')) $('#imp2-map-file').onchange = (e) => {
+  const fs = Array.from(e.target.files || []);
+  if(fs.length) importFiles(fs, 'mapping');
+  e.target.value = '';
+};
+
+/** 单独导入「链接资料」（款式编码）：全局生效，不分店铺 */
+if($('#btn-imp2-link')) $('#btn-imp2-link').onclick = () => {
+  const inp = $('#imp2-link-file');
+  if(inp) inp.click();
+};
+if($('#imp2-link-file')) $('#imp2-link-file').onchange = async (e) => {
+  const f = (e.target.files || [])[0];
+  if(!f) return;
+  const n = $('#imp2-note');
+  note(n, '正在读取链接资料…', 'ok');
+  try{
+    const b64 = await fileToB64(f);
+    const j = await (await fetch('/api/link-info', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: f.name, b64}),
+    })).json();
+    note(n, j.ok
+      ? `✓ 链接资料已导入：<b>${j.sku_count}</b> 个 SKU / <b>${j.link_count}</b> 条链接`
+        + (j.multi_count ? `<span class="muted">（其中 ${j.multi_count} 条链接含多个款式编码）</span>` : '')
+      : '导入失败：' + esc(j.error || '未知原因'), j.ok ? 'ok' : 'err');
+  }catch(err){ note(n, '出错：' + esc(err.message), 'err'); }
+  e.target.value = '';
+};
+
+/** 「已经传了哪些」：按店铺列文件，没选店铺的单独标出来。
+ *  可以勾选删除——文件只会挪进「数据/回收站」，随时能找回来。 */
+const IMP_SEL = new Set();
+
+const KIND_CN = {orders:'订单', ads:'广告', affiliate:'联盟', mapping:'映射',
+                 other:'其他', 订单表:'订单', 广告表:'广告', 联盟佣金表:'联盟',
+                 商品映射表:'映射', 商品SKU表:'SKU', 链接资料:'链接'};
+function kindLabel(x){ return KIND_CN[x] || x; }   // 认不出就直接显示目录名
+
+async function loadImportFiles(){
+  const box = $('#imp2-files'), hint = $('#imp2-hint');
+  if(!box) return;
+  try{
+    const j = await (await fetch('/api/data-files')).json();
+    const groups = (j.groups || []).filter(g => (g.items || []).length);
+    const unknown = j.unknown || [], legacy = j.legacy || [];
+    let n = legacy.length + unknown.length;
+    groups.forEach(g => n += g.items.length);
+    let totalKb = 0;
+    groups.forEach(g => g.items.forEach(f => totalKb += Number(f.size_kb) || 0));
+    unknown.forEach(f => totalKb += Number(f.size_kb) || 0);
+    legacy.forEach(f => totalKb += Number(f.size_kb) || 0);
+    if(hint){
+      hint.textContent = n
+        ? `${n} 个文件 · 共 ${(totalKb / 1024).toFixed(totalKb > 10240 ? 0 : 1)} MB`
+        : '';
+    }
+    if(!n){
+      box.innerHTML = '<div class="empty"><b>还没传过文件</b>上面选好店铺，把后台导出的表拖进来就行</div>';
+      return;
+    }
+
+    // 勾选状态按 rel 存；列表重画后还在（rel 是稳定的相对路径）
+    const alive = new Set();
+    const collect = arr => arr.forEach(f => { if(f.rel) alive.add(f.rel); });
+    groups.forEach(g => collect(g.items));
+    collect(unknown); collect(legacy);
+    [...IMP_SEL].forEach(x => { if(!alive.has(x)) IMP_SEL.delete(x); });
+
+    const bar = `<div class="imp-bar">
+      <label class="chk"><input type="checkbox" id="imp-all"> 全选</label>
+      <span class="muted" id="imp-sel">已选 ${IMP_SEL.size} 个</span>
+      <span style="flex:1"></span>
+      <button class="danger" id="imp-del" ${IMP_SEL.size ? '' : 'disabled'}>删除选中</button>
+    </div>`;
+
+    const row = f => `<tr>
+      <td style="width:34px"><input type="checkbox" data-rel="${esc(f.rel || '')}"
+           ${IMP_SEL.has(f.rel) ? 'checked' : ''} ${f.rel ? '' : 'disabled'}></td>
+      <td>${esc(f.name)}</td>
+      <td class="muted" style="width:90px;white-space:nowrap">${f.size_kb} KB</td>
+      <td class="muted" style="width:110px;white-space:nowrap">${f.at}</td>
+      <td style="width:64px"><button class="mini" data-rm="${esc(f.rel || '')}">删除</button></td>
+    </tr>`;
+
+    let html = bar;
+    groups.forEach(g => {
+      const k = g.kinds || {};
+      const bits = Object.keys(k).filter(x => x !== 'other')
+        .map(x => kindLabel(x) + ' ' + k[x]).join(' · ');
+      html += `<div class="imp-grp">${esc(g.name)}
+        <span class="tag gray">${esc(g.country || '')}</span>
+        ${bits ? '<span class="tag">' + esc(bits) + '</span>' : ''}</div>`;
+      html += '<table><tbody>' + g.items.map(row).join('') + '</tbody></table>';
+    });
+    if(unknown.length){
+      html += `<div class="imp-grp warn">⚠ 没选店铺的数据（${unknown.length} 个）——不会参与核算</div>`;
+      html += '<table><tbody>' + unknown.map(row).join('') + '</tbody></table>';
+    }
+    if(legacy.length){
+      html += `<div class="imp-grp">公共目录（老的导入方式）</div>`;
+      html += '<table><tbody>' + legacy.map(f => `<tr>
+        <td style="width:34px"></td><td>${esc(f.name)}</td>
+        <td class="muted" style="width:90px">${f.size_kb} KB</td>
+        <td class="muted" style="width:110px">${f.at}</td><td></td></tr>`).join('') + '</tbody></table>';
+    }
+    box.innerHTML = html;
+
+    const refreshBar = () => {
+      const el = $('#imp-sel'); if(el) el.textContent = '已选 ' + IMP_SEL.size + ' 个';
+      const btn = $('#imp-del'); if(btn) btn.disabled = !IMP_SEL.size;
+      const all = $('#imp-all');
+      const boxes = [...box.querySelectorAll('input[data-rel]:not([disabled])')];
+      if(all){
+        all.checked = boxes.length > 0 && boxes.every(b => b.checked);
+        all.indeterminate = !all.checked && boxes.some(b => b.checked);
+      }
+    };
+
+    box.querySelectorAll('input[data-rel]').forEach(cb => {
+      cb.onchange = () => {
+        const r = cb.dataset.rel;
+        if(!r) return;
+        if(cb.checked) IMP_SEL.add(r); else IMP_SEL.delete(r);
+        refreshBar();
+      };
+    });
+    const all = $('#imp-all');
+    if(all) all.onchange = () => {
+      box.querySelectorAll('input[data-rel]:not([disabled])').forEach(cb => {
+        cb.checked = all.checked;
+        if(all.checked) IMP_SEL.add(cb.dataset.rel); else IMP_SEL.delete(cb.dataset.rel);
+      });
+      refreshBar();
+    };
+    box.querySelectorAll('[data-rm]').forEach(b => {
+      b.onclick = () => {
+        const r = b.dataset.rm;
+        if(!r) return;
+        impDelete([r]);
+      };
+    });
+    const del = $('#imp-del');
+    if(del) del.onclick = () => impDelete([...IMP_SEL]);
+    refreshBar();
+  }catch(err){
+    box.innerHTML = '<div class="empty">读取失败：' + esc(err.message) + '</div>';
+  }
+}
+
+async function impDelete(rels){
+  if(!rels || !rels.length) return;
+  if(!confirm(`把选中的 ${rels.length} 个文件移到回收站？\n\n`
+    + '· 不会真删，需要时能从「数据\\回收站」找回来\n'
+    + '· 删掉的如果是唯一的订单/SKU 数据，这家店就算不出报表了')) return;
+  try{
+    const j = await (await fetch('/api/data-files/delete', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({rels})})).json();
+    if(!j.ok){ toast('删除失败：' + (j.error || '')); return; }
+    rels.forEach(r => IMP_SEL.delete(r));
+    toast(`已移到回收站 ${j.moved} 个` + (j.missing?.length ? `，跳过 ${j.missing.length} 个已不存在的` : ''));
+    loadImportFiles();
+    if(typeof loadStatus === 'function') loadStatus();
+  }catch(e){ toast('删除失败：' + e.message); }
+}
+
+/** 导入店铺后台下载的「链接资料」表，读出每条链接的款式编码。 */
+if($('#btn-link-import')) $('#btn-link-import').onclick = async () => {
+  const inp = $('#link-file');
+  const btn = $('#btn-link-import'), n = $('#link-note'), st = $('#link-stat');
+  const f = inp && inp.files && inp.files[0];
+  if(!f){ note(n, '先选一个文件', 'err'); return; }
+  btn.disabled = true;
+  note(n, '正在读取…', 'ok');
+  try{
+    const b64 = await fileToB64(f);
+    const r = await fetch('/api/link-info', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: f.name, b64}),
+    });
+    const j = await r.json();
+    if(!j.ok){
+      note(n, '导入失败：' + (j.error || '未知原因'), 'err');
+      st.textContent = '';
+      return;
+    }
+    note(n, `导入成功：${j.sku_count} 个 SKU / ${j.link_count} 条链接`, 'ok');
+    const rows = (j.samples || []).map(x =>
+      `<tr><td class="mono" style="font-size:11.5px">${esc(x.link)}</td>
+       <td><b>${esc(x.styles)}</b></td></tr>`).join('');
+    st.innerHTML = j.multi_count
+      ? `其中 <b>${j.multi_count}</b> 条链接含多个款式编码（已用 / 连接）。下面是前几条：`
+      : '下面是前几条链接的款式编码：';
+    st.innerHTML += rows
+      ? `<table style="margin-top:8px;width:auto"><tbody>${rows}</tbody></table>`
+      : '';
+  }catch(e){
+    note(n, '出错：' + e.message, 'err');
+  }
+  btn.disabled = false;
+  if(inp) inp.value = "";
+};
+
 let repAll = [];      // 全部报表（两个房间都在里面，靠 room 区分）
 let repStore = '';    // 当前按哪个店铺筛选（空 = 全部）
 let repRoom = 'auto'; // auto = 自动报表 / manual = 手动报表
@@ -2830,7 +3116,15 @@ async function renameStore(shopId, btn){
     const r = await fetch('/api/stores/rename', {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({shop_id: shopId, name})});
     const j = await r.json();
-    toast(j.ok ? '已保存：' + name : ('保存失败：' + j.error));
+    if(j.ok){
+      // 名字改了，目录也跟着改；改不动时要说清楚，不然界面还是旧名会让人以为没保存
+      const moved = (j.moved || []).filter(x => !String(x).includes('没改'));
+      const stuck = (j.moved || []).filter(x => String(x).includes('没改') || String(x).includes('改不了'));
+      toast('已保存：' + name + (moved.length ? '（' + moved.join('；') + '）' : '')
+            + (stuck.length ? '　⚠ ' + stuck.join('；') : ''));
+    }else{
+      toast('保存失败：' + (j.error || ''));
+    }
     if(j.ok){ loadStores(); loadStatus(); }
   }catch(e){ toast('出错：' + e.message); }
   btn.disabled = false;

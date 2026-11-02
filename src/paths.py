@@ -376,6 +376,15 @@ def _load_store_names() -> dict[str, str]:
     return _STORE_NAMES
 
 
+def folder_name(name: str, fallback: str = "未识别店铺") -> str:
+    """把用户起的名字变成合法目录名（去掉非法字符、限长、留个兜底）。
+
+    改名要用它算目标目录，保证跟「新建店铺时按名字建目录」是同一套规则，
+    否则改完名下次启动又会被认成另一个目录。
+    """
+    return _safe_folder(name, fallback)
+
+
 def store_display_name(shop_id: str) -> str:
     """这家店对外该叫什么：stores.json 里的别名 → 平台店名 → 店铺 ID。
 

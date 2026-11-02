@@ -708,6 +708,63 @@ def discovered_stores() -> list[dict]:
     return out
 
 
+def _rename_store_dirs(shop_id: str, new_name: str) -> list[str]:
+    """把店铺的数据目录、以及两个报表房间里的同名目录一起改名。
+
+    为什么必须改目录：驾驶舱/手动核算的卡片标题、报表文件夹、手动数据目录
+    都是跟着**店目录名**走的。只改 stores.json 的话，界面还显示旧名字，
+    用户会以为改名没生效——实测就是这样。
+    """
+    moved: list[str] = []
+    try:
+        old = paths.store_root(shop_id)
+    except Exception:  # noqa: BLE001
+        return moved
+    want = paths.folder_name(new_name)
+    if not old.is_dir() or old.name == want:
+        return moved
+    target = old.parent / want
+    if target.exists():
+        return [f"数据目录没改：{want} 已存在"]
+    try:
+        old.rename(target)
+        moved.append(f"数据目录 {old.name} → {want}")
+    except OSError as e:
+        return [f"数据目录改不了名（可能有文件正被占用）：{e}"]
+    for room in ("auto", "manual"):
+        a = paths.report_room_dir(room) / old.name
+        b = paths.report_room_dir(room) / want
+        if a.is_dir() and not b.exists():
+            try:
+                a.rename(b)
+                moved.append(f"报表/{paths.REPORT_ROOMS[room]} {old.name} → {want}")
+            except OSError:
+                pass
+    return moved
+
+
+def reconcile_store_dirs() -> list[str]:
+    """启动时对齐一次：stores.json 里改了名、但目录还是旧名的，把目录改过来。
+
+    只认「目标目录不存在」的情况；同名冲突就跳过，绝不覆盖别人的数据。
+    """
+    out: list[str] = []
+    try:
+        cfg = json.loads(paths.STORES_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return out
+    for s in cfg.get("stores") or []:
+        if not isinstance(s, dict):
+            continue
+        sid = str(s.get("id") or "").strip()
+        nm = str(s.get("name") or "").strip()
+        if not sid or not nm:
+            continue
+        for m in _rename_store_dirs(sid, nm):
+            out.append(f"{nm}：{m}")
+    return out
+
+
 def rename_store(shop_id: str, alias: str) -> dict:
     """给店铺起个自己看得懂的名字。
 
@@ -747,8 +804,11 @@ def rename_store(shop_id: str, alias: str) -> dict:
     except OSError as e:
         return {"ok": False, "error": f"写入 stores.json 失败：{e}"}
 
-    _append_log(f"[store] 店铺改名：{sid} → {hit['name']}")
-    return {"ok": True, "shop_id": sid, "name": hit["name"]}
+    # 名字改了，目录也得跟着改：卡片标题和报表文件夹都取目录名
+    moved = _rename_store_dirs(sid, hit["name"])
+    _append_log(f"[store] 店铺改名：{sid} → {hit['name']}"
+                + (f"（{'；'.join(moved)}）" if moved else ""))
+    return {"ok": True, "shop_id": sid, "name": hit["name"], "moved": moved}
 
 
 def remove_store(shop_id: str) -> dict:
@@ -3525,6 +3585,15 @@ def main() -> int:
                 print(f"[报表] {_m}")
     except Exception as e:  # noqa: BLE001
         print(f"[报表] 目录迁移跳过：{e}")
+
+    # 改过名但目录还是旧名的，启动时对齐（界面上的卡片标题认目录名）
+    try:
+        _renamed = reconcile_store_dirs()
+        for _r in _renamed:
+            _append_log(f"[store] 目录对齐：{_r}")
+            print(f"[store] 目录对齐：{_r}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[store] 目录对齐跳过：{e}")
 
     if _SELFCHECK.get("crashed"):
         # 界面上已经有一条横幅说这件事了，这里只写日志，不重复塞进 actions
