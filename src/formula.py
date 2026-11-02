@@ -360,7 +360,7 @@ def load_config(path: Path) -> dict:
     # None / 空 = 用全部列 + 合计在底部 + 默认标题
     if isinstance(doc.get("report_columns"), list) and doc["report_columns"]:
         out["report_columns"] = [str(x) for x in doc["report_columns"] if str(x).strip()]
-    if str(doc.get("report_total_position") or "").strip() in ("top", "bottom"):
+    if str(doc.get("report_total_position") or "").strip() in ("top", "bottom", "none"):
         out["report_total_position"] = doc["report_total_position"]
     if isinstance(doc.get("report_titles"), dict) and doc["report_titles"]:
         out["report_titles"] = {str(k): str(v).strip()
@@ -402,7 +402,7 @@ def country_config(fcfg: dict, country: str) -> dict:
         base["exclude_zero_amount"] = bool(one["exclude_zero_amount"])
     if isinstance(one.get("report_columns"), list) and one["report_columns"]:
         base["report_columns"] = [str(x) for x in one["report_columns"] if str(x).strip()]
-    if str(one.get("report_total_position") or "").strip() in ("top", "bottom"):
+    if str(one.get("report_total_position") or "").strip() in ("top", "bottom", "none"):
         base["report_total_position"] = one["report_total_position"]
     if isinstance(one.get("report_titles"), dict) and one["report_titles"]:
         base["report_titles"] = {str(k): str(v).strip()

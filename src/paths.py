@@ -111,25 +111,88 @@ def _pick_dir(cn: str, en: str, base: Path | None = None) -> Path:
         try:
             old.rename(new)
             return new
-        except OSError:
+        except OSError as e:
+            # 目录里有文件正被别的进程打开（比如桥还开着日志）时改不了名。
+            # 不改也不影响使用，只是这个名字先留英文；下次启动会再试一次。
+            print(f"[目录] 暂时改不了名（可能有程序占用）：{en} → {cn}（{e}）")
             return old
     return new
 
 
 # ---- 可写数据 ----
+
+def _merge_into(src: Path, dst: Path) -> None:
+    """把 src 里剩下的东西搬进 dst（同名的跳过），搬空了就把 src 删掉。
+
+    只在迁移窗口用：老版本程序还在往英文目录写的时候，别让那批文件丢掉。
+    锁着的文件跳过，下次启动再搬。
+    """
+    try:
+        for item in list(src.iterdir()):
+            target = dst / item.name
+            try:
+                if item.is_dir():
+                    if target.is_dir():
+                        _merge_into(item, target)
+                    elif target.exists():
+                        continue
+                    else:
+                        item.rename(target)
+                else:
+                    if not target.exists():
+                        item.rename(target)
+                    else:
+                        # 同名：留新的，老的加后缀
+                        item.rename(target.with_name(
+                            f"{target.stem}.old{target.suffix}"))
+            except OSError:
+                continue
+        try:
+            src.rmdir()
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
+def _cn_sub(parent: Path, cn: str, en: str) -> Path:
+    """数据下面的子目录：用中文名，老版本是英文的就在启动时改名迁过来。
+
+    为什么要改：用户打开 数据\\ 看到 capture / costs / exports / logs / mapping /
+    stores 六个英文目录，不知道哪个是干什么的，也不敢删。
+    改名只在**新名字不存在**时做，失败（目录被占用）就继续用老名字，绝不丢数据。
+    """
+    new = parent / cn
+    old = parent / en
+    if new.is_dir():
+        # 改名过程中「新旧两个都在」是可能的：老版本还在跑、又往英文目录写了东西。
+        # 把英文目录里剩下的搬进中文目录，避免那批数据变成「看不见」。
+        if old.is_dir():
+            _merge_into(old, new)
+        return new
+    if old.is_dir():
+        try:
+            old.rename(new)
+            print(f"[目录] 已改名为中文：{en} → {cn}")
+            return new
+        except OSError:
+            return old
+    return new
+
+
 DATA = Path(os.environ.get("JINGLI_DATA") or _pick_dir(DIR_DATA, "data")).resolve()
-CAPTURE = DATA / "capture"
-EXPORTS = DATA / "exports"
-INBOX = EXPORTS / "_inbox"
-COSTS = DATA / "costs"
-MAPPING = DATA / "mapping"
-LOGS = DATA / "logs"
+CAPTURE = _cn_sub(DATA, "抓包记录", "capture")
+EXPORTS = _cn_sub(DATA, "导出", "exports")
+INBOX = _cn_sub(EXPORTS, "收件箱", "_inbox")
+COSTS = _cn_sub(DATA, "成本", "costs")
+MAPPING = _cn_sub(DATA, "链接映射", "mapping")
+LOGS = _cn_sub(DATA, "日志", "logs")
 
 # 多店铺：一家店一个目录，互不干扰
-#   data/stores/<shop_id>/inbox/    这家店的原始导出（按类型分子目录）
-#   data/stores/<shop_id>/meta.json 店名、国家、最后活动时间
-#   data/stores/_unknown/<时间戳>/   认不出店铺时的落点（不混进任何已知店）
-STORES_ROOT = DATA / "stores"
+#   数据/店铺/<店名>/订单表/     这家店的原始导出（按类型分子目录）
+#   数据/店铺/<店名>/meta.json   店名、国家、最后活动时间
+#   数据/店铺/未识别店铺/<时间>/  认不出店铺时的落点（不混进任何已知店）
+STORES_ROOT = _cn_sub(DATA, "店铺", "stores")
 UNKNOWN_ROOT = STORES_ROOT / "未识别店铺"
 
 # 店里 inbox 下按数据类型分子目录：文件多起来才不乱
@@ -238,11 +301,11 @@ def store_root(shop_id: str) -> Path:
 
 
 def store_dir(shop_id: str) -> Path:
-    """某家店的数据目录（inbox）。shop_id 为空时退回公共目录。"""
+    """某家店的数据目录（收件箱）。shop_id 为空时退回公共目录。"""
     sid = (shop_id or "").strip()
     if not sid:
         return INBOX
-    return store_root(sid) / "inbox"
+    return _cn_sub(store_root(sid), "收件箱", "inbox")
 
 
 # 分类子目录用中文：使用者打开文件夹一眼就知道哪张表是什么
@@ -343,15 +406,15 @@ def restore_defaults() -> list[str]:
 
     data_src = bundle / "默认数据"
     if data_src.is_dir():
-        for rel in ("costs/master.csv",):
-            src = data_src / rel
-            dst = DATA / rel
-            if not src.is_file() or dst.exists():
-                continue
+        # 随包带的是 costs/master.csv（英文，包内结构不对外），
+        # 落到用户目录时用中文的「成本/master.csv」
+        src = data_src / "costs" / "master.csv"
+        dst = COSTS / "master.csv"
+        if src.is_file() and not dst.exists():
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
-                fixed.append(f"数据/{rel}")
+                fixed.append(f"数据/{COSTS.name}/master.csv")
             except OSError:
                 pass
     return fixed

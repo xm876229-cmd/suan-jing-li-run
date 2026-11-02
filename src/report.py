@@ -319,7 +319,10 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
     total_vals = [s["gett"]() for s in specs]
     data_vals = [[s["getp"](p, i) for s in specs]
                  for i, p in enumerate(res.products, 1)]
-    if total_position == "top":
+    if total_position == "none":
+        # 不显示合计行：只出每条链接，合计自己用 Excel 求和或者看别处
+        rows = data_vals
+    elif total_position == "top":
         rows = [total_vals] + data_vals
     else:
         rows = data_vals + [total_vals]
@@ -499,8 +502,9 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
 
     row = 3
     for ri, vals in enumerate(rows):
-        is_total = (ri == 0 and total_position == "top") or \
-                   (total_position != "top" and ri == len(rows) - 1)
+        is_total = (total_position != "none") and (
+            (ri == 0 and total_position == "top")
+            or (total_position != "top" and ri == len(rows) - 1))
         if is_total:
             pid = ""
         else:

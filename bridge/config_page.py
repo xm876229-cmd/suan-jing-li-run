@@ -148,7 +148,7 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
                     or "exclude_zero_amount" in v
                     or (v.get("report_columns") and len(v["report_columns"]))
                     or (v.get("report_column_order") and len(v["report_column_order"]))
-                    or str(v.get("report_total_position") or "").strip() in ("top", "bottom")
+                    or str(v.get("report_total_position") or "").strip() in ("top", "bottom", "none")
                     or (v.get("report_titles") and len(v["report_titles"]))):
                 clean[k] = v
         if clean:
@@ -174,7 +174,7 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
         out["report_column_order"] = old["report_column_order"]
     if report_total_position is not None:
         pos = str(report_total_position).strip()
-        if pos in ("top", "bottom"):
+        if pos in ("top", "bottom", "none"):
             out["report_total_position"] = pos
     elif "report_total_position" in old:
         out["report_total_position"] = old["report_total_position"]

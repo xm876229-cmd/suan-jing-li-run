@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -86,6 +87,7 @@ def _files(dir_: Path, recursive: bool = True) -> list[dict]:
                     top = ""
                 out.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime,
                             "rel": str(rel) if recursive else p.name,
+                            "path": str(p),
                             "kind": top or "other"})
     except (OSError, ValueError):
         pass
@@ -154,6 +156,60 @@ def reports() -> dict:
     ]}
 
 
+def _rel_to_data(p) -> str:
+    """文件相对「数据根」的路径。前端只拿到这个，删除接口也只用它。
+
+    绝不把绝对路径交给前端：前端传回来什么就删什么的话，
+    一个拼错的路径就能把程序目录外的文件挪走。
+    """
+    if not p:
+        return ""
+    try:
+        return str(Path(p).relative_to(paths.DATA)).replace("\\", "/")
+    except (ValueError, OSError):
+        return ""
+
+
+def delete_data_files(rels: list[str]) -> dict:
+    """把选中的导入文件挪进「回收站」，不是真删。
+
+    为什么不真删：这些都是从平台导出来的原始数据，有些报表只保留最近几个月，
+    删了就得重新取一次（大店还得等平台生成）。挪走能恢复，代价只是占硬盘。
+    """
+    moved, missing, bad = [], [], []
+    trash_root = paths.DATA / "回收站" / datetime.now().strftime("%Y%m%d_%H%M")
+    data_root = paths.DATA.resolve()
+    for rel in rels or []:
+        r = str(rel or "").replace("\\", "/").strip().lstrip("/")
+        if not r or ".." in r.split("/"):
+            bad.append(str(rel))
+            continue
+        try:
+            src = (paths.DATA / r).resolve()
+            if not src.is_relative_to(data_root) or not src.is_file():
+                missing.append(r)
+                continue
+            dst = trash_root / src.relative_to(data_root)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            i = 2
+            base = dst
+            while dst.exists():
+                dst = base.with_name(f"{base.stem} ({i}){base.suffix}")
+                i += 1
+            os.replace(src, dst)
+            moved.append(r)
+        except OSError as e:
+            bad.append(f"{r}（{e}）")
+    if moved:
+        try:
+            sz = sum(f.stat().st_size for f in trash_root.rglob("*") if f.is_file())
+        except OSError:
+            sz = 0
+        print(f"[导入] 挪走 {len(moved)} 个文件到 {trash_root}（{sz/1024/1024:.1f} MB）")
+    return {"ok": True, "moved": len(moved), "missing": missing, "bad": bad,
+            "trash": str(trash_root) if moved else ""}
+
+
 def data_files() -> dict:
     """按店铺分开列，哪家店有数据、缺哪类，一眼看得出来。"""
     from bridge.server import discovered_stores
@@ -175,7 +231,8 @@ def data_files() -> dict:
             "items": [
                 {"name": f["name"], "size_kb": round(f["size"] / 1024),
                  "at": datetime.fromtimestamp(f["mtime"]).strftime("%m-%d %H:%M"),
-                 "kind": f.get("kind") or "other"}
+                 "kind": f.get("kind") or "other",
+                 "rel": _rel_to_data(f.get("path"))}
                 for f in files
             ],
         })
@@ -190,7 +247,7 @@ def data_files() -> dict:
                 for f in _files(d):
                     unknown.append({"name": f["name"], "size_kb": round(f["size"] / 1024),
                                     "at": datetime.fromtimestamp(f["mtime"]).strftime("%m-%d %H:%M"),
-                                    "batch": d.name})
+                                    "batch": d.name, "rel": _rel_to_data(f.get("path"))})
     except OSError:
         pass
 
@@ -430,7 +487,74 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .note.ok{background:var(--accent-soft);color:#0a5442}
   .note.err{background:var(--warn-soft);color:var(--warn)}
   .tbl-wrap{overflow-x:auto}
+
+  .imp-bar{display:flex;align-items:center;gap:12px;padding:10px 20px;
+    border-bottom:1px solid var(--line-soft);background:#fafbfc}
+  .imp-bar .chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;
+    color:var(--text-2);cursor:pointer;user-select:none}
+  .imp-grp{padding:11px 20px 6px;font-size:12.5px;color:var(--text-2);background:#fafbfc;
+    border-bottom:1px solid var(--line-soft);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .imp-grp.warn{color:var(--warn);background:#fdf6f5}
+
+  .rep-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    padding:10px 0;border-top:1px solid var(--line-soft)}
+  .rep-bar .chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;
+    color:var(--text-2);cursor:pointer;user-select:none}
+  .rep-bar .chk input{width:15px;height:15px;accent-color:var(--accent)}
+  .rep-k{font-size:13px;color:var(--text-2);white-space:nowrap}
+  .pick-row{display:flex;gap:8px;align-items:center}
+  .pick-row input{flex:1;min-width:0}
+  .pick-row .mini{white-space:nowrap}
+  /* ---------- 区间按钮 + 日历面板 ---------- */
+  .rbtn{font:inherit;font-size:12.5px;padding:6px 10px;border-radius:8px;
+    border:1px solid var(--line);background:var(--panel);color:var(--text);
+    cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
+  .rbtn:hover{border-color:#ccd4de;background:#fff}
+  .rbtn svg{width:13px;height:13px;color:var(--text-3);flex:none}
+  .bar .rbtn{font-size:13px;padding:6px 11px}
+
+  .rp{position:fixed;z-index:80;width:296px;background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;box-shadow:0 18px 44px -16px rgba(17,24,39,.32);padding:14px;
+    display:none;user-select:none}
+  .rp.show{display:block}
+  .rp-top{display:flex;gap:8px;margin-bottom:10px}
+  .rp-box{flex:1;border:1px solid var(--line);border-radius:9px;padding:6px 9px;min-width:0}
+  .rp-box span{font-size:11px;color:var(--text-3);display:block}
+  .rp-box b{font-size:12.5px;font-weight:600;display:block;margin-top:1px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .rp-box.on{border-color:var(--accent);background:var(--accent-soft)}
+  .rp-box.on b{color:var(--accent)}
+  .rp-chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .rp-chips button{font-size:12px;padding:4px 10px;border-radius:20px;
+    border:1px solid var(--line);background:var(--panel);color:var(--text-2);cursor:pointer}
+  .rp-chips button:hover{border-color:#ccd4de;color:var(--text)}
+  .rp-head{display:flex;align-items:center;gap:6px;margin-bottom:6px}
+  .rp-head b{flex:1;text-align:center;font-size:13px}
+  .rp-head button{width:28px;height:28px;padding:0;border-radius:8px;font-size:15px;
+    color:var(--text-2);background:none;border:1px solid transparent}
+  .rp-head button:hover{background:var(--line-soft)}
+  .rp-wd{display:grid;grid-template-columns:repeat(7,1fr);margin-bottom:2px}
+  .rp-wd span{text-align:center;font-size:11px;color:var(--text-3);padding:3px 0}
+  .rp-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:1px}
+  .rp-grid button{height:31px;padding:0;border:none;background:none;border-radius:7px;
+    font-size:12.5px;color:var(--text);cursor:pointer}
+  .rp-grid button:hover{background:var(--line-soft)}
+  .rp-grid button.mute{color:#c8ced6}
+  .rp-grid button.in{background:var(--accent-soft);color:#0a5442;border-radius:0}
+  .rp-grid button.a,.rp-grid button.b{background:var(--accent);color:#fff;font-weight:600}
+  .rp-grid button.a{border-radius:7px 0 0 7px}
+  .rp-grid button.b{border-radius:0 7px 7px 0}
+  .rp-grid button.a.b{border-radius:7px}
+  .rp-grid button.today{box-shadow:inset 0 0 0 1px var(--accent)}
+  .rp-foot{display:flex;align-items:center;gap:8px;margin-top:10px;
+    padding-top:9px;border-top:1px solid var(--line-soft)}
+  .rp-foot .rp-hint{flex:1;font-size:11.5px;color:var(--text-3);line-height:1.5}
+  .rp-foot button{font-size:12px;padding:4px 10px;border-radius:7px}
+
   .ops{display:flex;gap:6px;align-items:center;white-space:nowrap}
+  #rep-list td{padding:11px 16px}
+  #rep-list th{padding:10px 16px}
+  #rep-list td:nth-child(2){word-break:break-all}
   .cfg-tbl th{white-space:nowrap;padding:10px 12px;font-size:11.5px}
   .cfg-tbl td{padding:8px 12px}
   .cfg-tbl input[type=text],.cfg-tbl input[type=number]{min-width:0;width:100%;padding:6px 8px;font-size:12.5px}
@@ -657,7 +781,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   body.single .sc-foot{flex-wrap:wrap;gap:6px}
   body.single .sc-foot .last{display:none}
   body.single .sc-date{display:flex;width:100%}
-  body.single .sc-date input{flex:1;width:auto;min-width:0}
+  body.single .sc-date .rbtn{width:100%;justify-content:center}
   body.single .sc-foot button{width:100%}
 
   /* ---------- 计划任务 ---------- */
@@ -854,9 +978,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="sep"></div>
         <div class="inline" id="home-range-wrap">
           <span style="color:var(--text-3)">区间</span>
-          <input type="date" id="home-from">
-          <span style="color:var(--text-3)">~</span>
-          <input type="date" id="home-to">
+          <button class="rbtn" id="home-range" title="点一次，起止日期一起选">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="4.6" width="18" height="16.4" rx="3"/><path d="M3 10h18M8 2.6v4M16 2.6v4"/>
+            </svg><span id="home-range-txt">最近 30 天</span>
+          </button>
         </div>
         <div class="chips tight" id="home-presets">
           <button data-k="last_month">上月</button>
@@ -879,39 +1006,58 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
     <section class="page" id="view-run" hidden>
       <div class="head"><h1>开始核算</h1>
-        <p><b>这一页只重算，不取数</b>——用已经下载到本机的数据出报表。
-           要重新从店铺抓数据，回<b>「驾驶舱」</b>点运行。
-           手上没有数据？去<b>「导入数据」</b>传你自己导出的表，算法完全一样。</p></div>
-      <div class="card"><h2>核算范围</h2><div class="body">
-        <div class="chips" id="chips">
-          <button data-k="month">本月</button><button data-k="lastmonth">上月</button>
-          <button data-k="d7">最近 7 天</button><button data-k="d30">最近 30 天</button>
-          <button data-k="all" class="on">全部数据</button></div>
-        <div class="row">
-          <div class="field" style="flex:1;min-width:340px"><label>用哪次数据（可多选合并）</label>
-            <div class="snap-list" id="snap-list"><div class="empty">读取中…</div></div>
-            <div class="chips tight" id="snap-chips">
-              <button data-sel="latest">仅最新</button>
-              <button data-sel="all">全部</button>
-              <button data-sel="last3">近 3 次</button>
-              <button data-sel="none">不指定</button></div>
+        <p>用<b>已经在本机上的数据</b>出报表，不会重新去店铺抓数。
+          要重新取数回「驾驶舱」点运行；手上没有数据，去「导入数据」把自己导出的表传上来。</p></div>
+
+      <div class="card"><h2>① 用哪批数据<span class="hint">不勾就按当前最新的一份</span></h2>
+        <div class="body">
+          <div class="snap-list" id="snap-list"><div class="empty">读取中…</div></div>
+          <div class="chips tight" id="snap-chips" style="margin:10px 0 0">
+            <button data-sel="latest">仅最新</button>
+            <button data-sel="all">全部</button>
+            <button data-sel="last3">近 3 次</button>
+            <button data-sel="none">不指定</button></div>
+          <p class="muted" style="font-size:12.5px;margin:10px 0 0">
+            每取一次数会自动存一份快照。勾多份 = 把它们合并起来算；不勾 = 用当前目录里最新的数据。</p>
+        </div></div>
+
+      <div class="card"><h2>② 算哪家店、哪段时间</h2>
+        <div class="body">
+          <div class="row" style="align-items:flex-end;gap:16px">
+            <div class="field" style="min-width:230px"><label>店铺</label>
+              <select id="store"><option value="">全部店铺（逐个核算）</option></select></div>
+            <div class="field"><label>时间区间</label>
+              <button class="rbtn" id="run-range" title="点一次，起止日期一起选">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="4.6" width="18" height="16.4" rx="3"/><path d="M3 10h18M8 2.6v4M16 2.6v4"/>
+                </svg><span id="run-range-txt">全部数据</span>
+              </button></div>
+            <div class="chips" id="chips" style="margin:0 0 2px">
+              <button data-k="month">本月</button><button data-k="lastmonth">上月</button>
+              <button data-k="d7">最近 7 天</button><button data-k="d30">最近 30 天</button>
+              <button data-k="all" class="on">全部</button></div>
           </div>
-          <div class="field"><label>店铺</label>
-            <select id="store" style="min-width:200px"><option value="">全部店铺（逐个核算）</option></select></div>
-          <div class="field"><label>开始日期</label><input type="date" id="dfrom"></div>
-          <div class="field"><label>结束日期</label><input type="date" id="dto"></div>
-          <button class="primary" id="btn-run">开始核算</button></div>
-        <div style="margin-top:10px">
+          <p class="muted" style="font-size:12.5px;margin:12px 0 0">
+            区间只影响「哪些订单算进来」，不会去平台重新导出。选「全部」= 不按日期过滤。</p>
+        </div></div>
+
+      <div class="card"><h2>③ 出报表</h2>
+        <div class="body">
           <label class="switch">
             <input type="checkbox" id="with-formula">
             <span><b>导出带公式的报表</b>
-              <em>明细页会多出「订单类别 / 是否样品 / 净利贡献(含样品) / 净利贡献(去样品)」四列；
-                汇总页末尾的净利用 SUMIFS 引用明细，改「口径」页第一行的开关（含样品 / 去除样品）
-                就能在 Excel 里直接切换口径，不必回程序重算。</em></span>
+              <em>明细页多出「订单类别 / 是否样品 / 净利贡献」等几列；汇总页用 SUMIFS 引用明细，
+                在 Excel 里改「口径」页的开关就能自己切含 / 不含样品，不用回程序重算。
+                不带公式：文件小、打开快，数字是最终值。</em></span>
           </label>
-        </div>
-        <div class="note" id="run-note"></div>
-      </div></div>
+          <div class="row" style="margin-top:16px;align-items:center;gap:14px">
+            <button class="primary" id="btn-run" style="padding:10px 26px">开始核算</button>
+            <span class="muted" style="font-size:12.5px">报表会出在「报表」页，同名不覆盖、自动加 (2)</span>
+          </div>
+          <div class="note" id="run-note"></div>
+        </div></div>
+
       <div class="card"><h2>会用到哪些数据<span class="hint" id="run-files-hint"></span></h2>
         <div class="body tight" id="run-files"><div class="empty">读取中…</div></div>
         <div class="body" style="border-top:1px solid var(--line-soft);padding-top:12px">
@@ -988,34 +1134,38 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
     <section class="page" id="view-reports" hidden>
       <div class="head"><h1>报表</h1>
-        <p>点「查看」直接在界面里看汇总和费用拆解，不用打开 Excel；点「下载」存到本地。</p></div>
+        <p>每次核算出的 Excel 都在这里。点「查看」直接在界面里看汇总和费用拆解，不用打开 Excel。</p></div>
+
       <div class="card"><h2>全部报表<span class="hint" id="rep-hint"></span></h2>
-        <div class="body" style="padding-bottom:0">
-          <div class="chips" id="rep-filter"><button data-store="" class="on">所有报表</button></div>
-          <div class="tools" style="margin:10px 0 0">
-            <button class="mini" id="rep-all">全选</button>
-            <button class="mini" id="rep-none">取消全选</button>
+        <div class="body" style="padding:14px 20px 0">
+          <div class="chips" id="rep-filter" style="margin-bottom:12px">
+            <button data-store="" class="on">所有报表</button></div>
+
+          <div class="rep-bar">
+            <label class="chk"><input type="checkbox" id="rep-all-chk"> 全选</label>
+            <span class="muted" id="rep-sel">已选 0 份</span>
+            <span style="flex:1"></span>
             <button class="primary" id="rep-dl">下载勾选的</button>
-            <button id="rep-dl-all">下载这个店铺的全部</button>
-            <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text-2);margin-left:6px">
-              <input type="checkbox" id="rep-formula"> 导出带公式
-            </label>
+            <button id="rep-dl-all">下载当前店铺全部</button>
             <button class="danger" id="rep-del">删除勾选的</button>
           </div>
-          <div class="tools" style="margin:10px 0 0;gap:8px;align-items:center">
-            <span style="font-size:13px;color:var(--text-2)">保存到</span>
+
+          <div class="rep-bar" style="border-top:none">
+            <span class="rep-k">下载到</span>
             <input type="text" id="rep-dir" placeholder="留空 = 桌面"
-                   style="flex:1;min-width:260px;padding:7px 10px;font-size:13px;
+                   style="flex:1;min-width:220px;padding:7px 10px;font-size:13px;
                           border:1px solid var(--line);border-radius:8px">
             <button class="mini" id="rep-dir-pick">选择文件夹…</button>
             <button class="mini" id="rep-dir-open">打开</button>
+            <label class="chk" style="margin-left:6px">
+              <input type="checkbox" id="rep-formula"> 导出带公式
+            </label>
           </div>
-          <p class="muted" style="font-size:12.5px;margin:8px 0 12px">
-            报表按店铺分目录存放（<span class="mono">报表\店名\</span>）。
-            点「下载」会直接存到本机（设置里的「报表下载到哪儿」，没填就存桌面），
-            存完会告诉你路径。勾上「导出带公式」会按原区间重算一份带 SUMIFS 的版本。
-            删除只是挪进 <span class="mono">报表\_已删除\</span>，删错了能找回来。
-          </p>
+
+          <p class="muted" style="font-size:12.5px;margin:4px 0 14px;line-height:1.7">
+            报表按店铺分目录存（<span class="mono">报表\店名\</span>）。
+            勾「导出带公式」会按原区间重算一份带 SUMIFS 的版本，能在 Excel 里自己切含/不含样品。<br>
+            删除只是挪进 <span class="mono">报表\_已删除\</span>，删错了能找回来。</p>
         </div>
         <div class="body tight" id="rep-list"><div class="empty">加载中…</div></div>
       </div>
@@ -1187,7 +1337,11 @@ _TEMPLATE = r"""<!DOCTYPE html>
               <input type="checkbox" id="rcols-all">
               <span><b>全选展示</b><em>取消勾选 = 不展示这一列</em></span>
             </label>
-            <div style="font-size:13px;color:var(--text-2)">
+            <label class="switch" style="margin:0">
+              <input type="checkbox" id="rcol-total-on">
+              <span><b>显示合计行</b><em>关掉后汇总页不出现「合计」那一行</em></span>
+            </label>
+            <div style="font-size:13px;color:var(--text-2)" id="rcol-total-pos">
               合计行位置：
               <label style="margin:0 4px;cursor:pointer"><input type="radio" name="rcol-total" value="bottom" checked> 表格底部</label>
               <label style="margin:0 4px;cursor:pointer"><input type="radio" name="rcol-total" value="top"> 表格顶部（首行）</label>
@@ -1389,11 +1543,24 @@ _TEMPLATE = r"""<!DOCTYPE html>
       </div></div>
       <div class="card"><h2>报表保存位置</h2><div class="body">
         <div class="field" style="max-width:520px">
+        <div class="field" style="max-width:640px">
           <label>核算完自动复制到这个文件夹（留空则只在程序目录里）</label>
-          <input type="text" id="set-dir" placeholder="D:\净利报表"></div>
-        <div class="field" style="max-width:520px;margin-top:12px">
+          <div class="pick-row">
+            <input type="text" id="set-dir" placeholder="点右边选一个文件夹，或直接粘贴路径">
+            <button class="mini" id="set-dir-pick">选择文件夹…</button>
+            <button class="mini" id="set-dir-open">打开</button>
+          </div>
+        </div>
+        <div class="field" style="max-width:640px;margin-top:14px">
           <label>「下载导入模板」存到这个文件夹（留空则存到程序的「报表」目录）</label>
-          <input type="text" id="set-tpl-dir" placeholder="D:\净利模板"></div>
+          <div class="pick-row">
+            <input type="text" id="set-tpl-dir" placeholder="点右边选一个文件夹，或直接粘贴路径">
+            <button class="mini" id="set-tpl-pick">选择文件夹…</button>
+            <button class="mini" id="set-tpl-open">打开</button>
+          </div>
+        </div>
+        <p class="muted" style="font-size:12.5px;margin:10px 0 0">
+          「打开」会在资源管理器里打开那个文件夹；路径不存在时程序会自动创建。</p>
         <label class="switch" style="margin-top:12px">
           <input type="checkbox" id="set-formula">
           <span><b>导出的报表带 Excel 公式</b>
@@ -1608,6 +1775,188 @@ function sec2text(sec){
   return Math.floor(m/60) + ' 时' + (m%60) + ' 分';
 }
 
+/* ---------------- 区间日历 ----------------
+ *
+ * 为什么不用 <input type="date">：
+ *   1. 原生日历只能点那个小图标才弹，命中区域小得离谱；
+ *   2. 它是浏览器的浮层，卡片墙每 3 秒重绘一次 innerHTML，
+ *      浮层当场被销毁 —— 表现就是「日历点开几秒自己收回去」。
+ * 所以自己画一个，挂在 body 上（不受重绘影响），并且一次点完两个日期：
+ * 第一次点 = 起点，第二次点 = 终点；第二下比第一下早，就自动把早的当起点。
+ */
+let HOME_RANGE = null;          // 总控用的区间
+const CARD_RANGE = {};          // 单店模式下每张卡自己的区间
+
+const RP = { el: null, anchor: null, onPick: null, a: null, b: null, y: 0, m: 0, phase: 'a' };
+
+function fmtRange(r){
+  if(!r || !r.startDate || !r.to) return '选择区间';
+  return `${r.startDate.replace(/-/g, '/')} ~ ${r.to.replace(/-/g, '/')}`;
+}
+
+function rpBuild(){
+  if(RP.el) return;
+  const el = document.createElement('div');
+  el.className = 'rp';
+  el.id = 'rp';
+  el.innerHTML = `
+    <div class="rp-top">
+      <div class="rp-box" id="rp-ba"><span>起点</span><b>—</b></div>
+      <div class="rp-box" id="rp-bb"><span>终点</span><b>—</b></div>
+    </div>
+    <div class="rp-chips">
+      <button data-k="last_month">上月</button>
+      <button data-k="month">本月至今</button>
+      <button data-k="last7">近 7 天</button>
+      <button data-k="last30">近 30 天</button>
+    </div>
+    <div class="rp-head">
+      <button id="rp-prev" title="上个月">‹</button>
+      <b id="rp-title"></b>
+      <button id="rp-next" title="下个月">›</button>
+    </div>
+    <div class="rp-wd">${['一','二','三','四','五','六','日'].map(x => `<span>${x}</span>`).join('')}</div>
+    <div class="rp-grid" id="rp-grid"></div>
+    <div class="rp-foot">
+      <span class="rp-hint" id="rp-hint">点两下：先点起点，再点终点</span>
+      <button id="rp-today">今天</button>
+    </div>`;
+  document.body.appendChild(el);
+  RP.el = el;                 // 必须挂上，不然 rpOpen 里的 RP.el 还是 null
+
+  el.querySelector('#rp-prev').onclick = e => { e.stopPropagation(); rpMonth(-1); };
+  el.querySelector('#rp-next').onclick = e => { e.stopPropagation(); rpMonth(1); };
+  el.querySelector('#rp-today').onclick = e => {
+    e.stopPropagation();
+    const t = new Date();
+    rpPick(new Date(t.getFullYear(), t.getMonth(), t.getDate()));
+  };
+  el.querySelectorAll('.rp-chips button').forEach(b => {
+    b.onclick = e => {
+      e.stopPropagation();
+      const [x, y] = rangeOf(b.dataset.k);
+      rpApply(x, y);
+    };
+  });
+  // 点面板内部不算「点了外面」
+  el.addEventListener('mousedown', e => e.stopPropagation());
+  document.addEventListener('mousedown', e => {
+    if(!RP.el.classList.contains('show')) return;
+    if(RP.el.contains(e.target) || (RP.anchor && RP.anchor.contains(e.target))) return;
+    rpClose();
+  });
+  window.addEventListener('resize', () => rpClose());
+  window.addEventListener('scroll', () => rpClose(), true);
+}
+
+function rpOpen(anchor, cur, onPick){
+  rpBuild();
+  RP.anchor = anchor;
+  RP.onPick = onPick;
+  RP.phase = 'a';
+  RP.a = cur && cur.startDate ? new Date(cur.startDate + 'T00:00:00') : null;
+  RP.b = cur && cur.to ? new Date(cur.to + 'T00:00:00') : null;
+  if(RP.a && RP.b && RP.b < RP.a){ const t = RP.a; RP.a = RP.b; RP.b = t; }
+  const base = RP.a || new Date();
+  RP.y = base.getFullYear(); RP.m = base.getMonth();
+
+  RP.el.classList.add('show');
+  rpPaint();
+  rpPlace();
+}
+
+function rpPlace(){
+  const r = RP.anchor.getBoundingClientRect();
+  const w = 296, h = RP.el.offsetHeight || 380;
+  let left = Math.min(r.left, window.innerWidth - w - 12);
+  left = Math.max(10, left);
+  let top = r.bottom + 6;
+  if(top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+  RP.el.style.left = left + 'px';
+  RP.el.style.top = top + 'px';
+}
+
+function rpClose(){
+  if(RP.el) RP.el.classList.remove('show');
+  RP.anchor = null; RP.onPick = null;
+}
+
+function rpMonth(d){
+  let m = RP.m + d, y = RP.y;
+  if(m < 0){ m = 11; y--; }
+  if(m > 11){ m = 0; y++; }
+  RP.m = m; RP.y = y;
+  rpPaint();
+}
+
+function rpPaint(){
+  const t = new Date();
+  const today = new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+  const el = RP.el;
+
+  el.querySelector('#rp-title').textContent = `${RP.y} 年 ${RP.m + 1} 月`;
+  el.querySelector('#rp-ba b').textContent = RP.a ? dstr(RP.a).replace(/-/g, '/') : '—';
+  el.querySelector('#rp-bb b').textContent = RP.b ? dstr(RP.b).replace(/-/g, '/') : '—';
+  el.querySelector('#rp-ba').classList.toggle('on', RP.phase === 'a');
+  el.querySelector('#rp-bb').classList.toggle('on', RP.phase !== 'a');
+  el.querySelector('#rp-hint').textContent = RP.a && !RP.b
+    ? '再点一下终点（点更早的日期也行，会自动换过来）'
+    : '点两下：先点起点，再点终点';
+
+  const first = new Date(RP.y, RP.m, 1);
+  const offset = (first.getDay() + 6) % 7;          // 周一开头
+  const days = new Date(RP.y, RP.m + 1, 0).getDate();
+  const prevDays = new Date(RP.y, RP.m, 0).getDate();
+
+  const A = RP.a ? RP.a.getTime() : null;
+  const B = RP.b ? RP.b.getTime() : null;
+  let html = '';
+  for(let i = 0; i < offset; i++){
+    const d = prevDays - offset + 1 + i;
+    html += `<button class="mute" data-t="${new Date(RP.y, RP.m - 1, d).getTime()}">${d}</button>`;
+  }
+  for(let d = 1; d <= days; d++){
+    const ts = new Date(RP.y, RP.m, d).getTime();
+    let cls = '';
+    if(A && ts === A) cls += ' a';
+    if(B && ts === B) cls += ' b';
+    if(A && B && ts > A && ts < B) cls += ' in';
+    if(ts === today) cls += ' today';
+    html += `<button class="${cls}" data-t="${ts}">${d}</button>`;
+  }
+  const tail = (7 - ((offset + days) % 7)) % 7;
+  for(let i = 1; i <= tail; i++){
+    html += `<button class="mute" data-t="${new Date(RP.y, RP.m + 1, i).getTime()}">${i}</button>`;
+  }
+  const grid = el.querySelector('#rp-grid');
+  grid.innerHTML = html;
+  grid.querySelectorAll('button').forEach(b => {
+    b.onclick = e => { e.stopPropagation(); rpPick(new Date(Number(b.dataset.t))); };
+  });
+}
+
+function rpPick(d){
+  if(RP.phase === 'a' || (RP.a && RP.b)){
+    RP.a = d; RP.b = null; RP.phase = 'b';
+    rpPaint();
+    return;
+  }
+  // 第二次点：早的当起点、晚的当终点（用户可能先点终点）
+  let a = RP.a, b = d;
+  if(b < a){ const t = a; a = b; b = t; }
+  RP.a = a; RP.b = b; RP.phase = 'a';
+  rpApply(dstr(a), dstr(b));
+}
+
+function rpApply(a, b){
+  if(RP.onPick) RP.onPick({ startDate: a, to: b });
+  rpClose();
+}
+
+function openRangePicker(anchor, cur, onPick){
+  rpOpen(anchor, cur, onPick);
+}
+
 /** 区间预设：算出具体日期填进输入框，派任务时传具体日期，扩展不用懂规则 */
 function rangeOf(kind){
   const now = new Date(), t = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -1617,6 +1966,10 @@ function rangeOf(kind){
     const s0 = new Date(y); s0.setDate(y.getDate() - 6);
     return [dstr(s0), dstr(y)];
   }
+  if (kind === 'last30'){
+    const s0 = new Date(y); s0.setDate(y.getDate() - 29);
+    return [dstr(s0), dstr(y)];
+  }
   if (kind === 'month') return [dstr(new Date(t.getFullYear(), t.getMonth(), 1)), dstr(t)];
   const first = new Date(t.getFullYear(), t.getMonth() - 1, 1);
   const last = new Date(t.getFullYear(), t.getMonth(), 0);
@@ -1624,15 +1977,20 @@ function rangeOf(kind){
 }
 
 function homeRange(){
-  const f = ($('#home-from') || {}).value, t = ($('#home-to') || {}).value;
-  if (f && t) return { startDate: f, to: t };
-  const [a, b] = rangeOf('last_month');
+  if(HOME_RANGE) return HOME_RANGE;
+  const [a, b] = rangeOf('last30');
   return { startDate: a, to: b };
+}
+
+function paintHomeRange(){
+  const el = $('#home-range-txt');
+  if(el) el.textContent = fmtRange(homeRange());
 }
 
 function setHomeRange(kind){
   const [a, b] = rangeOf(kind);
-  $('#home-from').value = a; $('#home-to').value = b;
+  HOME_RANGE = { startDate: a, to: b };
+  paintHomeRange();
 }
 
 let LIVE_DOWN = false;    // 桥连不上（被关了 / 正在重启）
@@ -1729,8 +2087,12 @@ function cardHtml(id, s, labels){
     <div class="sc-foot">
       <div class="last">${esc(lastLine(s))}</div>
       <div class="sc-date">
-        <input type="date" data-d1="${esc(id)}"><span style="color:var(--text-3)">~</span>
-        <input type="date" data-d2="${esc(id)}">
+        <button class="rbtn" data-range="${esc(id)}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4.6" width="18" height="16.4" rx="3"/><path d="M3 10h18M8 2.6v4M16 2.6v4"/>
+          </svg><span>${esc(fmtRange(CARD_RANGE[id]))}</span>
+        </button>
       </div>
       <button data-run="${esc(id)}" class="primary">运行</button>
     </div>
@@ -1766,6 +2128,16 @@ function renderCards(){
       updatePickCount();
     };
   });
+  grid.querySelectorAll('[data-range]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.range;
+      openRangePicker(b, CARD_RANGE[id] || homeRange(), r => {
+        CARD_RANGE[id] = r;
+        const sp = b.querySelector('span');
+        if(sp) sp.textContent = fmtRange(r);
+      });
+    };
+  });
   grid.querySelectorAll('[data-run]').forEach(b => {
     b.onclick = () => {
       const id = b.dataset.run;
@@ -1778,8 +2150,15 @@ function renderCards(){
   });
   if(HOME_MODE === 'single'){
     const [a, b] = rangeOf('last_month');
-    grid.querySelectorAll('[data-d1]').forEach(el => { if(!el.value) el.value = a; });
-    grid.querySelectorAll('[data-d2]').forEach(el => { if(!el.value) el.value = b; });
+    grid.querySelectorAll('[data-range]').forEach(el => {
+      const id = el.dataset.range;
+      if(!CARD_RANGE[id]) CARD_RANGE[id] = { startDate: a, to: b };
+    });
+    // 刚补上的默认值要重画一次，否则按钮上还是「选择区间」
+    grid.querySelectorAll('[data-range]').forEach(el => {
+      const sp = el.querySelector('span');
+      if(sp) sp.textContent = fmtRange(CARD_RANGE[el.dataset.range]);
+    });
   }
   updatePickCount();
 }
@@ -1789,7 +2168,13 @@ let HOME_INIT = false;
 function initHome(){
   if(!HOME_INIT){
     HOME_INIT = true;
-    setHomeRange('last_month');
+    setHomeRange('last30');
+    const hr = $('#home-range');
+    if(hr) hr.onclick = () => openRangePicker(hr, HOME_RANGE, r => {
+      HOME_RANGE = r;
+      paintHomeRange();
+      document.querySelectorAll('#home-presets button').forEach(x => x.classList.remove('on'));
+    });
     document.querySelectorAll('#home-presets button').forEach(btn => {
       btn.onclick = () => {
         document.querySelectorAll('#home-presets button').forEach(x => x.classList.remove('on'));
@@ -1820,14 +2205,11 @@ function initHome(){
   startLive();
 }
 
-/** 某张卡片上自己选的日期（单店模式用） */
+/** 某张卡片上自己选的日期（单店模式用）。
+ *  存在内存里而不是从 DOM 读：卡片墙每 3 秒重绘，
+ *  从 DOM 读会在重绘的那一瞬间读到空值，派任务就用了别的区间。 */
 function cardRange(id){
-  const grid = $('#store-grid');
-  if(!grid) return null;
-  const d1 = grid.querySelector(`[data-d1="${id}"]`);
-  const d2 = grid.querySelector(`[data-d2="${id}"]`);
-  if(!d1 || !d2 || !d1.value || !d2.value) return null;
-  return { startDate: d1.value, to: d2.value };
+  return CARD_RANGE[id] || null;
 }
 
 async function runStores(ids, btn, range){
@@ -1952,18 +2334,39 @@ async function loadTrend(){
   }catch(e){}
 }
 
+let RUN_RANGE = null;     // 核算页的区间；null = 全部数据
+
+function paintRunRange(){
+  const el = $('#run-range-txt');
+  if(el) el.textContent = RUN_RANGE ? fmtRange(RUN_RANGE) : '全部数据';
+  document.querySelectorAll('#chips button').forEach(b => {
+    b.classList.toggle('on', b.dataset.k === 'all' ? !RUN_RANGE : false);
+  });
+}
+
 function setRange(key){
-  const now = new Date(); let from = '', to = '';
-  if(key === 'month'){ from = iso(new Date(now.getFullYear(), now.getMonth(), 1)); to = iso(now); }
-  else if(key === 'lastmonth'){
-    from = iso(new Date(now.getFullYear(), now.getMonth()-1, 1));
-    to = iso(new Date(now.getFullYear(), now.getMonth(), 0));
-  } else if(key === 'd7'){ const d = new Date(now); d.setDate(d.getDate()-6); from = iso(d); to = iso(now); }
-  else if(key === 'd30'){ const d = new Date(now); d.setDate(d.getDate()-29); from = iso(d); to = iso(now); }
-  $('#dfrom').value = from; $('#dto').value = to;
-  document.querySelectorAll('#chips button').forEach(b => b.classList.toggle('on', b.dataset.k === key));
+  const now = new Date();
+  if(key === 'all'){
+    RUN_RANGE = null;
+  }else{
+    let from = '', to = '';
+    if(key === 'month'){ from = iso(new Date(now.getFullYear(), now.getMonth(), 1)); to = iso(now); }
+    else if(key === 'lastmonth'){
+      from = iso(new Date(now.getFullYear(), now.getMonth()-1, 1));
+      to = iso(new Date(now.getFullYear(), now.getMonth(), 0));
+    } else if(key === 'd7'){ const d = new Date(now); d.setDate(d.getDate()-6); from = iso(d); to = iso(now); }
+    else if(key === 'd30'){ const d = new Date(now); d.setDate(d.getDate()-29); from = iso(d); to = iso(now); }
+    RUN_RANGE = { startDate: from, to };
+  }
+  paintRunRange();
 }
 document.querySelectorAll('#chips button').forEach(b => b.onclick = () => setRange(b.dataset.k));
+
+const _runRangeBtn = $('#run-range');
+if(_runRangeBtn) _runRangeBtn.onclick = () => openRangePicker(_runRangeBtn, RUN_RANGE, r => {
+  RUN_RANGE = r;
+  paintRunRange();
+});
 
 async function loadRunFiles(){
   try{
@@ -2169,7 +2572,15 @@ if($('#imp2-link-file')) $('#imp2-link-file').onchange = async (e) => {
   e.target.value = '';
 };
 
-/** 「已经传了哪些」：按店铺列文件，没选店铺的单独标出来 */
+/** 「已经传了哪些」：按店铺列文件，没选店铺的单独标出来。
+ *  可以勾选删除——文件只会挪进「数据/回收站」，随时能找回来。 */
+const IMP_SEL = new Set();
+
+const KIND_CN = {orders:'订单', ads:'广告', affiliate:'联盟', mapping:'映射',
+                 other:'其他', 订单表:'订单', 广告表:'广告', 联盟佣金表:'联盟',
+                 商品映射表:'映射', 商品SKU表:'SKU', 链接资料:'链接'};
+function kindLabel(x){ return KIND_CN[x] || x; }   // 认不出就直接显示目录名
+
 async function loadImportFiles(){
   const box = $('#imp2-files'), hint = $('#imp2-hint');
   if(!box) return;
@@ -2179,36 +2590,123 @@ async function loadImportFiles(){
     const unknown = j.unknown || [], legacy = j.legacy || [];
     let n = legacy.length + unknown.length;
     groups.forEach(g => n += g.items.length);
-    if(hint) hint.textContent = n ? n + ' 个文件' : '';
+    let totalKb = 0;
+    groups.forEach(g => g.items.forEach(f => totalKb += Number(f.size_kb) || 0));
+    unknown.forEach(f => totalKb += Number(f.size_kb) || 0);
+    legacy.forEach(f => totalKb += Number(f.size_kb) || 0);
+    if(hint){
+      hint.textContent = n
+        ? `${n} 个文件 · 共 ${(totalKb / 1024).toFixed(totalKb > 10240 ? 0 : 1)} MB`
+        : '';
+    }
     if(!n){
       box.innerHTML = '<div class="empty"><b>还没传过文件</b>上面选好店铺，把后台导出的表拖进来就行</div>';
       return;
     }
-    const KIND_CN = {orders:'订单', ads:'广告', affiliate:'联盟', mapping:'映射', other:'其他'};
-    let html = '';
+
+    // 勾选状态按 rel 存；列表重画后还在（rel 是稳定的相对路径）
+    const alive = new Set();
+    const collect = arr => arr.forEach(f => { if(f.rel) alive.add(f.rel); });
+    groups.forEach(g => collect(g.items));
+    collect(unknown); collect(legacy);
+    [...IMP_SEL].forEach(x => { if(!alive.has(x)) IMP_SEL.delete(x); });
+
+    const bar = `<div class="imp-bar">
+      <label class="chk"><input type="checkbox" id="imp-all"> 全选</label>
+      <span class="muted" id="imp-sel">已选 ${IMP_SEL.size} 个</span>
+      <span style="flex:1"></span>
+      <button class="danger" id="imp-del" ${IMP_SEL.size ? '' : 'disabled'}>删除选中</button>
+    </div>`;
+
+    const row = f => `<tr>
+      <td style="width:34px"><input type="checkbox" data-rel="${esc(f.rel || '')}"
+           ${IMP_SEL.has(f.rel) ? 'checked' : ''} ${f.rel ? '' : 'disabled'}></td>
+      <td>${esc(f.name)}</td>
+      <td class="muted" style="width:90px;white-space:nowrap">${f.size_kb} KB</td>
+      <td class="muted" style="width:110px;white-space:nowrap">${f.at}</td>
+      <td style="width:64px"><button class="mini" data-rm="${esc(f.rel || '')}">删除</button></td>
+    </tr>`;
+
+    let html = bar;
     groups.forEach(g => {
       const k = g.kinds || {};
       const bits = Object.keys(k).filter(x => x !== 'other')
-        .map(x => KIND_CN[x] + ' ' + k[x]).join(' · ');
-      html += `<div style="padding:12px 20px 6px;font-size:12.5px;color:var(--text-2);background:#fcfcfa;
-        border-bottom:1px solid var(--line-soft)">${esc(g.name)}
+        .map(x => kindLabel(x) + ' ' + k[x]).join(' · ');
+      html += `<div class="imp-grp">${esc(g.name)}
         <span class="tag gray">${esc(g.country || '')}</span>
         ${bits ? '<span class="tag">' + esc(bits) + '</span>' : ''}</div>`;
-      html += '<table><tbody>' + g.items.map(f => `<tr>
-        <td style="width:58%">${esc(f.name)}</td><td class="muted" style="width:16%">${f.size_kb} KB</td>
-        <td class="muted" style="width:26%">${f.at}</td></tr>`).join('') + '</tbody></table>';
+      html += '<table><tbody>' + g.items.map(row).join('') + '</tbody></table>';
     });
     if(unknown.length){
-      html += `<div style="padding:12px 20px 6px;font-size:12.5px;color:var(--warn);background:#fdf6f5;
-        border-bottom:1px solid var(--line-soft)">⚠ 没选店铺的数据（${unknown.length} 个）——不会参与核算</div>`;
-      html += '<table><tbody>' + unknown.map(f => `<tr>
-        <td style="width:58%">${esc(f.name)}</td><td class="muted" style="width:16%">${f.size_kb} KB</td>
-        <td class="muted" style="width:26%">${f.at}</td></tr>`).join('') + '</tbody></table>';
+      html += `<div class="imp-grp warn">⚠ 没选店铺的数据（${unknown.length} 个）——不会参与核算</div>`;
+      html += '<table><tbody>' + unknown.map(row).join('') + '</tbody></table>';
+    }
+    if(legacy.length){
+      html += `<div class="imp-grp">公共目录（老的导入方式）</div>`;
+      html += '<table><tbody>' + legacy.map(f => `<tr>
+        <td style="width:34px"></td><td>${esc(f.name)}</td>
+        <td class="muted" style="width:90px">${f.size_kb} KB</td>
+        <td class="muted" style="width:110px">${f.at}</td><td></td></tr>`).join('') + '</tbody></table>';
     }
     box.innerHTML = html;
+
+    const refreshBar = () => {
+      const el = $('#imp-sel'); if(el) el.textContent = '已选 ' + IMP_SEL.size + ' 个';
+      const btn = $('#imp-del'); if(btn) btn.disabled = !IMP_SEL.size;
+      const all = $('#imp-all');
+      const boxes = [...box.querySelectorAll('input[data-rel]:not([disabled])')];
+      if(all){
+        all.checked = boxes.length > 0 && boxes.every(b => b.checked);
+        all.indeterminate = !all.checked && boxes.some(b => b.checked);
+      }
+    };
+
+    box.querySelectorAll('input[data-rel]').forEach(cb => {
+      cb.onchange = () => {
+        const r = cb.dataset.rel;
+        if(!r) return;
+        if(cb.checked) IMP_SEL.add(r); else IMP_SEL.delete(r);
+        refreshBar();
+      };
+    });
+    const all = $('#imp-all');
+    if(all) all.onchange = () => {
+      box.querySelectorAll('input[data-rel]:not([disabled])').forEach(cb => {
+        cb.checked = all.checked;
+        if(all.checked) IMP_SEL.add(cb.dataset.rel); else IMP_SEL.delete(cb.dataset.rel);
+      });
+      refreshBar();
+    };
+    box.querySelectorAll('[data-rm]').forEach(b => {
+      b.onclick = () => {
+        const r = b.dataset.rm;
+        if(!r) return;
+        impDelete([r]);
+      };
+    });
+    const del = $('#imp-del');
+    if(del) del.onclick = () => impDelete([...IMP_SEL]);
+    refreshBar();
   }catch(err){
     box.innerHTML = '<div class="empty">读取失败：' + esc(err.message) + '</div>';
   }
+}
+
+async function impDelete(rels){
+  if(!rels || !rels.length) return;
+  if(!confirm(`把选中的 ${rels.length} 个文件移到回收站？\n\n`
+    + '· 不会真删，需要时能从「数据\\回收站」找回来\n'
+    + '· 删掉的如果是唯一的订单/SKU 数据，这家店就算不出报表了')) return;
+  try{
+    const j = await (await fetch('/api/data-files/delete', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({rels})})).json();
+    if(!j.ok){ toast('删除失败：' + (j.error || '')); return; }
+    rels.forEach(r => IMP_SEL.delete(r));
+    toast(`已移到回收站 ${j.moved} 个` + (j.missing?.length ? `，跳过 ${j.missing.length} 个已不存在的` : ''));
+    loadImportFiles();
+    if(typeof loadStatus === 'function') loadStatus();
+  }catch(e){ toast('删除失败：' + e.message); }
 }
 
 /** 导入店铺后台下载的「链接资料」表，读出每条链接的款式编码。 */
@@ -2320,7 +2818,9 @@ $('#btn-run').onclick = async () => {
     note(n, how + '（' + (i+1) + '/' + ids.length + '）…', 'ok');
     try{
       const r = await fetch('/run', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({store: ids[i], from: $('#dfrom').value || null, to: $('#dto').value || null,
+        body: JSON.stringify({store: ids[i],
+                             from: RUN_RANGE ? RUN_RANGE.startDate : null,
+                             to: RUN_RANGE ? RUN_RANGE.to : null,
                              snapshots: snaps.length ? snaps : null,
                              with_formula: !!( $('#with-formula') && $('#with-formula').checked )})})
       results.push(await r.json());
@@ -2377,6 +2877,9 @@ async function loadReports(){
     loadRepDir();
     document.querySelectorAll('[data-dl-report]').forEach(b =>
       b.onclick = () => saveReports([b.dataset.dlReport], b));
+    document.querySelectorAll('#rep-list [data-rep]').forEach(cb =>
+      cb.onchange = () => repSyncSel());
+    repSyncSel();
   }catch(e){ $('#rep-list').innerHTML = '<div class="empty">读取失败</div>'; }
 }
 
@@ -2410,6 +2913,39 @@ if(_repDirBtn) _repDirBtn.onclick = async () => {
     toast('浏览器里没有文件夹选择器，直接在上面输入路径即可');
   }
 };
+/* 设置页的两个目录：点一下弹系统选择框，不用手打路径 */
+async function pickDirInto(input){
+  if(!input) return;
+  const api = window.pywebview && window.pywebview.api;
+  if(!api || !api.pick_folder){
+    toast('浏览器里没有文件夹选择器，直接粘贴路径即可');
+    return;
+  }
+  try{
+    const picked = await api.pick_folder((input.value || '').trim());
+    if(picked){ input.value = picked; toast('已选：' + picked); }
+  }catch(e){ toast('选择失败：' + e.message); }
+}
+
+async function openDirOf(input){
+  if(!input) return;
+  const dir = (input.value || '').trim();
+  if(!dir){ toast('还没填文件夹'); return; }
+  const api = window.pywebview && window.pywebview.api;
+  if(!api || !api.open_folder){ toast('在这里输入路径即可'); return; }
+  const ok = await api.open_folder(dir);
+  if(!ok) toast('打不开这个文件夹（可能还没创建）：' + dir);
+}
+
+[['#set-dir-pick', '#set-dir'], ['#set-tpl-pick', '#set-tpl-dir']].forEach(([b, i]) => {
+  const btn = $(b), inp = $(i);
+  if(btn) btn.onclick = () => pickDirInto(inp);
+});
+[['#set-dir-open', '#set-dir'], ['#set-tpl-open', '#set-tpl-dir']].forEach(([b, i]) => {
+  const btn = $(b), inp = $(i);
+  if(btn) btn.onclick = () => openDirOf(inp);
+});
+
 const _repDirOpen = document.getElementById('rep-dir-open');
 if(_repDirOpen) _repDirOpen.onclick = async () => {
   const el = document.getElementById('rep-dir');
@@ -2429,11 +2965,24 @@ function repChecked(){
   return Array.from(document.querySelectorAll('#rep-list [data-rep]:checked')).map(x => x.dataset.rep);
 }
 
-$('#rep-all').onclick = () => {
-  document.querySelectorAll('#rep-list [data-rep]').forEach(x => x.checked = true);
-};
-$('#rep-none').onclick = () => {
-  document.querySelectorAll('#rep-list [data-rep]').forEach(x => x.checked = false);
+/** 勾选数 / 全选框 / 删除按钮的可用状态，三处一起更新 */
+function repSyncSel(){
+  const boxes = [...document.querySelectorAll('#rep-list [data-rep]')];
+  const n = boxes.filter(x => x.checked).length;
+  const el = $('#rep-sel'); if(el) el.textContent = `已选 ${n} 份`;
+  const all = $('#rep-all-chk');
+  if(all){
+    all.checked = boxes.length > 0 && n === boxes.length;
+    all.indeterminate = n > 0 && n < boxes.length;
+  }
+  const del = $('#rep-del'); if(del) del.disabled = n === 0;
+  const dl = $('#rep-dl'); if(dl) dl.disabled = n === 0;
+}
+
+const _repAll = $('#rep-all-chk');
+if(_repAll) _repAll.onchange = () => {
+  document.querySelectorAll('#rep-list [data-rep]').forEach(x => x.checked = _repAll.checked);
+  repSyncSel();
 };
 
 // 删除勾选的报表：先确认，再挪进 报表/_已删除（不真删）
@@ -3376,9 +3925,25 @@ function renderReportColumns(){
     </tr>`;
   }).join('');
 
-  // 合计行位置
+  // 合计行：先决定「显不显示」，再决定「显示在哪」
+  const showTotal = total !== 'none';
+  const totalOn = $('#rcol-total-on');
+  const posBox = $('#rcol-total-pos');
+  if(totalOn){
+    totalOn.checked = showTotal;
+    totalOn.onchange = () => {
+      c.report_total_position = totalOn.checked ? 'bottom' : 'none';
+      autoSaveSoon();
+      renderReportColumns();       // 重画一次，让位置单选跟着启停
+    };
+  }
+  if(posBox){
+    posBox.style.opacity = showTotal ? '1' : '.45';
+    posBox.style.pointerEvents = showTotal ? '' : 'none';
+  }
   document.querySelectorAll('input[name="rcol-total"]').forEach(r => {
-    r.checked = (r.value === total);
+    r.checked = (r.value === (showTotal ? total : 'bottom'));
+    r.disabled = !showTotal;
     r.onchange = () => { c.report_total_position = r.value; autoSaveSoon(); };
   });
 
@@ -4584,6 +5149,7 @@ async function loadDebug(){
 }
 
 setRange('all');
+paintRunRange();
 go((location.hash || '#/overview').replace('#/', '') || 'overview');
 loadTrend();
 setInterval(() => { if(!$('#view-overview').hidden) loadStatus(); }, 20000);

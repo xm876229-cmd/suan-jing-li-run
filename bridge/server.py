@@ -295,7 +295,7 @@ def _known_store_ids() -> list[str]:
     """磁盘上已经认出过的店铺（有 meta.json 的那些）。"""
     out: list[str] = []
     try:
-        for d in (paths.DATA / "stores").iterdir():
+        for d in paths.STORES_ROOT.iterdir():
             if d.is_dir() and (d / "meta.json").is_file():
                 out.append(d.name)
     except Exception:  # noqa: BLE001
@@ -307,7 +307,7 @@ def _store_dir_names() -> dict[str, str]:
     """shop_id → 目录名。派任务时前端可能传 id 也可能传店名，这里统一一下。"""
     out: dict[str, str] = {}
     try:
-        for d in (paths.DATA / "stores").iterdir():
+        for d in paths.STORES_ROOT.iterdir():
             meta = d / "meta.json"
             if not (d.is_dir() and meta.is_file()):
                 continue
@@ -1235,6 +1235,21 @@ class Handler(BaseHTTPRequestHandler):
             self._post_cost_fields()
         elif self.path.startswith("/api/costs/save"):
             self._post_costs(save=True)
+        elif self.path.startswith("/api/data-files/delete"):
+            # 导入的文件挪进回收站（不真删），界面上可批量选
+            try:
+                from bridge import ui
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                rels = payload.get("rels")
+                if not isinstance(rels, list):
+                    _json(self, {"ok": False, "error": "缺少 rels"}, 400)
+                    return
+                r = ui.delete_data_files([str(x) for x in rels])
+                _append_log(f"[导入] 清理 {r.get('moved', 0)} 个文件（移到回收站，可恢复）")
+                _json(self, r)
+            except Exception as e:  # noqa: BLE001
+                _json(self, {"ok": False, "error": f"删除失败：{e}"}, 500)
         elif self.path.startswith("/api/data-import"):
             self._post_data_import()
         elif self.path.startswith("/api/link-info"):

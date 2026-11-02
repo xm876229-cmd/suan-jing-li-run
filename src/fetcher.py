@@ -353,7 +353,7 @@ def _dump_resp(task: str, idx: int, resp) -> None:
     留个样本，下次排查不用再让用户重跑一遍。固定文件名覆盖写，不会越积越多。
     """
     try:
-        d = paths.DATA / "capture"
+        d = paths.CAPTURE
         d.mkdir(parents=True, exist_ok=True)
         txt = json.dumps(resp, ensure_ascii=False)
         from src import safeio
