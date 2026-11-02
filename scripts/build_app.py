@@ -212,6 +212,12 @@ def build_app() -> Path:
         "--hidden-import", "src.capture",
         # 手动核算：独立数据区那套接口，同样是函数内导入
         "--hidden-import", "bridge.manual_api",
+        # 这几块也都是在函数内部才 import 的：快照（核算前存一份）、
+        # 启动自检、计划任务引擎。PyInstaller 通常能扫到，但漏了的表现
+        # 极难查（「点查看没反应」「计划不跑」），显式声明一份更省心
+        "--hidden-import", "src.snapshots",
+        "--hidden-import", "src.selfcheck",
+        "--hidden-import", "src.auto_run",
         # 桌面窗口：pywebview 的后端是运行时才导入的，
         # PyInstaller 静态扫不到，不显式声明就会打包出一个「点了没反应」的 exe
         "--hidden-import", "src.desktop",

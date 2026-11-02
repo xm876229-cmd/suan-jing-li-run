@@ -80,7 +80,10 @@ function renderResult(state) {
   if (!box) return;
 
   const run = state.running;
-  if (run) {
+  // 超过 30 分钟的「运行中」一定是残留（断电/浏览器关了/后台被回收）：
+  // 后台那边要到下次领任务才会清，面板不能一直显示「已 9999 秒」吓人
+  const runFresh = run && Date.now() - Number(run.at || 0) < 30 * 60 * 1000;
+  if (runFresh) {
     const secs = Math.round((Date.now() - (run.at || Date.now())) / 1000);
     box.className = "result";
     box.innerHTML = `<span class="lbl">正在运行</span> <b>${taskName(run.task)}</b> <span class="lbl">已 ${secs} 秒</span>`;

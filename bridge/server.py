@@ -961,32 +961,6 @@ def _sites_cfg() -> dict:
     return {"sites": {}, "defaults": {}}
 
 
-def _make_snapshot(shop_id: str, payload: dict) -> dict:
-    """把某家店当前 inbox 里的文件存成一份快照。
-
-    上传一次就是一批数据，所以上传完顺手存一份——
-    这样「这次取的是哪批数据」永远能追回来，也随时能回到老数据重算。
-    快照失败不影响上传（数据已经落盘了），只记一条日志。
-    """
-    try:
-        from src import snapshots as snaps
-        rng = payload.get("range") or {}
-        dfrom = str(rng.get("startDate") or rng.get("from") or "")
-        dto = str(rng.get("to") or rng.get("endDateExclusive") or "")
-        if dto and dfrom:
-            # 区间是「结束日期不含」，标签上往前挪一天更符合人的直觉
-            try:
-                from datetime import datetime, timedelta
-                dto = (datetime.strptime(dto, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-            except ValueError:
-                pass
-        name = str(payload.get("shop_name") or "")
-        return snaps.create(shop_id, snaps.pick_files(shop_id), dfrom, dto, name)
-    except Exception as e:  # noqa: BLE001
-        _append_log(f"[upload] 快照入库失败：{e}")
-        return {}
-
-
 def _mark_capture(shop_id: str, table_kind: str, payload: dict, path: Path) -> dict:
     """上传成功后记一笔「这类表今天取过了」。
 
@@ -1025,6 +999,31 @@ MAX_BODY = 8 * 1024 * 1024
 # 200MB 的 base64 解码后 150MB，峰值约 350MB，还撑得住；
 # 再大就有被系统 OOM 杀掉的风险，而 OOM 表现出来就是「程序突然没了」。
 MAX_UPLOAD_BODY = 200 * 1024 * 1024
+
+# 界面上传（导入数据 / 手动核算）单个文件上限 60MB。
+# 先看 base64 长度再解码：直接 b64decode 一个 200MB 的串，会先占 150MB 内存，
+# 低配机器直接卡死或者被系统杀掉，还查不出原因。
+MAX_FILE_BYTES = 60 * 1024 * 1024
+MAX_B64_CHARS = MAX_FILE_BYTES * 4 // 3 + 8
+
+
+def _decode_b64(b64) -> tuple[bytes | None, str]:
+    """解 base64 并做体积预检。返回 (data, 错误说明)。"""
+    if not isinstance(b64, str) or not b64:
+        return None, "内容是空的"
+    b64 = re.sub(r"\s+", "", b64)      # 有些客户端会按 76 列换行，先去掉空白
+    if len(b64) > MAX_B64_CHARS:
+        return None, f"文件超过 {MAX_FILE_BYTES // 1024 // 1024} MB"
+    try:
+        # validate=True：默认模式会**忽略**非法字符，返回空字节。
+        # 那样传一个乱码串会「上传成功」，落下一个 0 字节的文件，
+        # 卡片上显示「未识别」，核算时才报「没有订单表」——白查半天。
+        raw = base64.b64decode(b64, validate=True)
+    except Exception as e:  # noqa: BLE001
+        return None, f"内容解码失败：{e}"
+    if not raw:
+        return None, "内容是空的（文件可能是 0 字节）"
+    return raw, ""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1844,12 +1843,9 @@ class Handler(BaseHTTPRequestHandler):
             out["warning"] = warning
         if _marked:
             out["captured"] = _marked
-        # 上传即入库：顺手存一份快照，随时能回到这批数据重算。
-        # 区间取扩展带上来的（这一轮取的是什么日期范围），
-        # 界面上「用哪次数据」列表就能显示每份快照对应哪个区间。
-        _snap = _make_snapshot(shop_id, payload)
-        if _snap.get("id"):
-            out["snapshot"] = _snap.get("id")
+        # 这里不再复制整份快照：每轮取数会传 4 个文件，逐个复制就等于
+        # 同一批订单存 4 份（大店 40MB × 4）。核算前（/run）会统一存一份，
+        # 那时数据才齐，也才有「这批数据算过一次」的意义。
         if kind == "mapping":
             _mirror_mapping_to_store(shop_id, path)
         _json(self, out)
@@ -1914,19 +1910,15 @@ class Handler(BaseHTTPRequestHandler):
         if not name or not b64:
             _json(self, {"ok": False, "error": "缺少文件名或内容"}, 400)
             return
-        try:
-            data = base64.b64decode(b64)
-        except Exception as e:  # noqa: BLE001
-            _json(self, {"ok": False, "error": f"内容解码失败：{e}"}, 400)
+        data, _err = _decode_b64(b64)
+        if data is None:
+            _json(self, {"ok": False, "error": _err}, 400)
             return
 
         suffix = Path(name).suffix.lower()
         if suffix not in {".xlsx", ".xls", ".csv", ".txt", ".json"}:
             _json(self, {"ok": False, "error":
                          f"不支持的文件类型：{suffix or '（没有扩展名）'}"}, 400)
-            return
-        if len(data) > 60 * 1024 * 1024:
-            _json(self, {"ok": False, "error": "文件超过 60 MB"}, 400)
             return
 
         shop_id = str(payload.get("shop_id") or "").strip()
@@ -1959,7 +1951,8 @@ class Handler(BaseHTTPRequestHandler):
         # 映射表混进 inbox 的话，核算扫目录时会把整张表当成交付文件处理一遍。
         tmp_dir = paths.DATA / "_import_tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        tmp = tmp_dir / f"{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}{suffix}"
+        # 加随机尾巴：两个窗口同时传同名文件时，同一秒+同一 PID 会撞同一个临时文件
+        tmp = tmp_dir / f"{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}-{os.urandom(3).hex()}{suffix}"
         kind = ""
         try:
             tmp.write_bytes(data)
@@ -2017,10 +2010,7 @@ class Handler(BaseHTTPRequestHandler):
                               f"请确认国家选对了。")
         elif kind == "order" and not shop_id:
             out["warning"] = "没选店铺，这份订单表暂存在未识别专区，选好店铺后需要挪过去才能参与核算。"
-        # 手动导入的也算一批数据，存一份快照，随时能回到它重算
-        _snap = _make_snapshot(shop_id, {"shop_name": shop_id})
-        if _snap.get("id"):
-            out["snapshot"] = _snap.get("id")
+        # 同样不在这里存快照：真正开算时（/run）会统一存一份
         _json(self, out)
 
     def _post_link_import(self):
@@ -2050,7 +2040,7 @@ class Handler(BaseHTTPRequestHandler):
         suffix = Path(name).suffix.lower() or ".xlsx"
         tmp_dir = paths.DATA / "_import_tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        tmp = tmp_dir / f"link-{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}{suffix}"
+        tmp = tmp_dir / f"link-{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}-{os.urandom(3).hex()}{suffix}"
         try:
             tmp.write_bytes(data)
             from src.loader import parse_mapping, read_table
@@ -2264,10 +2254,9 @@ class Handler(BaseHTTPRequestHandler):
         if not key or not name or not b64:
             _json(self, {"ok": False, "error": "缺少店铺、文件名或内容"}, 400)
             return
-        try:
-            data = base64.b64decode(b64)
-        except Exception as e:  # noqa: BLE001
-            _json(self, {"ok": False, "error": f"内容解码失败：{e}"}, 400)
+        data, _err = _decode_b64(b64)
+        if data is None:
+            _json(self, {"ok": False, "error": _err}, 400)
             return
         r = manual_api.save_file(key, name, data, str(payload.get("country") or ""))
         if r.get("ok"):
@@ -3012,7 +3001,9 @@ class Handler(BaseHTTPRequestHandler):
                     _snap = snapshots.create(
                         shop_id, snapshots.pick_files(shop_id),
                         dfrom or "", dto or "", store_name,
-                        note=str(payload.get("note") or ""))
+                        note=str(payload.get("note") or ""),
+                        # 重算（replace）时数据没变，别每次都复制一整份订单表
+                        reuse_any_age=bool(payload.get("replace")))
                     if _snap.get("ok"):
                         snap_id = _snap.get("id") or ""
                         _sd = snapshots.resolve(shop_id, snap_id)

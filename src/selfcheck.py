@@ -115,18 +115,30 @@ def _clean_temp(actions: list[str]) -> None:
         actions.append(f"清理断电残留的临时文件 {n} 个")
 
 
-def _check_reports(actions: list[str]) -> None:
-    """报表目录里打不开的 xlsx：挪进隔离目录，别让它挂在列表里骗人。"""
+def _clean_report_temps(actions: list[str]) -> None:
+    """清掉算到一半被强杀留下的临时报表，两种：
+
+        `.1234.calc.xlsx`      —— 重算时先算到临时文件（safeio.swap_report）
+        `.报表名.saving.xlsx`   —— openpyxl 边写边存时的临时文件（report._save_atomic）
+
+    文件名以 "." 开头，报表列表本来就不显示，但不清理会一直占着几 MB。
+    一小时内的可能是另一个进程正在算，不动；更早的一定是残骸。
+
+    跟「报表体检」分开：这一步很便宜（只列 xlsx），每次启动都跑；
+    体检要逐个打开文件，只在异常退出或手动体检时跑。
+    """
     if not paths.OUTPUT.is_dir():
         return
-
-    # 算到一半被强杀留下的临时报表（`.1234.calc.xlsx`，见 safeio.swap_report）。
-    # 一小时内的可能是另一个进程正在算，不动；更早的一定是残骸。
     stale = 0
     try:
-        for f in paths.OUTPUT.rglob("*.calc.xlsx"):
+        for f in paths.OUTPUT.rglob("*.xlsx"):
+            name = f.name
+            if not name.startswith("."):
+                continue
+            if not (name.endswith(".calc.xlsx") or ".saving" in name):
+                continue
             try:
-                if f.name.startswith(".") and time.time() - f.stat().st_mtime > 3600:
+                if time.time() - f.stat().st_mtime > 3600:
                     f.unlink()
                     stale += 1
             except OSError:
@@ -135,6 +147,12 @@ def _check_reports(actions: list[str]) -> None:
         pass
     if stale:
         actions.append(f"清理算到一半的临时报表 {stale} 个")
+
+
+def _check_reports(actions: list[str]) -> None:
+    """报表目录里打不开的 xlsx：挪进隔离目录，别让它挂在列表里骗人。"""
+    if not paths.OUTPUT.is_dir():
+        return
     # 必须先把文件列表取出来：rglob 是边走边扫的，
     # 一边扫一边把文件挪进新建的 _隔离_ 目录，它会自己钻进去再挪一遍
     # ——结果同一份坏报表被挪了十几层（真踩过）。
@@ -331,6 +349,10 @@ def run(verbose: bool = False, check_crash: bool = True) -> dict:
 
     try:
         _clean_temp(actions)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _clean_report_temps(actions)
     except Exception:  # noqa: BLE001
         pass
     try:

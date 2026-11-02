@@ -187,8 +187,12 @@ def _manifest_path(snap_dir: Path) -> Path:
 
 
 def create(shop_id: str, files: list[Path], dfrom: str = "", dto: str = "",
-           store_name: str = "", note: str = "") -> dict:
+           store_name: str = "", note: str = "", reuse_any_age: bool = False) -> dict:
     """把这一批文件存成快照。内容没变就复用已有的，不重复占空间。
+
+    reuse_any_age=True 给「重算」用：数据一个字节都没变，只是换了费率再算一遍，
+    不该每点一次就复制一整份订单表（几十 MB × 一天十几次）。签名相同就直接
+    复用最近那份快照；真正的重新取数签名会变，不受影响。
 
     返回 {ok, id, dir, files, reused}
     """
@@ -214,7 +218,8 @@ def create(shop_id: str, files: list[Path], dfrom: str = "", dto: str = "",
                 then = datetime.strptime(str(top.get("created_at") or ""), "%Y-%m-%d %H:%M:%S")
             except ValueError:
                 then = None
-            if then and (datetime.now() - then).total_seconds() <= 300:
+            close_enough = bool(then) and (datetime.now() - then).total_seconds() <= 300
+            if then and (close_enough or reuse_any_age):
                 return {"ok": True, "id": top["id"], "dir": top["dir"], "reused": True,
                         "files": [f.name for f in files]}
 

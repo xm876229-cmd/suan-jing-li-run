@@ -87,29 +87,42 @@ def write_bytes(path: Path | str, data: bytes, *, backup: bool = True) -> bool:
 
 
 def swap_report(new: Path | str, final: Path | str, trash_dir: Path | str) -> Path:
-    """用刚算好的 `new` 顶掉正式报表 `final`，旧的挪进 `trash_dir`。
+    """用刚算好的 `new` 顶掉正式报表 `final`，旧的留一份到 `trash_dir`。
 
     为什么不在算之前就把旧报表挪走：算到一半失败（表头不对、文件被 Excel 占着）
     时旧报表已经进了回收站，报表页上就凭空少一份，用户还以为算成功了。
     先算到临时文件、成功了再换名，失败最多多一个临时文件（调用方删掉）。
 
-    旧文件被占用挪不动时退回「另存一份 (2)」——Windows 上覆盖一个正开着的
-    xlsx 会直接失败，宁可多一份，也不要算完却拿不到结果。
+    换名这一步也不再「先挪走旧的」：
+      · 旧文件先**复制**一份进回收站（留着能找回上一版），原件原地不动
+      · 再用 os.replace 原子替换——Windows 上要么是旧文件、要么是新文件，
+        不会出现「文件夹里什么都没有」的中间状态，也不怕这一步断电
+      · 替换失败（文件正被 Excel 独占）就另存一份 (2)，旧的原样还在
+
     返回最终落地的路径。
     """
     new, final, trash_dir = Path(new), Path(final), Path(trash_dir)
     if new == final or not new.exists():
         return final if final.exists() else new
+
     if final.exists():
-        moved_to: Path | None = None
+        # 历史副本：存不下也不影响这次出报表，别因为回收站满了就算不出来
         try:
             trash_dir.mkdir(parents=True, exist_ok=True)
             dst = trash_dir / final.name
-            if dst.exists():
-                dst = trash_dir / f"{final.stem} ({time.strftime('%H%M%S')}){final.suffix}"
-            shutil.move(str(final), str(dst))
-            moved_to = dst
+            i = 2
+            while dst.exists():
+                dst = trash_dir / f"{final.stem} ({i}){final.suffix}"
+                i += 1
+            shutil.copy2(final, dst)
         except OSError:
+            pass
+
+        try:
+            os.replace(new, final)
+            return final
+        except OSError:
+            # 旧的可能正被 Excel 打开：另存一份，旧的原样保留
             i = 2
             alt = final.with_name(f"{final.stem} ({i}){final.suffix}")
             while alt.exists():
@@ -120,18 +133,7 @@ def swap_report(new: Path | str, final: Path | str, trash_dir: Path | str) -> Pa
                 return alt
             except OSError:
                 return new
-        try:
-            os.replace(new, final)
-            return final
-        except OSError:
-            # 新文件换不过去（被占用/权限），把旧的原样放回来：
-            # 否则用户既没有新报表、旧的那份也进了回收站
-            if moved_to is not None:
-                try:
-                    shutil.move(str(moved_to), str(final))
-                except OSError:
-                    pass
-            return new
+
     try:
         os.replace(new, final)
         return final

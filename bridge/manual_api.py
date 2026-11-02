@@ -230,6 +230,8 @@ def save_file(key: str, filename: str, data: bytes, country: str = "") -> dict:
     suffix = Path(raw).suffix.lower()
     if suffix not in ALLOWED_SUFFIX:
         return {"ok": False, "error": f"不支持的文件类型：{suffix or '（没有扩展名）'}"}
+    if not data:
+        return {"ok": False, "error": "文件是空的（0 字节）"}
     if len(data) > MAX_FILE:
         return {"ok": False, "error": f"文件超过 {MAX_FILE // 1024 // 1024} MB"}
 
@@ -242,8 +244,10 @@ def save_file(key: str, filename: str, data: bytes, country: str = "") -> dict:
         try:
             _tr = _recycle("旧文件")
             _dst = _tr / target.name
-            if _dst.exists():
-                _dst = _tr / f"{target.stem} ({datetime.now():%H%M%S}){target.suffix}"
+            i = 2
+            while _dst.exists():
+                _dst = _tr / f"{target.stem} ({i}){target.suffix}"
+                i += 1
             shutil.move(str(target), str(_dst))
         except OSError:
             i = 2
@@ -285,7 +289,12 @@ def delete_file(key: str, filename: str) -> dict:
     if not p.is_file():
         return {"ok": False, "error": "文件已经不在了"}
     try:
-        dst = _recycle("文件") / p.name
+        tr = _recycle("文件")
+        dst = tr / p.name
+        i = 2
+        while dst.exists():          # 同一秒删两个同名文件（不同店）时别互相覆盖
+            dst = tr / f"{p.stem} ({i}){p.suffix}"
+            i += 1
         p.replace(dst)
     except OSError as e:
         return {"ok": False, "error": f"删不掉（可能正被 Excel 打开）：{e}"}

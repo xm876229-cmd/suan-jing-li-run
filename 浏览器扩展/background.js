@@ -5818,8 +5818,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await chrome.storage.local.set({ lastResult: { task: "calc", ok: false, at: Date.now(), error: err } });
         finish({ ok: false, started: true, error: err });
       } finally {
+        // 立即清「运行中」标记再停保活。
+        // 原来延迟 1.5 秒清：这 1.5 秒里后台正好被回收，标记就永久留着，
+        // 之后 consumePending 会以为「还在跑」，最长卡 30 分钟不领任务。
+        try { await chrome.storage.local.set({ running: null }); } catch (e) { /* 存不上也没办法 */ }
         stopKeepAlive();
-        setTimeout(() => chrome.storage.local.set({ running: null }), 1500);
       }
     })();
     return true;

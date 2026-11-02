@@ -374,7 +374,13 @@ def delete_reports(names: list[str]) -> dict:
             continue
         try:
             trash.mkdir(parents=True, exist_ok=True)
+            # 同名报表可能来自不同店（命名模板只用区间时），同一秒删两份会撞名。
+            # 撞名时 f.replace 会直接覆盖 → 回收站里少一份，等于真删了。
             dst = trash / f"{f.stem}_{datetime.now():%Y%m%d_%H%M%S}{f.suffix}"
+            i = 2
+            while dst.exists():
+                dst = trash / f"{f.stem}_{datetime.now():%Y%m%d_%H%M%S} ({i}){f.suffix}"
+                i += 1
             f.replace(dst)
             moved.append(f.name)
         except OSError as e:
@@ -2486,6 +2492,8 @@ $('#recalc-go') && ($('#recalc-go').onclick = async () => {
 });
 
 function go(view){
+  // 老链接（#/run 之类已删掉的页面）不能变成一片空白：找不到就回驾驶舱
+  if(!document.getElementById('view-' + view)) view = 'overview';
   document.querySelectorAll('.page').forEach(p => p.hidden = p.id !== 'view-' + view);
   document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.view === view));
   if(view === 'reports') loadReports();
@@ -3364,12 +3372,20 @@ function mnCardHtml(s){
 async function loadManual(){
   const grid = $('#mn-grid');
   if(!grid) return;
+  let down = false;
   try{
     const j = await (await fetch('/api/manual')).json();
     MN.spaces = j.spaces || [];
-  }catch(e){ MN.spaces = []; }
+  }catch(e){ MN.spaces = []; down = true; }
   if(!MN.spaces.length){
-    grid.innerHTML = '<div class="sc-empty">还没识别到店铺。<br>在浏览器里打开店铺后台，扩展会自动认出是哪家店。</div>';
+    // 「服务没连上」和「真没有店铺」要分开说：
+    // 都写成「还没识别到店铺」会让人去重新登录店铺，白折腾一圈
+    grid.innerHTML = down
+      ? '<div class="sc-empty"><b style="display:block;margin-bottom:6px;font-size:14px">取数服务没连上</b>'
+        + '手动核算也要靠它读写文件。<br><br>'
+        + '<button class="ghost" style="width:auto;padding:7px 16px;margin:0" '
+        + 'onclick="go(\'debug\')">去调试页启动 →</button></div>'
+      : '<div class="sc-empty">还没识别到店铺。<br>在浏览器里打开店铺后台，扩展会自动认出是哪家店。</div>';
     return;
   }
   const done = MN.spaces.filter(x => x.count).length;

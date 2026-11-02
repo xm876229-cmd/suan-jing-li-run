@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -146,6 +147,98 @@ def save(patch: dict) -> dict:
     except OSError as e:
         return {"ok": False, "error": f"保存失败（磁盘满或被占用？）：{e}"}
     return {"ok": True, "settings": load()}
+
+
+def _safe_name(s: str) -> str:
+    """文件名里不能出现的字符换成下划线，顺便去掉多余空白。"""
+    s = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", str(s or ""))
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    return s[:80] or "未命名"
+
+
+def render_report_name(
+    template: str,
+    *,
+    store: str = "",
+    shop_id: str = "",
+    shop_code: str = "",
+    country: str = "",
+    dfrom: str = "",
+    dto: str = "",
+) -> str:
+    """按模板生成报表文件名（不含扩展名）。
+
+    模板长这样：{店铺}_{开始}_{结束}
+    认不出的变量原样保留，方便用户看出自己写错了哪个。
+    """
+    season = f"{dfrom or '全部'}_{dto or '全部'}" if (dfrom or dto) else "全部数据"
+    values = {
+        "store": store or shop_id or "未识别店铺",
+        "shop_id": shop_id,
+        "shop_code": shop_code,
+        "country": country,
+        "from": dfrom or "全部",
+        "to": dto or "全部",
+        "range": season,
+        "now": datetime.now().strftime("%Y%m%d_%H%M"),
+    }
+
+    def repl(m: re.Match) -> str:
+        raw = m.group(1).strip()
+        key = _ALIASES.get(raw.lower()) or _ALIASES.get(raw)
+        if not key:
+            return m.group(0)          # 不认识的变量原样留着
+        return str(values.get(key, ""))
+
+    out = re.sub(r"\{([^{}]+)\}", repl, str(template or ""))
+    return _safe_name(out)
+
+
+def copy_to_download_dir(src: Path, dest_dir: str) -> Path | None:
+    """把报表复制到用户指定的位置。目标为空或失败就返回 None（不影响主流程）。"""
+    if not dest_dir:
+        return None
+    try:
+        d = Path(dest_dir).expanduser()
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / src.name
+        data = src.read_bytes()
+
+        def _write(dst: Path) -> None:
+            """先写唯一的临时名再原子换名。
+
+            临时名带 pid + 纳秒：两家店同时算完、模板又没带店名时，
+            两个进程会往同一个目标写；共用一个固定 .tmp 名会互相截断，
+            换名后拿到的可能是对方写了一半的内容。
+            """
+            tmp = d / f".{dst.name}.{os.getpid()}-{time.time_ns()}.tmp"
+            try:
+                tmp.write_bytes(data)
+                os.replace(tmp, dst)
+            finally:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except OSError:
+                    pass
+
+        if target.exists():
+            # 同名 = 同一份报表重算了一次（区间、店名都没变）：
+            # 直接覆盖，别在下载目录里堆 (2)(3)(4)——用户找的是「最新那版」。
+            try:
+                _write(target)
+                return target
+            except OSError:
+                # 目标正被 Excel 打开：退回另存一份，至少这次下载不算失败
+                stem, suf = target.stem, target.suffix
+                i = 2
+                while target.exists():
+                    target = d / f"{stem} ({i}){suf}"
+                    i += 1
+        _write(target)
+        return target
+    except OSError:
+        return None
 
 
 def _safe_name(s: str) -> str:
