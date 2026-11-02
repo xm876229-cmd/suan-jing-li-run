@@ -163,6 +163,21 @@ def build_app() -> Path:
     stage = BUILD / "app"
     RELEASE.mkdir(parents=True, exist_ok=True)
 
+    # 发布目录里的 exe 正在运行时，Windows 不允许覆盖它。
+    # 以前是复制到一半抛 PermissionError，于是「_internal 换成新的、exe 还是旧的」，
+    # 留下一个新旧混着的半套目录——看起来只是「打包失败」，实际已经坏了。
+    # 先探一次：能独占打开就说明没在跑。
+    _exe = out / EXE_NAME
+    if _exe.is_file():
+        try:
+            with _exe.open("ab"):
+                pass
+        except OSError:
+            raise SystemExit(
+                "发布目录里的程序正在运行，没法覆盖。\n"
+                "  先关掉：双击「关闭取数服务.bat」，或任务管理器结束 jingli.exe，\n"
+                "  然后再跑一次打包。（这次没有动发布目录，还是完整可用的）")
+
     # 上一版的目录名（这一版改成中文了）先挪走，免得新旧混在一起：
     # 用户打开安装目录看到 config 和 配置 两个目录，会懵。
     # 只挪我们自己放的这些目录名，别的（用户自己加的文件）一律不动。
@@ -203,6 +218,7 @@ def build_app() -> Path:
     built = stage / "jingli"
     if not built.exists():
         raise SystemExit("构建失败：没找到输出目录")
+
 
     # 图标也放进发布目录，快捷方式指向它
     assets_src = ROOT / "assets"
