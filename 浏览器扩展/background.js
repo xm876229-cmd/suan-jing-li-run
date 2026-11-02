@@ -776,8 +776,14 @@ async function uploadToBridge(name, arrayBuffer, dir, shopOverride) {
       shop_id: (shopOverride && shopOverride.shop_id) || CURRENT_SHOP.shop_id || "",
       shop_name: (shopOverride && shopOverride.shop_name) || CURRENT_SHOP.shop_name || "",
       // 本次取数的区间：服务端拿它给快照打标签，
-      // 界面上「用哪次数据」列表就能显示每份快照是哪个区间的
-      range: CURRENT_RANGE || null,
+      // 界面上「用哪次数据」列表就能显示每份快照是哪个区间的。
+      //
+      // 必须能被覆盖：后台闹钟补回「上次还没生成好」的订单时，
+      // 手里那份文件属于**当初那个区间**，而 CURRENT_RANGE 可能已经是
+      // 另一轮（另一个区间）的了。照 CURRENT_RANGE 记账，就会把这份订单
+      // 记到错的区间名下——同一天再算那个区间时，会拿这份别的月份的数据
+      // 去复用，数字偏了还查不出来。
+      range: (shopOverride && shopOverride.range) || CURRENT_RANGE || null,
     }),
   });
   const j = await resp.json();
@@ -814,7 +820,7 @@ async function rememberPendingOrder(item) {
  *
  * shopId 传了就只收这家店的（新一轮开始时先试一次，能补回就不用重导）。
  */
-async function harvestPendingOrders(log, shopId) {
+async function harvestPendingOrders(log, shopId, onlyRange) {
   const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
   if (!pendingOrders.length) return 0;
   const keep = [];
@@ -822,6 +828,10 @@ async function harvestPendingOrders(log, shopId) {
   for (const it of pendingOrders) {
     if (Date.now() - (it.at || 0) > 2 * 3600 * 1000) continue;   // 太旧，丢弃
     if (shopId && String(it.shop_id || "") !== String(shopId)) { keep.push(it); continue; }
+    // 只收「跟本轮同一个区间」的那份：区间不一样的话，把它当成本轮的数据
+    // 就是拿 8 月的订单去算 9 月——数字偏了，界面上还看不出问题。
+    // 留着它，下一分钟的闹钟会按它自己的区间正常补回。
+    if (onlyRange && !sameRange(it.range, onlyRange)) { keep.push(it); continue; }
     try {
       const rec = await apiPost(
         await buildUrl(it.host, "/api/fulfillment/order/export_record/get"), {});
@@ -843,7 +853,9 @@ async function harvestPendingOrders(log, shopId) {
       const buf = await resp.arrayBuffer();
       if (!buf || buf.byteLength < 200) { keep.push(it); continue; }
       const saved = await uploadToBridge(it.name || `全部 笔订单-${stamp()}.csv`, buf, "",
-        { shop_id: it.shop_id, shop_name: it.shop_name });
+        { shop_id: it.shop_id, shop_name: it.shop_name,
+          // 用这份订单自己的区间记账，别用后台当下的 CURRENT_RANGE
+          range: it.range || {} });
       if (log) log(`   订单已自动补回：${saved.path}`);
       got++;
     } catch (e) {
@@ -857,9 +869,11 @@ async function harvestPendingOrders(log, shopId) {
 async function runOrders({ startMs, endMs }, log) {
   const host = await ensureHost("seller", log);
 
-  // 先看上次有没有在排队的导出已经生成好了：能补回就不用再排一个
+  // 先看上次有没有在排队的导出已经生成好了：能补回就不用再排一个。
+  // 只认「同一区间」的那份——补回一份别的月份的订单，最后会算成
+  // 「本区间没有订单」或者数字偏小，还不如老老实实重新导一次。
   try {
-    const recovered = await harvestPendingOrders(log, CURRENT_SHOP.shop_id);
+    const recovered = await harvestPendingOrders(log, CURRENT_SHOP.shop_id, CURRENT_RANGE);
     if (recovered > 0) {
       log("上次排队的订单已补回，本轮不再重复导出");
       return { via: "排队补回" };
@@ -974,6 +988,9 @@ async function runOrders({ startMs, endMs }, log) {
 
   await rememberPendingOrder({
     host, taskId: fullTask, name: wantName, range_tag: rTag,
+    // 这份订单是**哪个区间**的，必须一起记下来：
+    // 补回时可能已经过了好几轮，不记就分不清它是哪一段的数据。
+    range: CURRENT_RANGE || null,
     shop_id: CURRENT_SHOP.shop_id || "", shop_name: CURRENT_SHOP.shop_name || "",
     at: Date.now(),
   });
@@ -1029,6 +1046,18 @@ function shiftDate(s, days) {
   d.setDate(d.getDate() + days);
   const p = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** 两个区间是不是同一段（起止日期完全一样；只有一个端点也算不一样）。 */
+function sameRange(a, b) {
+  const norm = (r) => {
+    if (!r || typeof r !== "object") return "";
+    const s = r.startDate || "";
+    const e = r.to || (r.endDateExclusive ? shiftDate(r.endDateExclusive, -1) : "");
+    return (s && e) ? `${s}~${e}` : "";
+  };
+  const x = norm(a), y = norm(b);
+  return !!x && x === y;
 }
 
 /** 拉一次指定区间的全部 SKU 页面。失败直接抛，由上层决定换尺寸还是换日期。 */

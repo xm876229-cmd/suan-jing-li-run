@@ -267,6 +267,10 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="导出「带公式」版：明细页多出订单类别/是否样品两组辅助列，"
                          "汇总页的净利用 SUMIFS 引用明细，改「口径」页的开关即切换口径")
     ap.add_argument("--json", action="store_true", help="只输出一行 JSON 摘要（供本地桥调用）")
+    ap.add_argument("--merge-all", action="store_true",
+                    help="同一目录里累计的多份表全部参与合并（手动核算用）。"
+                         "默认只取最新导出的那一份——那是自动取数的规矩，"
+                         "而手动抽屉本来就是「攒着几批表，按区间挑着算」。")
     ap.add_argument("--rates", type=Path, default=paths.RATES_FILE)
     ap.add_argument("--stores", type=Path, default=paths.STORES_FILE)
     return ap
@@ -450,19 +454,33 @@ def main(argv: list[str] | None = None) -> int:
             _win = None
             if args.dfrom and args.dto:
                 _win = (args.dfrom.isoformat(), args.dto.isoformat())
+            # latest_only 的意思是「只取最新导出的那一份」，那是自动取数的规矩。
+            # 手动核算传了 --merge-all，就不能再挑一份了——哪怕这家店有
+            # 「商品SKU表」目录（手动核算也会传 --store，好套用这家店的费率）。
             data = load_from_dirs(base_dirs, costs_path, params.usd_to_local, map_path,
                                   order_fields=order_fields, cost_fields=cost_fields,
                                   ads_fields=ads_fields, affiliate_fields=affiliate_fields,
                                   mapping_fields=mapping_fields, window=_win,
-                                  latest_only=not bool(snap_dirs))
+                                  latest_only=not (snap_dirs or args.merge_all))
         else:
             if not args.dir.exists():
                 print(f"找不到目录：{args.dir}")
                 return 2
-            data = load_from_dir(args.dir, costs_path, params.usd_to_local, map_path,
-                                 order_fields=order_fields, cost_fields=cost_fields,
-                                 ads_fields=ads_fields, affiliate_fields=affiliate_fields,
-                                 mapping_fields=mapping_fields)
+            # 这一段以前直接 load_from_dir(不带区间、只取最新一份)。两个后果：
+            #   · 手动抽屉里攒了 8 月、9 月两份订单时，算 8 月会拿到 9 月那份，
+            #     报「区间内没有可核算的订单」；
+            #   · 选「全部」时只算最新那一份，旧月份的订单直接消失，
+            #     数字偏小还不报错。
+            # 手动核算显式带 --merge-all，就把目录里所有导出合并去重再按区间筛；
+            # 自动取数不加这个参数，仍然是「只用最新一份」的老规矩。
+            _win = None
+            if args.dfrom and args.dto:
+                _win = (args.dfrom.isoformat(), args.dto.isoformat())
+            data = load_from_dirs([args.dir], costs_path, params.usd_to_local, map_path,
+                                  order_fields=order_fields, cost_fields=cost_fields,
+                                  ads_fields=ads_fields, affiliate_fields=affiliate_fields,
+                                  mapping_fields=mapping_fields, window=_win,
+                                  latest_only=not args.merge_all)
         source = snap_note or args.dir.name
 
     if not data.orders:

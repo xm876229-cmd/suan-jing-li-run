@@ -144,6 +144,44 @@ def _file_records(d: Path, doc: dict) -> list[dict]:
     return out
 
 
+# 记录里的类型全空时，会读一遍表头补认（见 _reclassify）。那一步要把文件
+# 整个读进来，而卡片墙每 3 秒刷一次 —— 认不出来的文件会一直被重读。
+# 这里记住「这个目录、这批文件已经试过了」，文件一变（mtime/数量变了）再试。
+_TRIED: dict[str, tuple[float, int]] = {}
+
+
+def _reclassify(d: Path, files: list[dict], country: str) -> list[dict]:
+    """记录没有类型时，按表头补认一次，并把结果写回记录。
+
+    只在「所有文件都没类型」时调用（见 describe）——这是记录丢了或文件是
+    手动拷进来的情况。认不出的照旧留着，不删不动。
+    """
+    got: dict[str, str] = {}
+    for f in files:
+        k = _classify(d / f["name"], country)
+        f["kind"] = k
+        f["label"] = KIND_CN.get(k, "未识别")
+        if k:
+            got[f["name"]] = k
+    if not got:
+        return files
+    with _REC_LOCK:
+        doc = load_record(d)
+        items = {str(x.get("name")): x for x in (doc.get("files") or [])
+                 if isinstance(x, dict) and x.get("name")}
+        for nm, kd in got.items():
+            cur = items.get(nm) or {"name": nm,
+                                    "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            cur["kind"] = kd
+            items[nm] = cur
+        doc["files"] = list(items.values())
+        try:
+            save_record(d, doc)
+        except OSError:
+            pass          # 写不进去也不影响这次显示，下次再认一遍
+    return files
+
+
 def describe(key: str, known: list[str] | None = None) -> dict:
     """一个抽屉的概况：卡片上那几行就靠它。
 
@@ -155,11 +193,6 @@ def describe(key: str, known: list[str] | None = None) -> dict:
         return {}
     d = space_dir(k)
     doc = load_record(d)
-    files = _file_records(d, doc)
-    kinds: dict[str, int] = {}
-    for f in files:
-        kk = f["kind"] or "other"
-        kinds[kk] = kinds.get(kk, 0) + 1
     if k == TMP_KEY:
         name, shop_name, region, country = "临时（不属于店铺）", "", "", doc.get("country") or ""
     else:
@@ -170,6 +203,20 @@ def describe(key: str, known: list[str] | None = None) -> dict:
         shop_name = str(meta.get("shop_name") or "")
         region = str(meta.get("region") or "")
         country = str(meta.get("country") or doc.get("country") or "")
+    files = _file_records(d, doc)
+    # 记录文件丢了（重装、被清理、或者有人直接往「手动导入」里拷表）时，
+    # 四类表会全显示「缺」——文件明明在，人却以为没数据，不敢点计算。
+    # 只在这种「一条类型都没记住」的情况下才读表头补认一次，认出来就写回记录；
+    # 正常情况直接信记录，不然每 3 秒刷一次卡片就要把几十 MB 的订单表读一遍。
+    if files and not any(f["kind"] for f in files):
+        _sig = (max(f["mtime"] for f in files), len(files))
+        if _TRIED.get(str(d)) != _sig:
+            files = _reclassify(d, files, country)
+            _TRIED[str(d)] = _sig
+    kinds: dict[str, int] = {}
+    for f in files:
+        kk = f["kind"] or "other"
+        kinds[kk] = kinds.get(kk, 0) + 1
     try:
         created = datetime.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
     except OSError:
@@ -338,6 +385,10 @@ def clear_space(key: str) -> dict:
     with _REC_LOCK:
         try:
             save_record(d, {"version": 1, "files": [], "last": None})
+            # 记录自己的 .bak 也清掉：留着它，万一主记录以后写坏，
+            # 从 .bak 恢复出来的就是「清空前」那批文件——人以为清空了，
+            # 卡片上又冒出几行记录，比丢记录更难解释。
+            _record_file(d).with_name(RECORD + ".bak").unlink(missing_ok=True)
         except OSError:
             pass
     return {"ok": True, "moved": moved, "trash": str(trash)}
@@ -388,16 +439,19 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
     # 先算到临时文件，成功了才顶掉旧报表（见 safeio.swap_report）。
     # 以前的 _unique_report 是「开算之前就把旧的挪走」——算失败时
     # 报表页上少一份，用户还以为算成功了、只是数字没变。
+    #
+    # 现在**一律**先写临时文件（以前只有「报表已存在」时才这样）：
+    # 直接往最终文件名里写的时候，算到一半失败（磁盘满、文件被 Excel 占着）
+    # 会留下半截 xlsx，报表页照样把它列出来，点开报「文件损坏」，
+    # 而上一版好报表已经被覆盖掉了。
     final_out = out_dir / f"{base}.xlsx"
-    out = final_out
-    if final_out.exists():
-        out = out_dir / f".{os.getpid()}.calc.xlsx"   # 短名，别撞 260 路径上限
+    out = out_dir / f".{os.getpid()}.calc.xlsx"   # 短名，别撞 260 路径上限
 
     if paths.is_frozen():
         cmd = [sys.executable, "run"]
     else:
         cmd = [sys.executable, "-m", "src.cli"]
-    cmd += ["--dir", str(d), "--out", str(out), "--json"]
+    cmd += ["--dir", str(d), "--out", str(out), "--json", "--merge-all"]
     if country:
         cmd += ["--country", country]
     if a:
@@ -443,11 +497,10 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
 
     if proc.returncode != 0 or not summary:
         # 失败：临时文件不能留在报表目录里（报表页会把它当成一份真报表）
-        if out != final_out:
-            try:
-                out.unlink(missing_ok=True)
-            except OSError:
-                pass
+        try:
+            out.unlink(missing_ok=True)
+        except OSError:
+            pass
         tail = "\n".join((stdout + "\n" + stderr).strip().splitlines()[-8:])
         if "没有解析出任何订单行" in tail:
             brief = "订单表里没有可用的行（表头不对，或者这批文件不是订单导出）"
@@ -459,7 +512,7 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
             brief = tail or "核算失败"
         return {"ok": False, "error": brief}
 
-    if out != final_out and out.exists():
+    if out.exists():
         out = safeio.swap_report(
             out, final_out,
             paths.DATA / "回收站" / f"报表_{datetime.now():%Y%m%d_%H%M%S_%f}")

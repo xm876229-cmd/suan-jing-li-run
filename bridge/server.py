@@ -97,11 +97,15 @@ def _calc_cmd(shop_id: str, country: str, dfrom: str, dto: str,
 
     data_dir 只给手动核算用：数据在「店铺/手动导入」，但费率口径还按这家店来，
     所以 --dir 指手动目录、--store 照样传。
+    手动目录是「攒着几批表」的，必须带 --merge-all（全部合并去重），
+    否则算出来的只是最新那一份——跟「手动核算」页点出来的报表对不上。
     """
     base = [sys.executable, "run"] if paths.is_frozen() else [sys.executable, "-m", "src.cli"]
     cmd = base + ["--dir", str(data_dir or paths.store_dir(shop_id))]
     cmd += ["--store", shop_id] if shop_id else ["--country", country or "马来西亚"]
     cmd += ["--out", str(out), "--json"]
+    if data_dir is not None:
+        cmd.append("--merge-all")
     if with_formula:
         cmd.append("--with-formula")
     if dfrom:
@@ -406,7 +410,9 @@ def _canon_shop(key: str) -> str:
     数据目录名。锁按字符串开，同一家店用两种写法就是两把锁，
     等于没锁（两个核算进程各写一份报表、互相抢映射表）。
     """
-    k = (key or "").strip()
+    # 控制字符（\x00 之类）一律去掉：它会让 os.stat 抛 ValueError
+    # （不是 OSError），而下游普遍只 catch OSError，整条请求就变 500。
+    k = re.sub(r"[\x00-\x1f]", "", (key or "")).strip()
     if not k:
         return "_all"
     try:
@@ -1493,6 +1499,12 @@ class Handler(BaseHTTPRequestHandler):
                                 _data_dir = _mn.space_dir(sid) if sid else None
                             elif _parts[0] == "临时手动":
                                 _data_dir = _mn.tmp_dir()
+                            if _data_dir is None:
+                                # 认不出是哪家店时**不能**退回收件箱：
+                                # 那样算出来的数字是自动取数那批的，
+                                # 跟原报表对不上，还没人看得出来。
+                                failed.append(f"{rel}（认不出是哪家店，没法按手动数据重算）")
+                                continue
                         # 重算的产物放临时目录：下完就删，别在「报表」页堆一堆 _带公式
                         _tmp = Path(tempfile.mkdtemp(prefix="jingli_dl_"))
                         tmp_dirs.append(_tmp)
@@ -2362,13 +2374,33 @@ class Handler(BaseHTTPRequestHandler):
         # 支持传「店名」也支持传 shop_id —— 前端两个都可能给
         id_by_name = {v: k for k, v in _store_dir_names().items()}
         ids: list[str] = []
+        ignored: list[str] = []
+        # 只认真正存在的店：磁盘上有目录的，或者 stores.json 里登记过的
+        # （新店第一次运行前目录可能还没建）。不认的一律丢掉——
+        # 否则一个写错的店名会变成一条谁也领不走的任务，在队列里躺 30 分钟，
+        # 界面上却显示「已派发」。
+        try:
+            _known = set(id_by_name) | set(paths._load_store_names())
+        except Exception:  # noqa: BLE001
+            _known = set(id_by_name)
         for x in wanted:
-            ids.append(id_by_name.get(x, x))
-        if not ids:
+            sid = id_by_name.get(x, x)
+            if sid in _known:
+                ids.append(sid)
+            else:
+                ignored.append(x)
+        if not ids and not ignored:
             ids = list(id_by_name.keys())        # 空 = 全部已知店铺
+        if ignored:
+            _append_log("[运行] 跳过不认识的店铺：" + "、".join(ignored[:6]))
 
         rng = payload.get("range") or {}
-        if isinstance(rng, dict) and rng.get("kind"):
+        if not isinstance(rng, dict):
+            # 传个字符串/数字进来时，补出来的区间会是空的，任务派下去也跑不对。
+            # 宁可当场说清楚，也不要让它变成一个「已派发但永远算不出」的任务。
+            _json(self, {"ok": False, "error": "range 格式不对，应该是 {startDate, to}"}, 400)
+            return
+        if rng.get("kind"):
             from src import auto_run
             rng = auto_run.build_range(auto_run.quick_rule(str(rng.get("kind"))), datetime.now())
 
@@ -2408,7 +2440,7 @@ class Handler(BaseHTTPRequestHandler):
         _json(self, {
             "ok": True, "count": len(ids), "jobs": jobs,
             "range": rng, "sent": sent, "offline": offline,
-            "reuse": _reuse_names,
+            "reuse": _reuse_names, "ignored": ignored,
             "note": _base_note,
         })
 
@@ -3068,17 +3100,17 @@ class Handler(BaseHTTPRequestHandler):
             # 早期版本在开算之前就把旧报表挪进回收站——算失败（表头不对、
             # 文件被 Excel 占着）时报表页上就凭空少一份，数字还是旧的那版也没了。
             _replace = bool(payload.get("replace"))
-            out = final_out
-            if final_out.exists() and _replace:
-                # 临时名要短：店名 + 区间 + _手动 已经很长，再加前缀容易撞
-                # Windows 260 字符路径上限（报 WinError 206，算完拿不到文件）
-                out = out_dir / f".{os.getpid()}.calc.xlsx"
-                _tmp_out = out
-            elif final_out.exists():
-                i = 2
-                while out.exists():
-                    out = out_dir / f"{base_name} ({i}).xlsx"
-                    i += 1
+            # **一律先算到临时文件，成功了再原子换名**（见 safeio.swap_report）。
+            #
+            # 以前只有「重算 + 已有同名报表」才走临时文件，其余情况直接往最终文件名
+            # 里写：算到一半失败（磁盘满、文件正被 Excel 占着）就在报表目录里留下
+            # 一份半截 xlsx，报表页会把它当成一份真报表列出来，点开报「文件损坏」，
+            # 而上一版好报表已经被覆盖掉了。
+            #
+            # 临时名要短：店名 + 区间 + _手动 已经很长，再加前缀容易撞
+            # Windows 260 字符路径上限（报 WinError 206，算完拿不到文件）
+            out = out_dir / f".{os.getpid()}.calc.xlsx"
+            _tmp_out = out
 
             # 打包后 sys.executable 是 exe 本身，`-m src.cli` 不再有效，
             # 改成 exe 自己的 run 子命令。两种模式参数完全一致。
@@ -3149,7 +3181,7 @@ class Handler(BaseHTTPRequestHandler):
                     break
 
             if proc.returncode == 0 and summary:
-                if out != final_out and out.exists():
+                if out.exists():
                     out = safeio.swap_report(
                         out, final_out,
                         paths.DATA / "回收站" / f"报表_{datetime.now():%Y%m%d_%H%M%S_%f}")

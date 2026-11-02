@@ -323,8 +323,12 @@ def _safe_folder(name: str, fallback: str) -> str:
 
     文件系统不允许 \\ / : * ? " < > | 这些字符，中文没问题。
     太长的要截断（见 FOLDER_NAME_MAX 的说明）。
+
+    控制字符（\\x00 这类）也要去掉：Windows 上带 \\x00 的路径一碰
+    `stat()` 就抛 ValueError（不是 OSError），调用方普遍只 catch OSError，
+    结果整条请求变成 500。店名是从扩展/接口传进来的，不能假定干净。
     """
-    s = re.sub(r'[\\/:*?"<>|]', "_", (name or "").strip()).strip(" .")
+    s = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", (name or "").strip()).strip(" .")
     if not s:
         return fallback
     if len(s) > FOLDER_NAME_MAX:
@@ -418,7 +422,9 @@ def store_root(shop_id: str) -> Path:
     优先按 meta.json 里的 shop_id 找已有目录——目录用店名命名，
     而店名会被改；meta 里的 id 才是稳定身份，改名也不怕认错家。
     """
-    sid = (shop_id or "").strip()
+    # 控制字符先去掉：带 \x00 的路径一 stat 就抛 ValueError（不是 OSError），
+    # 调用方基本只 catch OSError，结果整条请求 500。
+    sid = re.sub(r"[\x00-\x1f]", "", (shop_id or "")).strip()
     if not sid:
         return UNKNOWN_ROOT
     try:

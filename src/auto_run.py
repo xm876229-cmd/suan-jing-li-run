@@ -254,8 +254,12 @@ def normalize_range(rng: dict | None) -> dict:
     订单任务要 startMs/endMs、SKU 与联盟要 endDateExclusive（开区间）。
     少一个字段，订单就按 undefined 去查，报的是「该时段没有订单」，
     看起来像真没单——这种错最难查。所以在这里一次性补齐。
+
+    rng 传进来的可能不是 dict（前端写错、老版本扩展传字符串）：
+    `dict("bad")` 会抛 ValueError，整条请求变成 500 加一串英文。
+    这里统一当「没给区间」处理，让调用方照常走默认。
     """
-    r = dict(rng or {})
+    r = dict(rng) if isinstance(rng, dict) else {}
     s = _parse_day(r.get("startDate") or "")
     t = _parse_day(r.get("to") or "")
     ex = _parse_day(r.get("endDateExclusive") or "")
