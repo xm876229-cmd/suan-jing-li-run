@@ -335,11 +335,11 @@ def _write_readme(out: Path) -> None:
     平时你打开「净利助手」窗口时它会自动在后台跑起来，不用管。
   · 什么时候要手动重启？扩展点了没反应、或窗口关了但桥也跟着死了、
     或改完「计算参数」后行为没变（老桥还在跑旧代码）时，就需要把桥拉起来 / 重启一下。
-  · 怎么重启（最简单）？双击程序文件夹里的「启动桥.bat」，
+  · 扩展提示连不上？双击程序文件夹里的「修复-扩展连不上时点我.bat」，
     它会在后台把桥跑起来：已经运行就不动、不会起两个。
   · 怎么确认桥在跑？浏览器打开 http://127.0.0.1:8765/config 能开就是活着；
-    或「启动桥.bat」里会显示「取数桥已在运行 / 已启动」。
-  · 配置页打不开？先看桥是不是没起（双击「启动桥.bat」），再看 8765 端口是否被别的程序占了。
+    窗口里会显示取数服务已重启。
+  · 配置页打不开？先双击「修复-扩展连不上时点我.bat」，再看 8765 端口是否被别的程序占了。
 
 【常见问题】
   · 扩展加载不了？确认第 5 步选的是「浏览器扩展」这个文件夹本身
@@ -355,52 +355,68 @@ def _write_readme(out: Path) -> None:
 
 
 def _write_bridge_bat(out: Path) -> None:
-    """在发布目录顶层放一个「启动桥.bat」。
+    """在发布目录顶层放一个「修复-扩展连不上时点我.bat」。
 
-    新手最大的痛点：桥是一个后台无窗口服务，程序文件夹里只有 jingli.exe、
-    浏览器扩展、配置、文档，看不到「桥」在哪启动。双击这个 bat 即可确保桥在跑，
-    已运行就不动、不会起两个，专治「扩展点了没反应 / 桥好像死了」时的无从下手。
+    正常启动是双击 jingli.exe（窗口和取数服务一起起来），这个 bat 只是兜底：
+    桥是一个后台无窗口服务，用户看不到它，扩展报「连不上」时无从下手。
+    双击它 = 关掉别的旧桥 + 用本目录这个桥重启，专治这种情况。
     """
+    name = "修复-扩展连不上时点我.bat"
     bat = (
         "@echo off\r\n"
         "chcp 65001 >nul\r\n"
         "cd /d \"%~dp0\"\r\n"
-        "title 净利助手 · 启动 / 重启取数桥\r\n"
-        "echo 正在启动本目录的取数桥（会先关掉其它正在跑的旧桥）…\r\n"
+        "title 净利助手 · 修复取数服务\r\n"
+        "echo 什么时候用这个：浏览器扩展提示「连不上本地桥」「点了没反应」。\r\n"
+        "echo 它会关掉其它正在跑的旧桥，再用当前这个目录的桥重启。\r\n"
+        "echo.\r\n"
         "\"jingli.exe\" bridge --force\r\n"
         "echo.\r\n"
-        "echo 取数桥是后台服务（不弹窗口）：负责接收浏览器扩展抓到的数据并触发核算。\r\n"
-        "echo   参数配置页：http://127.0.0.1:8765/config\r\n"
+        "echo 取数服务是后台跑（不弹窗口）：负责接收扩展抓到的数据并触发核算。\r\n"
         "echo   程序首页  ：http://127.0.0.1:8765\r\n"
+        "echo   参数配置页：http://127.0.0.1:8765/config\r\n"
         "echo.\r\n"
-        "echo 桥已在后台运行，本窗口可以直接关掉。\r\n"
+        "echo 修好了，本窗口可以直接关掉；回到程序里再点一次运行即可。\r\n"
         "pause\r\n"
     )
     try:
-        (out / "启动桥.bat").write_text(bat, encoding="utf-8-sig")
-        print(f"[OK] 启动桥.bat：{out / '启动桥.bat'}")
+        (out / name).write_text(bat, encoding="utf-8-sig")
+        print(f"[OK] {name}")
     except OSError as e:
-        print(f"  ⚠ 写启动桥.bat 失败：{e}")
+        print(f"  ⚠ 写 {name} 失败：{e}")
+    # 旧名字留一份同内容的，升级上来的用户还能找到
+    old = out / "启动桥.bat"
+    if old.exists():
+        try:
+            old.unlink()
+        except OSError:
+            pass
 
 
 def _write_stop_bat(out: Path) -> None:
-    """关闭取数桥的入口：双击就停，不会顺手再起一个。"""
+    """关闭取数服务：双击就停，不会顺手再起一个。"""
     bat = (
         "@echo off\r\n"
         "chcp 65001 >nul\r\n"
         "cd /d \"%~dp0\"\r\n"
-        "title 净利助手 · 关闭取数桥\r\n"
-        "echo 正在关闭取数桥（含后台守护进程）…\r\n"
+        "title 净利助手 · 关闭取数服务\r\n"
+        "echo 正在关闭取数服务（含后台守护进程）…\r\n"
         "\"jingli.exe\" stop-bridge\r\n"
         "echo.\r\n"
-        "echo 已尝试关闭。要用时再双击「启动桥.bat」。\r\n"
+        "echo 已尝试关闭。下次双击 jingli.exe 会自动再起来。\r\n"
         "pause\r\n"
     )
     try:
-        (out / "停止桥.bat").write_text(bat, encoding="utf-8-sig")
-        print(f"[OK] 停止桥.bat：{out / '停止桥.bat'}")
+        (out / "关闭取数服务.bat").write_text(bat, encoding="utf-8-sig")
+        print("[OK] 关闭取数服务.bat")
     except OSError as e:
-        print(f"  ⚠ 写停止桥.bat 失败：{e}")
+        print(f"  ⚠ 写 关闭取数服务.bat 失败：{e}")
+    oldstop = out / "停止桥.bat"
+    if oldstop.exists():
+        try:
+            oldstop.unlink()
+        except OSError:
+            pass
 
 
 def _skip_in_pack(rel: Path) -> bool:

@@ -4137,8 +4137,11 @@ async function calcNow(range, log, opts = {}) {
         // 带上 shop_id：数据按店铺分目录存放，核算时才知道该读哪一家。
         // 只传 store（配置里的别名）有时候对不上真实目录。
         shop_id: CURRENT_SHOP.shop_id || "",
-        // auto：自动运行触发的，桥会按「自动运行」里的设置决定下载目录
-        auto: !!opts.auto }),
+        // auto：计划任务触发的，桥会按那条计划的设置决定下载目录
+        auto: !!opts.auto,
+        // 计划任务里勾了「带公式 / 不带公式」就按它来；没给就不传，
+        // 桥会退回设置页里的开关
+        with_formula: (typeof opts.with_formula === "boolean" ? opts.with_formula : undefined) }),
     });
   } catch (e) {
     throw new Error(`连不上本地桥（${e.message}），请确认 scripts\\start_bridge.bat 在跑`);
@@ -4301,9 +4304,11 @@ async function consumePending() {
   log("从待办队列领取任务");
   return executeTask(p.task, p.range || {}, log, {
     force: !!p.force, withCalc: p.withCalc, store: p.store, country: p.country,
-    // auto：这是不是「自动运行」派下来的任务。
+    // auto：这是不是「计划任务」派下来的任务。
     // 桥那边靠它决定报表下载到哪个目录。
     auto: !!p.auto,
+    // 计划任务可以单独指定带不带公式；没指定就交给桥按设置页的开关走。
+    with_formula: p.with_formula,
   });
 }
 

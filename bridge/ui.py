@@ -323,10 +323,14 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <title>净利助手</title>
 <style>
   :root{
-    --bg:#f7f7f5; --panel:#fff; --line:#e7e6e0; --line-soft:#f0efe9;
-    --text:#191917; --text-2:#5f5e58; --text-3:#8f8e87;
-    --accent:#0f6e56; --accent-hover:#0c5b47; --accent-soft:#e8f4ef;
-    --warn:#9c3d1e; --warn-soft:#fbeee8; --radius:14px;
+    --bg:#f4f6f8; --panel:#fff; --line:#e4e8ee; --line-soft:#eff2f6;
+    --text:#111827; --text-2:#5a6472; --text-3:#8c95a3;
+    --accent:#0e8a6d; --accent-hover:#0a7159; --accent-soft:#e6f6f1;
+    --accent-2:#13b48c;
+    --warn:#c0462c; --warn-soft:#fdf1ed; --info:#3b6fd4;
+    --radius:14px;
+    --shadow-1:0 1px 2px rgba(17,24,39,.04);
+    --shadow-2:0 10px 30px -14px rgba(17,24,39,.22);
   }
   *{box-sizing:border-box}
   html,body{height:100%}
@@ -334,19 +338,25 @@ _TEMPLATE = r"""<!DOCTYPE html>
     font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
     -webkit-font-smoothing:antialiased}
   .app{display:flex;height:100vh;overflow:hidden}
-  .side{width:212px;flex:0 0 212px;background:var(--panel);
+  .side{width:216px;flex:0 0 216px;
+    background:linear-gradient(180deg,#fff 0%,#fbfcfd 100%);
     border-right:1px solid var(--line);display:flex;flex-direction:column;padding:22px 0 14px}
-  .brand{display:flex;align-items:center;gap:10px;padding:0 18px 22px}
-  .brand .mark{width:32px;height:32px;border-radius:9px;background:var(--accent);
-    display:flex;align-items:center;justify-content:center;flex:0 0 32px}
-  .brand .name{font-size:15px;font-weight:500}
-  .brand .sub{font-size:11px;color:var(--text-3);margin-top:-2px}
-  .nav{padding:0 10px;display:flex;flex-direction:column;gap:2px;overflow-y:auto}
-  .nav a{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;
-    color:var(--text-2);text-decoration:none;font-size:13.5px;transition:background .12s,color .12s}
+  .brand{display:flex;align-items:center;gap:11px;padding:0 18px 22px}
+  .brand .mark{width:34px;height:34px;border-radius:11px;
+    background:linear-gradient(145deg,var(--accent-2) 0%,#0a6d57 100%);
+    box-shadow:0 4px 12px -4px rgba(14,138,109,.55);
+    display:flex;align-items:center;justify-content:center;flex:0 0 34px}
+  .brand .name{font-size:15px;font-weight:600;letter-spacing:-.1px}
+  .brand .sub{font-size:11px;color:var(--text-3);margin-top:-1px;letter-spacing:.3px}
+  .nav{padding:0 10px;display:flex;flex-direction:column;gap:1px;overflow-y:auto}
+  .nav a{position:relative;display:flex;align-items:center;gap:10px;padding:8px 12px;
+    border-radius:9px;color:var(--text-2);text-decoration:none;font-size:13.5px;
+    transition:background .13s,color .13s}
   .nav a:hover{background:var(--line-soft);color:var(--text)}
-  .nav a.on{background:var(--accent-soft);color:var(--accent);font-weight:500}
-  .nav a svg{flex:0 0 16px;opacity:.85}
+  .nav a.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+  .nav a.on::before{content:"";position:absolute;left:0;top:50%;transform:translateY(-50%);
+    width:3px;height:16px;border-radius:3px;background:var(--accent)}
+  .nav a svg{flex:0 0 17px;width:17px;height:17px;opacity:.8}
   .nav a.on svg{opacity:1}
   .nav .gap{height:10px}
   .side .foot{margin-top:auto;padding:8px 18px 0;font-size:11.5px;color:var(--text-3);line-height:1.9}
@@ -358,21 +368,22 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .head h1{font-size:21px;font-weight:500;margin:0 0 6px;letter-spacing:-.2px}
   .head p{margin:0;color:var(--text-2);font-size:13.5px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-    margin-bottom:20px;overflow:hidden}
-  .card > h2{font-size:13.5px;font-weight:500;margin:0;padding:15px 22px;
+    margin-bottom:20px;overflow:hidden;box-shadow:var(--shadow-1)}
+  .card > h2{font-size:13.5px;font-weight:600;margin:0;padding:15px 22px;
     border-bottom:1px solid var(--line-soft);display:flex;align-items:center;gap:10px}
   .card > h2 .hint{margin-left:auto;font-weight:400;font-size:12.5px;color:var(--text-3)}
   .card > .body{padding:22px}
   .card > .body.tight{padding:0}
   .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
-  .stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:18px 20px;box-shadow:var(--shadow-1)}
   .stat .k{font-size:12.5px;color:var(--text-2);margin-bottom:8px;display:flex;align-items:center;gap:6px}
   .stat .v{font-size:19px;font-weight:500;letter-spacing:-.2px}
   .stat .v.small{font-size:14px;font-weight:400}
   .stat .s{font-size:12px;color:var(--text-3);margin-top:4px;overflow:hidden;
     text-overflow:ellipsis;white-space:nowrap}
   .dot{width:7px;height:7px;border-radius:50%;display:inline-block}
-  .dot.on{background:#1d9e75} .dot.off{background:#c4c3bb}
+  .dot.on{background:#12a382} .dot.off{background:#c6ccd4}
   .field{display:flex;flex-direction:column;gap:7px}
   .field label{font-size:12.5px;color:var(--text-2)}
   .row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
@@ -380,12 +391,13 @@ _TEMPLATE = r"""<!DOCTYPE html>
     font:inherit;font-size:13.5px;padding:9px 12px;border:1px solid var(--line);
     border-radius:9px;background:var(--panel);color:var(--text);min-width:140px}
   input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
-  button{font:inherit;font-size:13.5px;padding:9px 18px;border-radius:9px;
+  button{font:inherit;font-size:13.5px;padding:9px 18px;border-radius:10px;
     border:1px solid var(--line);background:var(--panel);color:var(--text);
-    cursor:pointer;transition:background .12s,border-color .12s}
+    cursor:pointer;transition:background .13s,border-color .13s,box-shadow .13s}
   button:hover{background:var(--line-soft)}
-  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:500}
-  button.primary:hover{background:var(--accent-hover)}
+  button.primary{background:linear-gradient(180deg,#12a382,#0b7a61);border-color:#0a7059;
+    color:#fff;font-weight:600;box-shadow:0 1px 2px rgba(10,113,89,.28)}
+  button.primary:hover{background:linear-gradient(180deg,#0f9578,#096a55)}
   button:disabled{opacity:.45;cursor:not-allowed}
   button.mini{padding:5px 11px;font-size:12.5px;border-radius:8px}
   .tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--line)}
@@ -406,9 +418,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .chips button.on{background:var(--accent-soft);border-color:#b7ddd0;color:var(--accent);font-weight:500}
   table{width:100%;border-collapse:collapse}
   th,td{padding:12px 20px;text-align:left;border-bottom:1px solid var(--line-soft);font-size:13px}
-  th{font-size:12px;font-weight:500;color:var(--text-2);background:#fcfcfa}
+  th{font-size:12px;font-weight:600;color:var(--text-2);background:#fafbfc}
   tr:last-child td{border-bottom:none}
-  tbody tr:hover{background:#fcfcfa}
+  tbody tr:hover{background:#fafbfc}
   .muted{color:var(--text-3)}
   .empty{padding:44px 22px;text-align:center;color:var(--text-3);font-size:13.5px}
   .empty b{display:block;color:var(--text-2);font-weight:500;margin-bottom:4px}
@@ -418,6 +430,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .note.ok{background:var(--accent-soft);color:#0a5442}
   .note.err{background:var(--warn-soft);color:var(--warn)}
   .tbl-wrap{overflow-x:auto}
+  .ops{display:flex;gap:6px;align-items:center;white-space:nowrap}
   .cfg-tbl th{white-space:nowrap;padding:10px 12px;font-size:11.5px}
   .cfg-tbl td{padding:8px 12px}
   .cfg-tbl input[type=text],.cfg-tbl input[type=number]{min-width:0;width:100%;padding:6px 8px;font-size:12.5px}
@@ -438,7 +451,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     max-height:186px;overflow-y:auto;padding:4px 0}
   .snap-list .empty{padding:22px}
   .snap-item{display:flex;gap:9px;align-items:flex-start;padding:8px 14px;cursor:pointer}
-  .snap-item:hover{background:#fcfcfa}
+  .snap-item:hover{background:#fafbfc}
   .snap-item input{width:15px;height:15px;margin-top:2px;flex:0 0 15px;accent-color:var(--accent);cursor:pointer}
   .snap-item b{display:block;font-size:12.5px;font-weight:600}
   .snap-item em{display:block;font-style:normal;font-size:11.5px;color:var(--text-2);margin-top:1px}
@@ -486,7 +499,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   /* 计算参数页：可点选的变量表 */
   .vars{display:flex;flex-wrap:wrap;gap:8px}
   .vars .v{display:flex;align-items:baseline;gap:7px;padding:7px 12px;border:1px solid var(--line);
-    border-radius:9px;background:#fcfcfa;cursor:pointer;transition:.12s}
+    border-radius:10px;background:#fafbfc;cursor:pointer;transition:.12s}
   .vars .v:hover{border-color:var(--accent);background:var(--accent-soft)}
   .vars .v code{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--accent)}
   .vars .v span{font-size:11.5px;color:var(--text-3)}
@@ -518,7 +531,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
     border-bottom:1px solid var(--line)}
   .modal .box header h3{margin:0;font-size:15px;font-weight:500}
   .modal .box header .x{margin-left:auto}
-  .modal .box .content{overflow-y:auto;padding-bottom:10px}
+  .modal .box .content{overflow-y:auto;padding-bottom:10px;flex:1}
+  .modal .box footer{display:flex;align-items:center;gap:10px;padding:14px 24px;
+    border-top:1px solid var(--line);background:#fafbfc}
   .bars{display:flex;align-items:flex-end;gap:4px;height:110px;padding:0 6px}
   .bars .b{flex:1 1 0;max-width:56px;background:#9fd3c1;border-radius:3px 3px 0 0;min-height:2px;transition:background .12s}
   .bars .b:hover{background:var(--accent)}
@@ -549,7 +564,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
   /* 导入数据页的拖放区：整块都能接文件，不用瞄准某个小按钮 */
   .dropzone{border:1.5px dashed var(--line);border-radius:12px;padding:26px 18px;
-    text-align:center;background:#fcfcfa;transition:.15s;cursor:pointer}
+    text-align:center;background:#fafbfc;transition:.15s;cursor:pointer}
   .dropzone:hover{border-color:var(--accent);background:var(--accent-soft,#f0f7f5)}
   .dropzone.over{border-color:var(--accent);background:var(--accent-soft,#f0f7f5);
     box-shadow:0 0 0 3px rgba(15,110,86,.08)}
@@ -565,6 +580,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     padding:12px 14px;margin-bottom:14px}
   .bar .sep{width:1px;height:22px;background:var(--line)}
   .bar .grow{flex:1}
+  .bar #btn-run-picked{margin-left:auto}
   .bar label.chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;
     color:var(--text-2);cursor:pointer;user-select:none}
   .bar label.chk input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
@@ -582,8 +598,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .sc{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
     padding:0;overflow:hidden;display:flex;flex-direction:column;
     transition:border-color .12s,box-shadow .12s}
-  .sc:hover{border-color:#d8d6cc;box-shadow:0 2px 10px rgba(25,25,23,.05)}
-  .sc.picked{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+  .sc:hover{border-color:#ccd4de;box-shadow:var(--shadow-2)}
+  .sc.picked{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset,var(--shadow-1)}
   .sc.fail{border-color:#e2b6a6;background:#fffdfc}
   .sc-head{display:flex;align-items:flex-start;gap:9px;padding:13px 14px 10px}
   .sc-head input[type=checkbox]{margin-top:3px;width:15px;height:15px;
@@ -594,10 +610,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .sc-title .m{font-size:12px;color:var(--text-3);margin-top:2px;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .dot{width:7px;height:7px;border-radius:50%;flex:none;display:inline-block}
-  .dot.on{background:#1d9e75}
+  .dot.on{background:#12a382}
   .dot.off{background:#c4c2b8}
-  .dot.run{background:#378add;animation:pulse 1.4s ease-in-out infinite}
-  .dot.warn{background:#e0a03a}
+  .dot.run{background:#3b82d6;animation:pulse 1.4s ease-in-out infinite}
+  .dot.warn{background:#dfa13a}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
   .sc-state{font-size:12px;color:var(--text-3);display:inline-flex;align-items:center;
     gap:5px;white-space:nowrap;padding-top:2px}
@@ -611,19 +627,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .step .dt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .step .tm{flex:none;font-variant-numeric:tabular-nums;color:var(--text-3)}
   .step.done .nm,.step.done .tm{color:var(--text-2)}
-  .step.done .ic{color:#1d9e75}
+  .step.done .ic{color:#12a382}
   .step.run .nm{color:var(--accent);font-weight:500}
   .step.run .dt{color:var(--accent)}
-  .step.fail .nm,.step.fail .dt{color:#b4462a}
-  .step.fail .ic{color:#b4462a}
+  .step.fail .nm,.step.fail .dt{color:#c0462c}
+  .step.fail .ic{color:#c0462c}
 
   .sc-foot{display:flex;align-items:center;gap:8px;padding:10px 14px 12px;
-    border-top:1px solid var(--line-soft);background:#fcfcfa}
+    border-top:1px solid var(--line-soft);background:#fafbfc}
   .sc-foot .last{font-size:11.5px;color:var(--text-3);flex:1;min-width:0;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .sc-foot button{font:inherit;font-size:12.5px;padding:6px 14px;border-radius:8px;
     border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer}
-  .sc-foot button:hover{border-color:#d8d6cc}
+  .sc-foot button:hover{border-color:#ccd4de}
   .sc-foot button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
   .sc-foot button.primary:hover{background:var(--accent-hover)}
   .sc-foot button:disabled{opacity:.5;cursor:default}
@@ -644,6 +660,80 @@ _TEMPLATE = r"""<!DOCTYPE html>
   body.single .sc-date input{flex:1;width:auto;min-width:0}
   body.single .sc-foot button{width:100%}
 
+  /* ---------- 计划任务 ---------- */
+  .plan-grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(355px,1fr));
+    margin-bottom:18px}
+  .pc{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    display:flex;flex-direction:column;overflow:hidden;box-shadow:var(--shadow-1);
+    transition:border-color .15s,box-shadow .15s}
+  .pc:hover{border-color:#ccd4de;box-shadow:var(--shadow-2)}
+  .pc.off{background:linear-gradient(180deg,#fff 0%,#fafbfc 100%)}
+  .pc.off .pc-ic{background:#f1f3f6;color:var(--text-3)}
+  .pc.off .pc-title .n{color:var(--text-2)}
+  .pc-head{display:flex;align-items:flex-start;gap:11px;padding:16px 16px 11px}
+  .pc-ic{width:36px;height:36px;border-radius:11px;background:var(--accent-soft);
+    color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none}
+  .pc-ic svg{width:19px;height:19px}
+  .pc-title{flex:1;min-width:0;padding-top:1px}
+  .pc-title .n{font-size:14.5px;font-weight:600;line-height:1.35;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pc-title .m{font-size:12px;color:var(--text-3);margin-top:2px}
+  .pc-body{padding:0 16px 14px;display:flex;flex-direction:column;gap:6px;flex:1}
+  .pc-row{display:flex;gap:9px;font-size:12.5px;min-width:0}
+  .pc-row .k{color:var(--text-3);flex:0 0 38px}
+  .pc-row .v{color:var(--text-2);min-width:0;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .pc-row .v b{color:var(--text);font-weight:600}
+  .pc-row .v .soon{color:var(--accent);font-weight:600}
+  .pc-foot{display:flex;align-items:center;gap:8px;padding:10px 16px;
+    border-top:1px solid var(--line-soft);background:#fafbfc}
+  .pc-foot button{font:inherit;font-size:12.5px;padding:6px 13px;border-radius:8px;
+    border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer}
+  .pc-foot button:hover{border-color:#ccd4de;background:#fff}
+  .pc-foot button.primary{background:linear-gradient(180deg,#12a382,#0b7a61);
+    border-color:#0a7059;color:#fff;font-weight:600}
+  .pc-foot button.danger:hover{color:var(--warn);border-color:#e8c3b9;background:#fdf3f0}
+  .pc-foot .grow{flex:1}
+
+  .tgl{position:relative;display:inline-flex;flex:none;width:38px;height:22px;margin-top:2px}
+  .tgl input{position:absolute;opacity:0;width:0;height:0}
+  .tgl i{position:absolute;inset:0;border-radius:20px;background:#d7dce3;
+    transition:background .16s;cursor:pointer}
+  .tgl i::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;
+    border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(17,24,39,.2);
+    transition:transform .16s}
+  .tgl input:checked + i{background:var(--accent)}
+  .tgl input:checked + i::after{transform:translateX(16px)}
+  .tgl input:disabled + i{opacity:.5;cursor:default}
+
+  .alert{display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:12px;
+    background:#fdf6e9;border:1px solid #f0dfbb;color:#8a5b12;font-size:13px;
+    margin-bottom:16px}
+  .alert .grow{flex:1}
+  .alert button{padding:6px 14px;font-size:12.5px;border-radius:8px;
+    border:1px solid #e4cf9f;background:#fff;color:#8a5b12;cursor:pointer}
+  .alert button:hover{background:#fffbf2}
+
+  .frm{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 18px}
+  .frm .full{grid-column:1/-1}
+  .frm .field label{font-size:12.5px;color:var(--text-2);margin-bottom:1px}
+  .frm .tip{grid-column:1/-1;font-size:12.5px;color:var(--text-3);line-height:1.7;
+    background:var(--line-soft);border-radius:10px;padding:11px 14px}
+  .frm .tip b{color:var(--accent);font-weight:600}
+  .chk-row{display:flex;flex-wrap:wrap;gap:8px}
+  .chk-row label{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;
+    border:1px solid var(--line);border-radius:20px;font-size:12.5px;color:var(--text-2);
+    cursor:pointer;user-select:none}
+  .chk-row label:hover{border-color:#ccd4de}
+  .chk-row input{width:14px;height:14px;accent-color:var(--accent);cursor:pointer}
+  .chk-row label.on{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+  .prev{margin-bottom:16px;padding:12px 14px;border-radius:10px;background:var(--accent-soft);
+    color:#0a5442;font-size:12.5px;line-height:1.8}
+  .prev:empty{display:none}
+  .prev b{font-weight:600;color:var(--accent)}
+  .frm input,.frm select{height:38px;padding-top:0;padding-bottom:0}
+  .frm select{padding-right:28px}
+
 </style>
 </head>
 <body>
@@ -651,10 +741,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <aside class="side">
     <div class="brand">
       <div class="mark">
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-          <rect x="2.5" y="10" width="3" height="5.5" rx="1" fill="#fff"/>
-          <rect x="7.5" y="6.5" width="3" height="9" rx="1" fill="#fff"/>
-          <rect x="12.5" y="3" width="3" height="12.5" rx="1" fill="#fff"/>
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none">
+          <rect x="4" y="13" width="3.6" height="7" rx="1.3" fill="#fff" opacity=".82"/>
+          <rect x="10.2" y="8.5" width="3.6" height="11.5" rx="1.3" fill="#fff"/>
+          <rect x="16.4" y="4" width="3.6" height="16" rx="1.3" fill="#fff" opacity=".92"/>
         </svg>
       </div>
       <div><div class="name">净利助手</div><div class="sub">TikTok 店铺</div></div>
@@ -662,64 +752,84 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <nav class="nav" id="nav">
 <div class="grp">运营</div>
       <a href="#/overview" data-view="overview">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <rect x="2" y="2" width="5" height="5" rx="1.2"/><rect x="9" y="2" width="5" height="5" rx="1.2"/>
-          <rect x="2" y="9" width="5" height="5" rx="1.2"/><rect x="9" y="9" width="5" height="5" rx="1.2"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7.5" height="7.5" rx="2.2"/>
+          <rect x="13.5" y="3" width="7.5" height="7.5" rx="2.2"/>
+          <rect x="3" y="13.5" width="7.5" height="7.5" rx="2.2"/>
+          <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2.2"/>
         </svg><span>驾驶舱</span></a>
       <a href="#/run" data-view="run">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <circle cx="8" cy="8" r="6"/><path d="M6.6 5.6l4 2.4-4 2.4z" stroke-linejoin="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M10.2 8.4l5.6 3.6-5.6 3.6z"/>
         </svg><span>开始核算</span></a>
+      <a href="#/plan" data-view="plan">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4.6" width="18" height="16.4" rx="3"/>
+          <path d="M3 10h18M8 2.6v4M16 2.6v4"/>
+          <path d="M12 13v3.2l2.1 1.3"/>
+        </svg><span>计划任务</span></a>
       <a href="#/reports" data-view="reports">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <path d="M4 2h5l3 3v9a1 1 0 01-1 1H4a1 1 0 01-1-1V3a1 1 0 011-1z" stroke-linejoin="round"/>
-          <path d="M9 2v3.5h3.5M5.5 8.5h5M5.5 11h3.5" stroke-linecap="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 2.8h7.2L19 8.6v12.6H6z"/>
+          <path d="M13.2 2.8v5.8H19M9 13.4h6M9 17.2h4"/>
         </svg><span>报表</span></a>
 <div class="grp">数据</div>
       <a href="#/import" data-view="import">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <path d="M8 2.6v7.2M5.2 7l2.8 2.8L10.8 7" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M2.8 11.2v1.4a1.6 1.6 0 001.6 1.6h7.2a1.6 1.6 0 001.6-1.6v-1.4" stroke-linecap="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v11"/><path d="M7.6 10.4L12 14.8l4.4-4.4"/>
+          <path d="M4 16v3.4A1.6 1.6 0 005.6 21h12.8a1.6 1.6 0 001.6-1.6V16"/>
         </svg><span>导入数据</span></a>
       <a href="#/stores" data-view="stores">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <path d="M2.5 6.5V13a1 1 0 001 1h9a1 1 0 001-1V6.5" stroke-linejoin="round"/>
-          <path d="M2 6.5l1.4-3.2a1 1 0 01.9-.6h7.4a1 1 0 01.9.6L14 6.5" stroke-linejoin="round"/>
-          <path d="M6 14v-3.5h4V14" stroke-linejoin="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4.2 8h15.6l-1.3 11.4a2 2 0 01-2 1.8H7.5a2 2 0 01-2-1.8z"/>
+          <path d="M8.6 8V6.1a3.4 3.4 0 016.8 0V8"/>
         </svg><span>店铺</span></a>
       <a href="#/costs" data-view="costs">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <path d="M2.5 4.2L8 2l5.5 2.2v7.6L8 14l-5.5-2.2z" stroke-linejoin="round"/>
-          <path d="M2.5 4.2L8 6.5l5.5-2.3M8 6.5V14" stroke-linejoin="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3l8.6 4.5L12 12 3.4 7.5z"/>
+          <path d="M3.4 12.4L12 16.9l8.6-4.5"/>
+          <path d="M3.4 16.9L12 21.4l8.6-4.5"/>
         </svg><span>成本表</span></a>
 <div class="grp">设置</div>
       <a href="#/params" data-view="params">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <path d="M2 4.5h12M2 11.5h12" stroke-linecap="round"/>
-          <circle cx="6" cy="4.5" r="1.8" fill="var(--panel)"/><circle cx="10.5" cy="11.5" r="1.8" fill="var(--panel)"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3.6 7.5h9.2M18.4 7.5h2M3.6 16.5h3.8M12.6 16.5h7.8"/>
+          <circle cx="15.6" cy="7.5" r="2.4"/><circle cx="9.8" cy="16.5" r="2.4"/>
         </svg><span>计算参数</span></a>
       <a href="#/rates" data-view="rates">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <circle cx="8" cy="8" r="6"/>
-          <path d="M8 4.6v7M9.8 6.2c0-.8-.8-1.2-1.8-1.2s-1.7.5-1.7 1.2c0 1.8 3.5.9 3.5 2.7 0 .8-.8 1.2-1.8 1.2s-1.8-.4-1.8-1.2"
-                stroke-linecap="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5.2 18.8L18.8 5.2"/>
+          <circle cx="7.7" cy="7.7" r="2.6"/><circle cx="16.3" cy="16.3" r="2.6"/>
         </svg><span>费率</span></a>
       <a href="#/settings" data-view="settings">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <circle cx="8" cy="8" r="2.2"/>
-          <path d="M8 1.8v1.6M8 12.6v1.6M14.2 8h-1.6M3.4 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7L3.6 3.6"
-                stroke-linecap="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3.1"/>
+          <path d="M12 2.6v2.5M12 18.9v2.5M2.6 12h2.5M18.9 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M18.7 5.3l-1.8 1.8M7.1 16.9l-1.8 1.8"/>
         </svg><span>设置</span></a>
       <div class="gap"></div>
       <a href="#/help" data-view="help">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <circle cx="8" cy="8" r="6.2"/>
-          <path d="M6.3 6.2a1.8 1.8 0 113.1 1.3c-.6.5-1.4.9-1.4 1.9" stroke-linecap="round"/>
-          <circle cx="8" cy="11.8" r=".7" fill="currentColor" stroke="none"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M9.3 9.4a2.8 2.8 0 015.3 1.2c0 1.9-2.6 2.1-2.6 3.9"/>
+          <circle cx="12" cy="17.4" r="1" fill="currentColor" stroke="none"/>
         </svg><span>使用帮助</span></a>
       <a href="#/debug" data-view="debug">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-          <rect x="2" y="2" width="12" height="12" rx="2"/><path d="M5 6h6M5 9.5h4" stroke-linecap="round"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.6" y="4.2" width="18.8" height="15.6" rx="2.8"/>
+          <path d="M7 9.4l3 2.6-3 2.6M12.6 14.6h4.2"/>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
@@ -1005,7 +1115,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="card"><h2>公式里能写什么<span class="hint">点一下就插到刚编辑的公式里</span></h2>
         <div class="body">
           <div style="border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:14px">
-            <div style="padding:12px 16px;background:#fcfcfa;border-bottom:1px solid var(--line-soft)">
+            <div style="padding:12px 16px;background:#fafbfc;border-bottom:1px solid var(--line-soft)">
               <b>公式长什么样</b>：用 <span class="mono">*</span>（乘）、
               <span class="mono">+</span>（加）、<span class="mono">-</span>（减）、
               <span class="mono">/</span>（除）把东西算出来。
@@ -1295,49 +1405,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
           每次核算完成后，报表会同时出现在程序的 <span class="mono">报表\店铺名\</span> 和这里。同名不会覆盖，会自动加 (2)(3)。</p>
       </div></div>
 
-      <div class="card"><h2>自动运行<span class="hint" id="auto-hint">到点自动抓数 → 核算 → 出报表</span></h2>
+      <div class="card"><h2>计划任务<span class="hint">定时自动跑</span></h2>
         <div class="body">
-          <label class="switch">
-            <input type="checkbox" id="auto-on">
-            <span><b>开启自动运行</b>
-              <em>到点后程序自动派任务给浏览器扩展：抓数据、算净利、出报表。
-                浏览器关着也能跑——任务会排队，等扩展下次打开时补上。</em></span>
-          </label>
-          <div class="row" style="gap:14px;align-items:flex-end;flex-wrap:wrap;margin-top:14px">
-            <div class="field" style="width:150px"><label>频率</label>
-              <select id="auto-freq">
-                <option value="daily">每天</option>
-                <option value="weekly">每周某天</option></select></div>
-            <div class="field" style="width:110px" id="auto-wd-field" hidden><label>星期几</label>
-              <select id="auto-weekday">
-                <option value="0">周一</option><option value="1">周二</option>
-                <option value="2">周三</option><option value="3">周四</option>
-                <option value="4">周五</option><option value="5">周六</option>
-                <option value="6">周日</option></select></div>
-            <div class="field" style="width:120px"><label>几点跑</label>
-              <input type="time" id="auto-time" value="09:00"></div>
-            <div class="field" style="width:180px"><label>算哪个区间</label>
-              <select id="auto-range">
-                <option value="last_month">上个月</option>
-                <option value="month">本月到今天</option>
-                <option value="last7">最近 7 天</option>
-                <option value="yesterday">昨天</option>
-                <option value="all">全部数据</option></select></div>
-            <div class="field" style="flex:1;min-width:240px"><label>对哪些店跑（不选=全部）</label>
-              <select id="auto-stores" multiple size="3"
-                      style="width:100%;min-height:64px"></select></div>
-          </div>
-          <div class="row" style="gap:14px;align-items:flex-end;flex-wrap:wrap;margin-top:12px">
-            <div class="field" style="flex:1;min-width:300px"><label>报表下载到哪儿（留空=只在程序目录）</label>
-              <input type="text" id="auto-dir" placeholder="D:\净利报表"></div>
-            <label class="switch" style="width:auto">
-              <input type="checkbox" id="auto-formula">
-              <span><b>报表带公式</b><em>同「报表保存位置」里的设置</em></span>
-            </label>
-            <button class="ghost" id="auto-now" style="width:auto;padding:7px 16px;margin:0">现在跑一次</button>
-          </div>
-          <div class="note" id="auto-note"></div>
-          <p class="muted" style="font-size:12.5px;margin:12px 0 0" id="auto-next"></p>
+          <p style="margin:0 0 14px;color:var(--text-2);font-size:13px">
+            定时自动抓数、核算、出报表，已经单独放到「计划任务」页——可以配好几条，
+            每条各选时间、区间和店铺。</p>
+          <button class="ghost" id="go-plan" style="width:auto;padding:7px 16px;margin:0">去计划任务页 →</button>
         </div></div>
 
       <div class="card"><h2>汇率</h2><div class="body">
@@ -1350,6 +1423,36 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="card"><h2>保存</h2><div class="body">
         <button class="primary" id="btn-set-save">保存设置</button></div></div>
     </section>
+
+    <section class="page" id="view-plan" hidden>
+      <div class="head"><h1>计划任务</h1>
+        <p>到点自动抓数 → 核算 → 出报表。可以配多条，各选时间、区间和店铺；
+          浏览器没开就排队，等它下次打开自动补上。</p></div>
+
+      <div id="plan-alert"></div>
+      <div class="plan-grid" id="plan-list"></div>
+
+      <div class="row" style="gap:12px;align-items:center">
+        <button class="primary" id="plan-add">＋ 新建计划</button>
+        <span class="muted" style="font-size:12.5px">
+          只存「什么时候跑、算哪一段」的规则，不存死日期——明年、换台电脑都还是对的</span>
+      </div>
+    </section>
+
+    <div class="modal" id="plan-modal"><div class="box" style="width:min(760px,100%)">
+      <header><h3 id="pm-title">新建计划</h3><span class="muted" id="pm-sub"></span>
+        <button class="ghost x" id="pm-x" style="width:auto;padding:5px 12px">关闭</button></header>
+      <div class="content" style="padding:20px 24px">
+        <div class="prev" id="pm-prev"></div>
+        <div class="frm" id="pm-form"></div>
+      </div>
+      <footer>
+        <button class="primary" id="pm-save">保存</button>
+        <button id="pm-cancel">取消</button>
+        <span style="flex:1"></span>
+        <button id="pm-run">保存并立即跑一次</button>
+      </footer>
+    </div></div>
 
     <section class="page" id="view-help" hidden>
       <div class="head"><h1>使用帮助</h1>
@@ -1544,8 +1647,8 @@ function updatePickCount(){
 }
 
 function stepIcon(state, isRun){
-  if(isRun) return '<span style="color:#378add">◐</span>';
-  if(state === 'done') return '<span style="color:#1d9e75">✓</span>';
+  if(isRun) return '<span style="color:#3b82d6">◐</span>';
+  if(state === 'done') return '<span style="color:#12a382">✓</span>';
   if(state === 'fail') return '<span style="color:#b4462a">✕</span>';
   return '<span style="color:#c9c7bd">○</span>';
 }
@@ -1737,6 +1840,7 @@ function go(view){
   if(view === 'rates'){ loadRates(); presetScopes('pr'); loadPresets('pr'); }
   if(view === 'costs') loadCosts();
   if(view === 'settings') loadSettings();
+  if(view === 'plan') loadPlan();
   if(view === 'debug') loadDebug();
   if(view === 'stores') loadStores();
   if(view === 'run'){ loadRunFiles(); loadSnapshots(); }
@@ -2230,9 +2334,9 @@ async function loadReports(){
       + '</tr></thead><tbody>' + items.map(it => `<tr>
           <td><input type="checkbox" data-rep="${esc(it.rel || it.name)}"></td>
           <td>${esc(it.name)}</td><td class="muted">${esc(it.group || '—')}</td>
-          <td class="muted">${it.size_mb} MB</td><td class="muted">${it.at}</td>
-          <td><button class="mini" data-view-report="${esc(it.rel || it.name)}">查看</button>
-            <button class="mini" data-dl-report="${esc(it.rel || it.name)}">下载</button></td></tr>`).join('') + '</tbody></table>';
+          <td class="muted" style="white-space:nowrap">${it.size_mb} MB</td>
+          <td class="muted" style="white-space:nowrap">${it.at}</td>
+          <td><div class="ops"><button class="mini" data-view-report="${esc(it.rel || it.name)}">查看</button><button class="mini" data-dl-report="${esc(it.rel || it.name)}">下载</button></div></td></tr>`).join('') + '</tbody></table>';
     document.querySelectorAll('[data-view-report]').forEach(b =>
       b.onclick = () => viewReport(b.dataset.viewReport));
     loadRepDir();
@@ -3987,65 +4091,8 @@ async function loadSettings(){
     if($('#cost-tpl-dir')) $('#cost-tpl-dir').value = s.template_dir || '';
     $('#set-fx').value = (all.fx || {}).mode || 'auto';
     if($('#set-formula')) $('#set-formula').checked = !!s.with_formula;
-
-    // 自动运行
-    const a = all.auto || {};
-    $('#auto-on').checked = !!a.enabled;
-    $('#auto-freq').value = a.freq || 'daily';
-    $('#auto-time').value = a.time || '09:00';
-    $('#auto-range').value = a.range || 'last_month';
-    $('#auto-weekday').value = String(a.weekday ?? 0);
-    $('#auto-dir').value = a.download_dir || '';
-    if($('#auto-formula')) $('#auto-formula').checked = !!a.with_formula;
-    // 店铺多选
-    const sel = $('#auto-stores');
-    if(sel){
-      const want = (a.stores || []).map(String);
-      sel.innerHTML = storesCache.map(x =>
-        `<option value="${esc(x.id)}" ${want.includes(String(x.id)) ? 'selected' : ''}>${esc(x.name || x.id)}</option>`).join('');
-    }
-    syncAutoUi();
   }catch(e){}
 }
-
-/** 自动运行：频率是「每周」时才显示星期几 */
-function syncAutoUi(){
-  const f = $('#auto-freq');
-  if(f && $('#auto-wd-field')) $('#auto-wd-field').hidden = (f.value !== 'weekly');
-}
-
-/** 下次自动运行的时间 */
-function autoNextText(){
-  const on = $('#auto-on') && $('#auto-on').checked;
-  const el = $('#auto-next');
-  if(!el) return;
-  if(!on){ el.textContent = '自动运行没开。'; return; }
-  const freq = $('#auto-freq').value, t = $('#auto-time').value || '09:00';
-  const wd = ['周一','周二','周三','周四','周五','周六','周日'][Number($('#auto-weekday').value) || 0];
-  el.textContent = freq === 'weekly'
-    ? `已开启：每${wd} ${t} 自动跑一次（区间：${$('#auto-range').selectedOptions[0].text}）。`
-    : `已开启：每天 ${t} 自动跑一次（区间：${$('#auto-range').selectedOptions[0].text}）。`;
-}
-
-if($('#auto-freq')) $('#auto-freq').onchange = () => { syncAutoUi(); autoNextText(); };
-if($('#auto-on')) $('#auto-on').onchange = () => autoNextText();
-if($('#auto-range')) $('#auto-range').onchange = () => autoNextText();
-
-$('#auto-now').onclick = async () => {
-  const btn = $('#auto-now'), n = $('#auto-note');
-  btn.disabled = true;
-  try{
-    const r = await fetch('/api/auto-run-now', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({})});
-    const j = await r.json();
-    n.className = 'note show ' + (j.ok ? 'ok' : 'err');
-    n.textContent = j.ok ? (j.note || '已派发') : ('失败：' + (j.error || ''));
-  }catch(e){
-    n.className = 'note show err';
-    n.textContent = '出错：' + e.message;
-  }
-  btn.disabled = false;
-};
 
 $('#btn-set-save').onclick = async () => {
   try{
@@ -4057,22 +4104,370 @@ $('#btn-set-save').onclick = async () => {
                  download_dir: dir, auto_copy: !!dir,
                  template_dir: ($('#set-tpl-dir') ? $('#set-tpl-dir').value : '').trim(),
                  with_formula: !!($('#set-formula') && $('#set-formula').checked)},
-        fx: {mode: $('#set-fx').value},
-        auto: {
-          enabled: !!($('#auto-on') && $('#auto-on').checked),
-          freq: $('#auto-freq').value, time: $('#auto-time').value || '09:00',
-          weekday: Number($('#auto-weekday').value || 0),
-          range: $('#auto-range').value,
-          stores: Array.from(($('#auto-stores') ? $('#auto-stores').selectedOptions : []))
-                    .map(o => o.value),
-          download_dir: ($('#auto-dir') ? $('#auto-dir').value : '').trim(),
-          with_formula: !!($('#auto-formula') && $('#auto-formula').checked),
-        }})});
+        fx: {mode: $('#set-fx').value}})});
     const j = await r.json();
     toast(j.ok ? '设置已保存' : ('保存失败：' + j.error));
-    if(j.ok) autoNextText();
   }catch(e){ toast('出错：' + e.message); }
 };
+
+/* ---------------- 计划任务 ---------------- */
+let PLAN = {rules: [], stores: [], missed: []};
+let PLAN_EDIT = null;
+const WD = ['周一','周二','周三','周四','周五','周六','周日'];
+
+async function loadPlan(){
+  const list = $('#plan-list');
+  try{
+    const j = await (await fetch('/api/schedules')).json();
+    if(!j.ok) throw new Error(j.error || '读取失败');
+    PLAN = j;
+    renderPlan();
+  }catch(e){
+    if(list) list.innerHTML = '<div class="sc-empty">读取失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function dueText(r){
+  if(!r.enabled) return '已关闭';
+  if(!r.next_full) return '—';
+  const d = r.next_full.slice(0, 10), t = r.next_full.slice(11);
+  const today = iso(new Date());
+  const tmr = iso(new Date(Date.now() + 86400000));
+  if(d === today) return '今天 ' + t;
+  if(d === tmr) return '明天 ' + t;
+  return d.slice(5).replace('-', '/') + ' ' + t;
+}
+
+function freqIcon(freq){
+  if(freq === 'daily')
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.6V12l3 1.8"/></svg>';
+  if(freq === 'weekly')
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.6" width="18" height="16.4" rx="3"/><path d="M3 10h18M8 2.6v4M16 2.6v4"/><path d="M9 14.4h6M9 17.4h3.4"/></svg>';
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.6" width="18" height="16.4" rx="3"/><path d="M3 10h18M8 2.6v4M16 2.6v4"/><circle cx="12" cy="15.2" r="2.2"/></svg>';
+}
+
+function ruleCard(r){
+  const off = !r.enabled;
+  const names = (r.store_names || []).filter(Boolean);
+  const storeTxt = names.length
+    ? (names.length <= 3 ? names.join('、') : names.slice(0, 3).join('、') + ` 等 ${names.length} 家`)
+    : '全部店铺';
+  const dirTxt = r.download_dir || '默认（程序里的「报表」目录）';
+  const lastTxt = r.last
+    ? esc(r.last) + (r.last_range ? ' · ' + esc(r.last_range) : '')
+    : '还没跑过';
+  return `<div class="pc ${off ? 'off' : ''}">
+    <div class="pc-head">
+      <div class="pc-ic">${freqIcon(r.freq)}</div>
+      <div class="pc-title">
+        <div class="n">${esc(r.name || r.when_label)}</div>
+        <div class="m">${esc(r.when_label)} · ${esc(r.range_label)}</div>
+      </div>
+      <label class="tgl" title="${off ? '已关闭' : '运行中，点一下关闭'}">
+        <input type="checkbox" data-toggle="${esc(r.id)}" ${off ? '' : 'checked'}><i></i></label>
+    </div>
+    <div class="pc-body">
+      <div class="pc-row"><span class="k">下次</span><span class="v"><span class="soon">${esc(dueText(r))}</span></span></div>
+      <div class="pc-row"><span class="k">区间</span><span class="v"><b>${esc(r.range_label)}</b>　${esc(r.range_preview)}</span></div>
+      <div class="pc-row"><span class="k">店铺</span><span class="v">${esc(storeTxt)}</span></div>
+      <div class="pc-row"><span class="k">上次</span><span class="v">${lastTxt}</span></div>
+      <div class="pc-row"><span class="k">报表</span><span class="v">${esc(dirTxt)}${r.with_formula === true ? ' · 带公式' : (r.with_formula === false ? ' · 不带公式' : '')}</span></div>
+    </div>
+    <div class="pc-foot">
+      <button class="primary" data-run="${esc(r.id)}">立即跑</button>
+      <button data-edit="${esc(r.id)}">编辑</button>
+      <span class="grow"></span>
+      <button class="danger" data-del="${esc(r.id)}">删除</button>
+    </div>
+  </div>`;
+}
+
+function renderPlan(){
+  const list = $('#plan-list'), alertBox = $('#plan-alert');
+  if(!list) return;
+  const missed = PLAN.missed || [];
+  if(alertBox){
+    alertBox.innerHTML = missed.length ? `<div class="alert">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/>
+        <path d="M12 7.4v5.4"/><circle cx="12" cy="16.4" r=".9" fill="currentColor" stroke="none"/></svg>
+      <div class="grow">有 <b>${missed.length}</b> 条计划到点没跑成：${
+        missed.map(x => esc((x.name || x.id) + '（' + x.at + '）')).join('、')}</div>
+      <button id="plan-catchup">一键补跑</button></div>` : '';
+    const b = $('#plan-catchup');
+    if(b) b.onclick = catchupAll;
+  }
+  if(!PLAN.rules.length){
+    list.innerHTML = '<div class="sc-empty"><b>还没有计划</b>点下面的「新建计划」，'
+      + '比如「每月 1 号 09:00 导上个月的全部店铺」</div>';
+    return;
+  }
+  list.innerHTML = PLAN.rules.map(ruleCard).join('');
+}
+
+function planById(id){ return (PLAN.rules || []).find(x => x.id === id); }
+
+const RULE_KEYS = ['id','name','enabled','freq','time','day','weekday',
+  'period','offset','cut','cut_day','stores','download_dir','with_formula'];
+const stripRule = r => RULE_KEYS.reduce((o, k) => { if(k in r) o[k] = r[k]; return o; }, {});
+
+async function saveRules(rules, quiet){
+  try{
+    const j = await (await fetch('/api/schedules/save', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({rules: (rules || []).map(stripRule)})})).json();
+    if(!j.ok){ toast('保存失败：' + (j.error || '')); return null; }
+    PLAN = j;
+    renderPlan();
+    if(!quiet) toast('已保存');
+    return j;
+  }catch(e){ toast('保存失败：' + e.message); return null; }
+}
+
+async function toggleRule(id, on){
+  const rules = (PLAN.rules || []).map(r => ({...r, enabled: r.id === id ? on : r.enabled}));
+  await saveRules(rules, true);
+  toast(on ? '已开启' : '已关闭');
+}
+
+async function runRule(id){
+  const r = planById(id);
+  try{
+    const j = await (await fetch('/api/schedules/run', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})})).json();
+    if(j.ok){
+      const d = (j.ran || [])[0] || {};
+      toast(`已派发：${r ? r.name : ''} ${d.range || ''}（${d.stores || 0} 家店）`);
+      setTimeout(loadPlan, 1200);
+    }else toast(j.error || '派发失败');
+  }catch(e){ toast('派发失败：' + e.message); }
+}
+
+async function delRule(id){
+  const r = planById(id);
+  if(!confirm(`删除计划「${r ? r.name : id}」？\n（只是不再定时跑，已经出的报表和数据都还在）`)) return;
+  await saveRules((PLAN.rules || []).filter(x => x.id !== id));
+  toast('已删除');
+}
+
+async function catchupAll(){
+  try{
+    const j = await (await fetch('/api/schedules/catchup', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({})})).json();
+    toast(j.note || '已补跑');
+    setTimeout(loadPlan, 1200);
+  }catch(e){ toast('补跑失败：' + e.message); }
+}
+
+/* ----- 新建 / 编辑 ----- */
+
+const PLAN_BLANK = () => ({
+  id: '', name: '', enabled: true, freq: 'monthly', time: '09:00', day: 1, weekday: 0,
+  period: 'month', offset: 1, cut: 'end', cut_day: 1, stores: [],
+  download_dir: '', with_formula: null,
+});
+
+function openPlan(id){
+  const base = id ? planById(id) : null;
+  PLAN_EDIT = base ? JSON.parse(JSON.stringify(base)) : PLAN_BLANK();
+  $('#pm-title').textContent = id ? '编辑计划' : '新建计划';
+  $('#pm-sub').textContent = id ? (base.name || '') : '';
+  renderPlanForm();
+  $('#plan-modal').classList.add('show');
+}
+
+function closePlan(){
+  $('#plan-modal').classList.remove('show');
+  PLAN_EDIT = null;
+}
+
+function offsetLabel(period, n){
+  if(period === 'month') return n === 0 ? '本月' : (n === 1 ? '上月' : (n === 2 ? '上上个月' : n + ' 个月前'));
+  if(period === 'week')  return n === 0 ? '本周' : (n === 1 ? '上周' : (n === 2 ? '上上周' : n + ' 周前'));
+  return n === 0 ? '今天' : (n === 1 ? '昨天' : (n === 2 ? '前天' : n + ' 天前'));
+}
+
+function renderPlanForm(){
+  const r = PLAN_EDIT, f = r.freq, p = r.period, cut = r.cut;
+
+  const dayField = f === 'monthly'
+    ? `<div class="field"><label>每月几号</label>
+         <input type="number" id="pm-day" min="1" max="31" value="${r.day}"></div>`
+    : (f === 'weekly'
+      ? `<div class="field"><label>每周几</label><select id="pm-wd">${
+          WD.map((w, i) => `<option value="${i}" ${i === r.weekday ? 'selected' : ''}>${w}</option>`).join('')
+        }</select></div>`
+      : `<div class="field"><label>重复</label>
+           <div style="padding:9px 0;color:var(--text-2);font-size:13px">每天都跑</div></div>`);
+
+  const offsetOpts = [];
+  const maxN = p === 'month' ? 12 : (p === 'week' ? 12 : 30);
+  if(r.offset > maxN) r.offset = maxN;   // 从「按月」切到「按周」时别让选项对不上
+  for(let i = 0; i <= maxN; i++){
+    offsetOpts.push(`<option value="${i}" ${i === r.offset ? 'selected' : ''}>${offsetLabel(p, i)}</option>`);
+  }
+
+  const cutField = cut === 'day'
+    ? `<div class="field"><label>${p === 'week' ? '截到周几' : '截到几号'}</label>
+         <input type="number" id="pm-cutday" min="1" max="${p === 'week' ? 7 : 31}" value="${r.cut_day}"></div>`
+    : '';
+
+  const chips = (PLAN.stores || []).map(st => {
+    const on = (r.stores || []).includes(st.id);
+    const tip = st.shop_name && st.shop_name !== st.name ? `${st.name} · ${st.shop_name}` : st.name;
+    return `<label class="${on ? 'on' : ''}" title="${esc(tip)}">
+      <input type="checkbox" data-store="${esc(st.id)}" ${on ? 'checked' : ''}>${esc(st.name || st.id)}</label>`;
+  }).join('') || '<span class="muted" style="font-size:12.5px">还没识别到店铺</span>';
+
+  $('#pm-form').innerHTML = `
+    <div class="field full"><label>计划名称</label>
+      <input type="text" id="pm-name" placeholder="比如：每月 1 号导上月" value="${esc(r.name || '')}"></div>
+
+    <div class="field"><label>多久跑一次</label>
+      <select id="pm-freq">
+        <option value="monthly" ${f === 'monthly' ? 'selected' : ''}>每月某天</option>
+        <option value="weekly"  ${f === 'weekly' ? 'selected' : ''}>每周某天</option>
+        <option value="daily"   ${f === 'daily' ? 'selected' : ''}>每天</option>
+      </select></div>
+    ${dayField}
+    <div class="field"><label>几点跑</label>
+      <input type="time" id="pm-time" value="${r.time}"></div>
+
+    <div class="field"><label>算哪一段（周期）</label>
+      <select id="pm-period">
+        <option value="month" ${p === 'month' ? 'selected' : ''}>按月</option>
+        <option value="week"  ${p === 'week' ? 'selected' : ''}>按周</option>
+        <option value="day"   ${p === 'day' ? 'selected' : ''}>按天</option>
+        <option value="last7" ${p === 'last7' ? 'selected' : ''}>最近 7 天</option>
+        <option value="all"   ${p === 'all' ? 'selected' : ''}>全部数据</option>
+      </select></div>
+    <div class="field"><label>哪一期</label>
+      <select id="pm-offset" ${p === 'last7' || p === 'all' ? 'disabled' : ''}>${offsetOpts.join('')}</select></div>
+
+    <div class="field"><label>截到哪天</label>
+      <select id="pm-cut">
+        <option value="end"   ${cut === 'end' ? 'selected' : ''}>整期（到期末）</option>
+        <option value="today" ${cut === 'today' ? 'selected' : ''}>到今天</option>
+        <option value="day"   ${cut === 'day' ? 'selected' : ''}>第 N 天</option>
+      </select></div>
+    ${cutField}
+
+    <div class="field full"><label>跑哪些店（不选 = 全部）</label>
+      <div class="chk-row" id="pm-stores">${chips}</div></div>
+
+    <div class="field full"><label>报表另存到（留空 = 只在程序的「报表」目录）</label>
+      <input type="text" id="pm-dir" placeholder="D:/净利报表" value="${esc(r.download_dir || '')}"></div>
+
+    <div class="field"><label>报表格要不要带公式</label>
+      <select id="pm-wf">
+        <option value=""  ${r.with_formula === null ? 'selected' : ''}>跟随设置页的开关</option>
+        <option value="1" ${r.with_formula === true ? 'selected' : ''}>带公式</option>
+        <option value="0" ${r.with_formula === false ? 'selected' : ''}>不带（数字是最终值）</option>
+      </select></div>
+
+    <div class="tip full">
+      区间不存死日期，只存规则。例：<b>每月 1 号 09:00</b> + <b>按月 / 上月 / 整期</b>
+      = 每月 1 号自动算上个月整月；<b>每月 3 号</b> + <b>按月 / 本月 / 到今天</b>
+      = 每月 3 号算本月 1 号到 2 号。浏览器没开时任务会排队，等它打开自动补。</div>`;
+
+  // 事件：改任意字段都重画预览
+  const bind = (sel, key, cast) => {
+    const el = $(sel);
+    if(!el) return;
+    el.oninput = el.onchange = () => {
+      PLAN_EDIT[key] = cast ? cast(el.value) : el.value;
+      if(key === 'freq' || key === 'period' || key === 'cut') renderPlanForm();
+      updatePlanPreview();
+    };
+  };
+  bind('#pm-name', 'name');
+  bind('#pm-time', 'time');
+  bind('#pm-day', 'day', Number);
+  bind('#pm-wd', 'weekday', Number);
+  bind('#pm-freq', 'freq');
+  bind('#pm-period', 'period');
+  bind('#pm-offset', 'offset', Number);
+  bind('#pm-cut', 'cut');
+  bind('#pm-cutday', 'cut_day', Number);
+  bind('#pm-dir', 'download_dir');
+  bind('#pm-wf', 'with_formula', v => v === '' ? null : v === '1');
+
+  document.querySelectorAll('#pm-stores input[data-store]').forEach(cb => {
+    cb.onchange = () => {
+      const id = cb.dataset.store;
+      const set = new Set(PLAN_EDIT.stores || []);
+      if(cb.checked) set.add(id); else set.delete(id);
+      PLAN_EDIT.stores = Array.from(set);
+      cb.closest('label').classList.toggle('on', cb.checked);
+      updatePlanPreview();
+    };
+  });
+
+  updatePlanPreview();
+}
+
+let PLAN_PREV_T = null;
+async function updatePlanPreview(){
+  const box = $('#pm-prev');
+  if(!box || !PLAN_EDIT) return;
+  clearTimeout(PLAN_PREV_T);
+  PLAN_PREV_T = setTimeout(async () => {
+    try{
+      const j = await (await fetch('/api/schedules/preview', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({rule: PLAN_EDIT})})).json();
+      if(!j.ok) return;
+      box.innerHTML = `触发：<b>${esc(j.when_label)}</b>　·　区间：<b>${esc(j.range_label)}</b>`
+        + `　·　这次会算 <b>${esc(j.range_preview)}</b>`
+        + (j.next ? `　·　下次 <b>${esc(j.next)}</b>` : '');
+    }catch(e){ /* 预览失败不影响填写 */ }
+  }, 180);
+}
+
+async function submitPlan(runNow){
+  if(!PLAN_EDIT) return;
+  const r = PLAN_EDIT;
+  const rules = (PLAN.rules || []).map(x => ({...x}));
+  const isNew = !r.id;
+  if(isNew) rules.push(r);
+  else{
+    const i = rules.findIndex(x => x.id === r.id);
+    if(i >= 0) rules[i] = r; else rules.push(r);
+  }
+  const btn = $(runNow ? '#pm-run' : '#pm-save');
+  if(btn) btn.disabled = true;
+  const j = await saveRules(rules, true);
+  if(btn) btn.disabled = false;
+  if(!j) return;
+  closePlan();
+  toast(runNow ? '已保存，正在派发…' : '已保存');
+  if(runNow){
+    const target = isNew ? (j.rules || [])[j.rules.length - 1] : (j.rules || []).find(x => x.id === r.id);
+    if(target) await runRule(target.id);
+  }
+}
+
+$('#plan-add') && ($('#plan-add').onclick = () => openPlan(null));
+$('#pm-x') && ($('#pm-x').onclick = closePlan);
+$('#pm-cancel') && ($('#pm-cancel').onclick = closePlan);
+$('#pm-save') && ($('#pm-save').onclick = () => submitPlan(false));
+$('#pm-run') && ($('#pm-run').onclick = () => submitPlan(true));
+$('#plan-modal') && $('#plan-modal').addEventListener('click', e => {
+  if(e.target.id === 'plan-modal') closePlan();
+});
+$('#go-plan') && ($('#go-plan').onclick = () => go('plan'));
+
+document.addEventListener('click', e => {
+  const t = e.target.closest('#plan-list [data-run],#plan-list [data-edit],#plan-list [data-del]');
+  if(!t) return;
+  if(t.dataset.run) runRule(t.dataset.run);
+  else if(t.dataset.edit) openPlan(t.dataset.edit);
+  else if(t.dataset.del) delRule(t.dataset.del);
+});
+document.addEventListener('change', e => {
+  const cb = e.target.closest('#plan-list input[data-toggle]');
+  if(cb) toggleRule(cb.dataset.toggle, cb.checked);
+});
 
 async function loadDebug(){
   try{

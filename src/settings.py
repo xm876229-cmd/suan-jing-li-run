@@ -38,6 +38,7 @@ DEFAULTS: dict = {
         "mode": "auto",
     },
     # 自动运行：到点自动抓数据 → 核算 → 出报表
+    # （0.24 起改成「多条计划任务」，这份旧配置只用来一次性迁移）
     "auto": {
         "enabled": False,
         # daily 每天 / weekly 每周某天
@@ -55,6 +56,9 @@ DEFAULTS: dict = {
         # 报表带不带公式（跟随「报表」页的同名设置）
         "with_formula": False,
     },
+    # 计划任务：可以配多条，每条各自定时、各自选店铺和区间。
+    # 结构见 src/auto_run.py 的 DEFAULT_RULE。
+    "schedules": [],
 }
 
 # 模板变量别名 → 统一取值用的键
@@ -88,6 +92,18 @@ def load() -> dict:
             out.setdefault(section, {}).update(values)
         else:
             out[section] = values
+
+    # 老版本只有一条「自动运行」，新版本改成了计划任务列表。
+    # 这里在内存里翻译成一条规则给界面看；用户点了保存才真正落盘，
+    # 不保存就一直按旧配置跑（旧配置也还在文件里，随时能退回去）。
+    if not out.get("schedules"):
+        try:
+            from src import auto_run
+            legacy = auto_run.legacy_to_rule(out.get("auto") or {})
+            if legacy and (out.get("auto") or {}).get("enabled"):
+                out["schedules"] = [legacy]
+        except Exception:  # noqa: BLE001
+            pass
     return out
 
 

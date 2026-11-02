@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 import urllib.request
@@ -25,28 +26,78 @@ WINDOW_TITLE = "净利助手"
 WIDTH, HEIGHT = 1200, 840
 MIN_W, MIN_H = 940, 620
 
+# 本机请求一律绕开系统代理。
+# 有些电脑装了抓包/代理软件，它会把 127.0.0.1 也当外部流量转发，
+# 结果「桥明明在跑，程序说连不上」——这种问题查起来极费时间。
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _health(timeout: float = 1.5) -> dict:
+    """读桥的 /health。连不上返回空 dict。"""
+    try:
+        url = f"http://127.0.0.1:{_port()}/health"
+        with _OPENER.open(url, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _port() -> int:
+    import os
+    return int(os.environ.get("JINGLI_PORT") or 8765)
+
+
+def _same_dir(a: str, b: str) -> bool:
+    import os
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
 
 def _bridge_alive(timeout: float = 1.5) -> bool:
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:8765/health", timeout=timeout) as r:
-            return b'"ok"' in r.read() or b"true" in r.read().lower()
-    except Exception:  # noqa: BLE001
-        return False
+    return bool(_health(timeout).get("ok"))
 
 
-def ensure_bridge() -> bool:
-    """确保桥在跑。没有就拉起来（后台，不占窗口）。"""
-    if _bridge_alive():
-        return True
+def ensure_bridge(progress=None) -> bool:
+    """确保「本程序这个目录」的桥在跑。
 
-    from src.app import start_bridge_hidden
+    为什么要比对目录：电脑上可能同时装着免安装版和安装版，
+    两边都有自己的桥、自己的配置和数据库。旧的那个先抢到 8765，
+    新的程序打开的就是别人的数据——报表看着正常，店铺却是另一套。
+    所以只认「根目录跟当前程序一致」的那一个，不是就关掉重起。
+    """
+    def say(msg: str) -> None:
+        if progress:
+            try:
+                progress(msg)
+            except Exception:  # noqa: BLE001
+                pass
 
+    from src import paths
+    from src.app import start_bridge_hidden, _kill_bridge_on_port
+
+    info = _health()
+    if info.get("ok"):
+        if _same_dir(str(info.get("root") or ""), str(paths.ROOT)):
+            say("取数服务已在运行")
+            return True
+        say("发现另一个目录的程序在跑，先关掉它…")
+        try:
+            _kill_bridge_on_port(_port())
+        except Exception:  # noqa: BLE001
+            pass
+        for _ in range(40):
+            if not _bridge_alive(0.6):
+                break
+            time.sleep(0.25)
+
+    say("正在启动取数服务…")
     if not start_bridge_hidden():
         return False
-    # 桥是子进程，起来需要一点时间，最多等 15 秒
-    for _ in range(30):
+    for _ in range(40):
         time.sleep(0.5)
-        if _bridge_alive():
+        if _bridge_alive(0.8):
+            say("正在打开界面…")
             return True
     return False
 
@@ -171,38 +222,120 @@ class NativeApi:
             return f"重启失败：{e}"
 
 
+# ---------------- 启动页 ----------------
+#
+# 以前的启动是「先双击启动桥，等黑窗口里出现一行字，再双击程序」，
+# 而且程序打开的头两秒是白屏——不知道是在启动还是卡死了。
+# 现在双击一次：先出这个启动页，桥就绪后自动跳到主界面。
+# 不用 tkinter：打包时为了体积把它排除了，pywebview 的窗口本身就能装 HTML。
+
+SPLASH_HTML = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<style>
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:linear-gradient(160deg,#f7fbf9 0%,#eef4f3 55%,#e9f1f0 100%);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+    color:#111827;display:flex;align-items:center;justify-content:center;
+    -webkit-font-smoothing:antialiased;user-select:none}
+  .wrap{text-align:center;width:100%;padding:0 34px}
+  .mark{width:62px;height:62px;margin:0 auto 18px;border-radius:19px;
+    background:linear-gradient(145deg,#13b48c,#0a6d57);
+    box-shadow:0 12px 28px -10px rgba(14,138,109,.65);
+    display:flex;align-items:center;justify-content:center;
+    animation:pop .5s cubic-bezier(.2,.9,.3,1.3) both}
+  .mark svg{width:34px;height:34px}
+  @keyframes pop{from{transform:scale(.86);opacity:0}to{transform:scale(1);opacity:1}}
+  h1{font-size:19px;font-weight:600;margin:0 0 6px;letter-spacing:-.2px}
+  .sub{font-size:12.5px;color:#8c95a3;margin-bottom:22px}
+  .track{height:4px;border-radius:4px;background:#dfe7e6;overflow:hidden;margin:0 auto;
+    width:190px}
+  .fill{height:100%;width:38%;border-radius:4px;
+    background:linear-gradient(90deg,#13b48c,#0e8a6d);
+    animation:slide 1.25s ease-in-out infinite}
+  @keyframes slide{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}
+  .status{font-size:12.5px;color:#5a6472;margin-top:16px;min-height:20px}
+  .hint{font-size:11.5px;color:#a4acb8;margin-top:6px}
+</style></head><body>
+<div class="wrap">
+  <div class="mark">
+    <svg viewBox="0 0 24 24" fill="none">
+      <rect x="4" y="13" width="3.6" height="7" rx="1.3" fill="#fff" opacity=".82"/>
+      <rect x="10.2" y="8.5" width="3.6" height="11.5" rx="1.3" fill="#fff"/>
+      <rect x="16.4" y="4" width="3.6" height="16" rx="1.3" fill="#fff" opacity=".92"/>
+    </svg>
+  </div>
+  <h1>净利助手</h1>
+  <div class="sub">正在启动，请稍候</div>
+  <div class="track"><div class="fill"></div></div>
+  <div class="status" id="st">检查取数服务…</div>
+  <div class="hint" id="hint">第一次启动会慢一些，之后就快了</div>
+</div>
+<script>
+  function setStatus(t){ document.getElementById('st').textContent = t; }
+  function setError(t){
+    document.getElementById('st').textContent = t;
+    document.getElementById('st').style.color = '#c0462c';
+    document.querySelector('.fill').style.animation = 'none';
+    document.querySelector('.hint').textContent = '关掉这个窗口，重启程序再试；杀毒软件拦截时也会这样';
+  }
+</script></body></html>"""
+
+
+def _boot(win) -> None:
+    """启动页里跑的后台流程：起桥 → 跳主界面。"""
+    def say(msg: str) -> None:
+        try:
+            win.evaluate_js(f"setStatus({json.dumps(msg, ensure_ascii=False)})")
+        except Exception:  # noqa: BLE001
+            pass
+
+    ok = ensure_bridge(progress=say)
+    if not ok:
+        try:
+            win.evaluate_js("setError('取数服务没能启动（8765 端口可能被占用）')")
+        except Exception:  # noqa: BLE001
+            pass
+        return
+
+    try:
+        win.load_url(f"http://127.0.0.1:{_port()}/")
+        win.resize(WIDTH, HEIGHT)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main() -> int:
     if getattr(sys, "frozen", False):
         import multiprocessing
         multiprocessing.freeze_support()
 
-    if not ensure_bridge():
-        return _fatal(
-            "取数服务没能启动。\n\n"
-            "常见原因：8765 端口被别的程序占用。\n"
-            "可以先用「诊断信息」看看，或者重启电脑后再试。"
-        )
-
     try:
         import webview
     except ImportError:
+        # 没有界面组件时退回「先起桥再说」，至少不耽误取数
+        if ensure_bridge():
+            import webbrowser
+            webbrowser.open(f"http://127.0.0.1:{_port()}/")
+            return 0
         return _fatal(
             "缺少界面组件（pywebview）。\n\n"
             "如果是源码运行，执行：pip install pywebview"
         )
 
-    webview.create_window(
+    win = webview.create_window(
         WINDOW_TITLE,
-        "http://127.0.0.1:8765/",
-        width=WIDTH,
-        height=HEIGHT,
-        min_size=(MIN_W, MIN_H),
-        text_select=True,
+        html=SPLASH_HTML,
+        width=430,
+        height=340,
+        resizable=True,
+        min_size=(430, 330),
+        text_select=False,
         confirm_close=False,
+        background_color="#f2f6f5",
         js_api=NativeApi(),
     )
     # 关窗口就退出界面进程；桥是独立子进程，会继续在后台跑
-    webview.start()
+    webview.start(_boot, win)
     return 0
 
 

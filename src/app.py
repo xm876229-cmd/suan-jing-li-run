@@ -88,10 +88,13 @@ def _no_window_flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
 def bridge_running() -> bool:
+    """桥在不在跑。绕开系统代理——有的抓包软件会把 127.0.0.1 也转发，
+    结果「桥明明开着，程序说连不上」这种问题极难查。"""
     import json
     import urllib.request
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{_port()}/health", timeout=2) as r:
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with op.open(f"http://127.0.0.1:{_port()}/health", timeout=2) as r:
             return json.loads(r.read().decode("utf-8")).get("ok") is True
     except Exception:
         return False

@@ -45,6 +45,10 @@ CAPTURE_DIR = paths.CAPTURE
 PENDING_RUNS = paths.DATA / "pending_runs.json"
 _PENDING_LOCK = threading.Lock()
 
+# 计划任务派下去时，这家店的报表该复制到哪儿（shop_id → 目录）。
+# 多条计划各有各的保存位置，不能共用设置里那一个全局目录。
+_AUTO_DL: dict[str, str] = {}
+
 
 def _pending_load() -> dict:
     try:
@@ -235,13 +239,20 @@ def _online_now(shop_id: str) -> bool:
 def _enqueue(store: str, rng: dict, *, task: str = "all", auto: bool = False,
              manual: bool = False, with_formula=None, country: str = "") -> dict:
     """往队列里放一个任务。store 必填——不写 store 就等于"谁都能领"，
-    多店同时在线时必然串店，这正是这次要修的东西。"""
+    多店同时在线时必然串店，这正是这次要修的东西。
+
+    区间在这里补齐成 startDate/to/endDateExclusive/startMs/endMs 全套：
+    界面只传两个日期，而扩展里订单要毫秒、SKU 与联盟要开区间，
+    缺字段的结果是「该时段没有订单」这种假结论，最难查。
+    """
     import uuid
+
+    from src import auto_run
 
     job = {
         "id": uuid.uuid4().hex[:12],
         "task": task,
-        "range": rng or {},
+        "range": auto_run.normalize_range(rng or {}),
         "store": (store or "").strip(),
         "country": country or "",
         "auto": bool(auto),
@@ -767,7 +778,13 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": True, "service": "jingli-bridge",
                          "captureDir": str(CAPTURE_DIR),
                          "inbox": str(INBOX_DIR),
+                         # 桌面窗口用它判断「现在跑着的桥是不是我这个程序的」：
+                         # 目录不一样就说明是另一份程序起的，只有那种才要强停。
+                         "root": str(ROOT),
+                         "pid": os.getpid(),
                          "extVersion": _ext})
+        elif self.path.startswith("/api/schedules"):
+            self._get_schedules()
         elif self.path.startswith("/endpoints"):
             _json(self, rebuild_endpoints())
         elif self.path.startswith("/log"):
@@ -1115,6 +1132,14 @@ class Handler(BaseHTTPRequestHandler):
             self._post_rename_store()
         elif self.path.startswith("/identify"):
             self._post_identify()
+        elif self.path.startswith("/api/schedules/preview"):
+            self._post_schedules_preview()
+        elif self.path.startswith("/api/schedules/save"):
+            self._post_schedules_save()
+        elif self.path.startswith("/api/schedules/run"):
+            self._post_schedules_run()
+        elif self.path.startswith("/api/schedules/catchup"):
+            self._post_schedules_catchup()
         elif self.path.startswith("/api/settings"):
             self._post_settings()
         elif self.path.startswith("/api/auto-run-now"):
@@ -1749,7 +1774,7 @@ class Handler(BaseHTTPRequestHandler):
         rng = payload.get("range") or {}
         if isinstance(rng, dict) and rng.get("kind"):
             from src import auto_run
-            rng = auto_run.build_range(str(rng.get("kind")), datetime.now())
+            rng = auto_run.build_range(auto_run.quick_rule(str(rng.get("kind"))), datetime.now())
 
         sent, offline, jobs = [], [], []
         for sid in ids:
@@ -1805,6 +1830,209 @@ class Handler(BaseHTTPRequestHandler):
                      "steps": list(RUN_STEPS), "labels": STEP_LABELS,
                      "stores": out, "queue": queue, "order": list(names)})
 
+    def _get_schedules(self):
+        """计划任务列表 + 每条的下次/上次/漏跑。"""
+        from src import auto_run
+
+        now = datetime.now()
+        state = auto_run.load_state()
+        names = _store_dir_names()
+        store_meta: dict[str, str] = {}
+        for sid in names:
+            try:
+                m = json.loads((paths.store_root(sid) / "meta.json").read_text(encoding="utf-8"))
+                store_meta[sid] = str(m.get("shop_name") or "")
+            except Exception:  # noqa: BLE001
+                store_meta[sid] = ""
+
+        out, missed = [], []
+        for r in _rules_now():
+            rid = r["id"]
+            st = state.get(rid) or {}
+            nxt = auto_run.next_due(r, now)
+            item = dict(r)
+            item.update({
+                "next": nxt.strftime("%m-%d %H:%M") if nxt else "",
+                "next_full": nxt.strftime("%Y-%m-%d %H:%M") if nxt else "",
+                "last": st.get("last") or "",
+                "last_at": st.get("at") or "",
+                "last_range": st.get("range") or "",
+                "last_stores": st.get("stores"),
+                "missed_at": st.get("missed_at") or "",
+                "range_label": auto_run.range_label(r, now),
+                "range_preview": auto_run.describe_range(r, now),
+                "when_label": auto_run.describe_rule(r),
+                "store_names": [names.get(s, s) for s in (r.get("stores") or [])],
+            })
+            if st.get("missed_at") and r.get("enabled"):
+                missed.append({"id": rid, "name": r.get("name"), "at": st["missed_at"]})
+            out.append(item)
+
+        stores = [{"id": sid, "name": nm, "shop_name": store_meta.get(sid) or ""}
+                  for sid, nm in names.items()]
+        _json(self, {"ok": True, "rules": out, "stores": stores, "missed": missed,
+                     "now": now.strftime("%Y-%m-%d %H:%M:%S")})
+
+    def _post_schedules_preview(self):
+        """编辑计划时算一下「这条会跑哪一段」，不用先保存。
+
+        前端做同样的日期推演会跟后端两套逻辑，迟早对不上——
+        干脆一律问后端，界面上显示的就是真会跑的东西。
+        """
+        from src import auto_run
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+        rule = auto_run.normalize_rule(payload.get("rule") or payload or {})
+        now = datetime.now()
+        nxt = auto_run.next_due(rule, now)
+        _json(self, {
+            "ok": True,
+            "when_label": auto_run.describe_rule(rule),
+            "range_label": auto_run.range_label(rule, now),
+            "range_preview": auto_run.describe_range(rule, now),
+            "next": nxt.strftime("%Y-%m-%d %H:%M") if nxt else "",
+            "name": rule.get("name") or "",
+        })
+
+    def _post_schedules_save(self):
+        """整份计划列表保存（前端改完一次性提交）。"""
+        from src import auto_run, settings as cfg_settings
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+
+        raw_rules = payload.get("rules")
+        if not isinstance(raw_rules, list):
+            _json(self, {"ok": False, "error": "缺少 rules"}, 400)
+            return
+
+        state = auto_run.load_state()
+        clean = []
+        now = datetime.now()
+        keep_keys = ("id", "name", "enabled", "freq", "time", "day", "weekday",
+                     "period", "offset", "cut", "cut_day", "stores",
+                     "download_dir", "with_formula")
+        for i, raw in enumerate(raw_rules):
+            if not isinstance(raw, dict):
+                continue
+            # 只存规则本身：界面上那些 next / range_label 是算出来的，
+            # 存进配置只会越积越大，还会跟真正重算出来的值打架
+            r = auto_run.normalize_rule({k: raw.get(k) for k in keep_keys if k in raw})
+            if not r.get("id"):
+                r["id"] = f"r{int(now.timestamp())}_{i + 1}"
+            clean.append(r)
+            # 新规则先记一个「刚处理过」，免得刚建就被判成漏跑
+            if r["id"] not in state:
+                due = auto_run.last_due(r, now)
+                state[r["id"]] = {"mark": (due or now).strftime("%Y-%m-%d %H:%M"),
+                                  "seeded": True}
+
+        # 删掉的规则把状态一起清掉，省得以后同 id 复活带出旧记录
+        keep = {r["id"] for r in clean}
+        for rid in list(state):
+            if rid not in keep:
+                state.pop(rid, None)
+        auto_run.save_state(state)
+
+        try:
+            cfg_settings.save({"schedules": clean})
+        except Exception as e:  # noqa: BLE001
+            _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
+            return
+        _append_log(f"[计划] 已保存 {len(clean)} 条计划")
+        self._get_schedules()
+
+    def _post_schedules_run(self):
+        """立即按某条计划跑一次（不动它的定时记录）。"""
+        from src import auto_run
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+        rid = str(payload.get("id") or "").strip()
+
+        rules = [r for r in _rules_now() if not rid or r["id"] == rid]
+        if not rules:
+            _json(self, {"ok": False, "error": "没找到这条计划"}, 404)
+            return
+
+        done = []
+        state = auto_run.load_state()
+        for r in rules:
+            res = _dispatch_rule(r, datetime.now())
+            # 只记「显示用的上次」，不动 mark：手动跑一次不等于这次定时已经跑过，
+            # 到点该跑还得跑。
+            st = dict(state.get(r["id"]) or {})
+            st["last"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            st["at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st["range"] = res["range_label"]
+            st["stores"] = len(res["ids"])
+            state[r["id"]] = st
+            done.append({"id": r["id"], "name": r.get("name"),
+                         "stores": len(res["ids"]), "range": res["range_label"]})
+        auto_run.save_state(state)
+        _json(self, {"ok": True, "ran": done,
+                     "note": f"已派发 {sum(d['stores'] for d in done)} 个任务"})
+
+    def _post_schedules_catchup(self):
+        """补跑漏掉的计划。
+
+        用「当时该跑的那一刻」算区间，不是用今天算——
+        11-01 09:00 漏的上月报表，补跑时还得是上月，不能变成这个月。
+        """
+        from src import auto_run
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+        want = payload.get("ids")
+        want = [str(x) for x in want] if isinstance(want, list) and want else None
+
+        state = auto_run.load_state()
+        done, skipped = [], []
+        for r in _rules_now():
+            rid = r["id"]
+            st = dict(state.get(rid) or {})
+            at = _parse_stamp(st.get("missed_at"))
+            if not at:
+                continue
+            if want and rid not in want:
+                continue
+            if not r.get("enabled"):
+                skipped.append({"id": rid, "name": r.get("name"), "why": "计划已关闭"})
+                continue
+            res = _dispatch_rule(r, at)
+            st.pop("missed_at", None)
+            st.pop("missed_name", None)
+            st["mark"] = at.strftime("%Y-%m-%d %H:%M")
+            st["last"] = at.strftime("%Y-%m-%d %H:%M")
+            st["at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st["range"] = res["range_label"]
+            st["stores"] = len(res["ids"])
+            state[rid] = st
+            done.append({"id": rid, "name": r.get("name"),
+                         "range": res["range_label"], "stores": len(res["ids"])})
+        auto_run.save_state(state)
+
+        if not done and not skipped:
+            _json(self, {"ok": True, "ran": [], "note": "没有需要补跑的计划"})
+            return
+        _append_log("[计划] 补跑：" + "、".join(d["name"] or d["id"] for d in done) if done else "")
+        _json(self, {"ok": True, "ran": done, "skipped": skipped,
+                     "note": f"已补跑 {len(done)} 条" if done else "没有可补的计划"})
+
     def _post_auto_now(self):
         """「现在跑一次」：立刻派一个取数+核算的任务。
 
@@ -1817,7 +2045,7 @@ class Handler(BaseHTTPRequestHandler):
 
         cfg = (cfg_settings.load().get("auto") or {})
         now = datetime.now()
-        rng = auto_run.build_range(str(cfg.get("range") or "last_month"), now)
+        rng = auto_run.build_range(auto_run.quick_rule(str(cfg.get("range") or "last_month")), now)
         stores = [str(s) for s in (cfg.get("stores") or []) if str(s).strip()]
         # 一家店一个任务、store 写死：以前只派一个、store 留空，
         # 谁先轮询谁拿走 —— 多店同时在线必然串店。
@@ -2203,11 +2431,11 @@ class Handler(BaseHTTPRequestHandler):
                 cmd += ["--snapshots", ",".join(d.name for d in data_dirs)]
             elif snap_id:
                 cmd += ["--snapshot", snap_id]
-            # 带不带公式：手动跑用界面上的勾选；自动跑用设置里的开关
+            # 带不带公式：手动跑用界面上的勾选；计划任务带自己的开关
             _wf = payload.get("with_formula")
             if _wf is None:
-                _auto_cfg = cfg_settings.load().get("auto") or {}
-                _wf = _auto_cfg.get("with_formula")
+                _wf = ((cfg_settings.load().get("auto") or {}).get("with_formula")
+                       if payload.get("auto") else stg.get("with_formula"))
             if _wf:
                 cmd += ["--with-formula"]
             if dfrom:
@@ -2313,13 +2541,14 @@ class Handler(BaseHTTPRequestHandler):
                     pass
 
                 # 自动复制到用户指定的位置（比如 D:////净利报表）
-                # 自动运行时用「自动运行」里的目录，手动跑用「报表」页里的目录
+                # 计划任务派下来的用那条计划自己的目录；手动跑用「报表」页里的目录。
                 copied = None
                 try:
                     _dl = stg.get("download_dir") or ""
                     if payload.get("auto"):
-                        _auto_cfg = cfg_settings.load().get("auto") or {}
-                        _dl = _auto_cfg.get("download_dir") or _dl
+                        sid = shop_id or store
+                        _dl = _AUTO_DL.get(sid) or \
+                            (cfg_settings.load().get("auto") or {}).get("download_dir") or _dl
                     copied = cfg_settings.copy_to_download_dir(out, _dl)
                 except Exception:  # noqa: BLE001
                     copied = None
@@ -2499,45 +2728,153 @@ def _setup_log_file():
         print(f"日志文件不可用（忽略）：{e}")
 
 
-def _auto_runner() -> None:
-    """自动运行：到点往待办队列里塞一个「取数 + 核算」任务。
+def _parse_stamp(s: str):
+    """把状态文件里的 "2026-11-02 09:00" 解析成 datetime。"""
+    raw = str(s or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M"):
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
 
-    扩展会来领这个任务（GET /pending），所以浏览器关着也不影响桥本身。
-    跑完的报表照常出在「报表」目录，设定下载目录的话再复制一份过去。
+
+def _dispatch_rule(rule: dict, when: datetime | None = None) -> dict:
+    """按一条计划派任务（一家店一个）。
+
+    when 是「这次该跑的时刻」——补跑错过的计划时传当时的时刻，
+    否则会拿今天的日期去算上月区间，跑出来跟计划里写的不是一回事。
     """
-    import time
-    from datetime import datetime
+    from src import auto_run
 
+    now = datetime.now()
+    at = when or now
+    rule = auto_run.normalize_rule(rule)
+    rng = auto_run.build_range(rule, at)
+
+    stores = [str(s) for s in (rule.get("stores") or []) if str(s).strip()]
+    names = _store_dir_names()
+    if stores:
+        alias = {v: k for k, v in names.items()}     # 允许写店名
+        ids = [alias.get(s, s) for s in stores]
+    else:
+        ids = list(names.keys())
+
+    dl = str(rule.get("download_dir") or "")
+    jobs = []
+    for sid in ids:
+        if dl:
+            # 核算那一步的报表复制目录：按店记着，_post_run 里取。
+            # 不走设置里的全局 auto.download_dir，多条计划各有各的去处。
+            _AUTO_DL[sid] = dl
+        job = _enqueue(sid, rng, auto=True, with_formula=rule.get("with_formula"))
+        jobs.append(job["id"])
+
+    shown = "、".join(names.get(i, i) for i in ids[:8])
+    _append_log(
+        f"[计划] {rule.get('name') or auto_run.describe_rule(rule)} 派发 "
+        f"{auto_run.describe_range(rule, at)} → {len(ids)} 家店"
+        + (f"（{shown}{'…' if len(ids) > 8 else ''}）" if ids else "（没有店铺）")
+    )
+    return {"range": rng, "ids": ids, "jobs": jobs, "range_label": auto_run.describe_range(rule, at)}
+
+
+def _rules_now() -> list[dict]:
+    """当前所有计划（已规整）。迁移来的旧配置也算一条。"""
     from src import auto_run, settings as cfg_settings
+    try:
+        cfg = cfg_settings.load()
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for i, raw in enumerate(cfg.get("schedules") or []):
+        r = auto_run.normalize_rule(raw)
+        if not r.get("id"):
+            r["id"] = f"r{i + 1}"
+        out.append(r)
+    return out
 
-    last_key = ""     # 上次触发用的键（频率+时间+区间），防止同一分钟重复触发
+
+def _schedule_runner() -> None:
+    """计划任务：每 20 秒看一次有没有到点。
+
+    触发容差 10 分钟：桥或电脑刚好在触发那一刻没开（开机慢、重启），
+    10 分钟内起来就直接补跑，不用人来点。
+    超过 10 分钟算「漏跑」，只记账、不自动跑——上一周的计划
+    不该在今天突然自己跑起来，得让人确认。
+    """
+    import time as _t
+
+    from src import auto_run
+
+    TOLERANCE = 600.0
+    time.sleep(15.0)          # 启动后先让桥把别的活干完
 
     while True:
-        time.sleep(20.0)
         try:
-            cfg = (cfg_settings.load().get("auto") or {})
-            if not cfg.get("enabled"):
-                continue
-            now = datetime.now()
-            if not auto_run.should_run(cfg, now):
-                continue
-            key = f"{now:%Y-%m-%d %H:%M}|{cfg.get('freq')}|{cfg.get('time')}|{cfg.get('range')}"
-            if key == last_key:
-                continue
-            last_key = key
-            rng = auto_run.build_range(str(cfg.get("range") or "last_month"), now)
-            stores = [str(s) for s in (cfg.get("stores") or []) if str(s).strip()]
-            ids = stores or list(_store_dir_names().keys())
-            for sid in ids:
-                _enqueue(sid, rng, auto=True)
-            _append_log(f"[自动] {now:%H:%M} 派发任务："
-                        f"{auto_run.describe_range(str(cfg.get('range') or 'last_month'), now)}"
-                        f"　{len(ids)} 家店"
-                        + ("（" + "、".join(_store_dir_names().get(i, i) for i in ids) + "）"
-                           if len(ids) <= 8 else ""))
-            print(f"[自动] 已派发任务 {rng} 给 {len(ids)} 家店", flush=True)
+            rules = _rules_now()
+            if rules:
+                now = datetime.now()
+                state = auto_run.load_state()
+                changed = False
+                for r in rules:
+                    rid = r["id"]
+                    st = dict(state.get(rid) or {})
+                    due = auto_run.last_due(r, now)
+                    if not due:
+                        continue
+
+                    # mark = 「已经处理到哪一刻」的水位；last = 真的跑过的那次。
+                    # 两者分开：新建计划时先把水位推到最近一次到期，
+                    # 不然刚建就判成漏跑；而界面上「上次」也不该显示一个
+                    # 它还没出生时的日期。
+                    if not st.get("mark"):
+                        st["mark"] = due.strftime("%Y-%m-%d %H:%M")
+                        st["seeded"] = True
+                        state[rid] = st
+                        changed = True
+                        continue
+
+                    mark = _parse_stamp(st.get("mark"))
+                    if mark and mark >= due:
+                        continue
+                    if not r.get("enabled"):
+                        continue
+
+                    late = (now - due).total_seconds()
+                    if late < 0:
+                        continue
+                    if late > TOLERANCE:
+                        # 记成漏跑，等界面上一键补
+                        if not st.get("missed_at"):
+                            st["missed_at"] = due.strftime("%Y-%m-%d %H:%M")
+                            st["missed_name"] = r.get("name") or ""
+                            state[rid] = st
+                            changed = True
+                            _append_log(f"[计划] 漏跑：{r.get('name')}（应在 "
+                                        f"{st['missed_at']} 跑，点「补跑」可补上）")
+                        continue
+
+                    try:
+                        res = _dispatch_rule(r, due)
+                    except Exception as e:  # noqa: BLE001
+                        _append_log(f"[计划] 派发失败：{r.get('name')}（{e}）")
+                        continue
+                    state[rid] = {
+                        "mark": due.strftime("%Y-%m-%d %H:%M"),
+                        "last": due.strftime("%Y-%m-%d %H:%M"),
+                        "at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        "range": res["range_label"],
+                        "stores": len(res["ids"]),
+                    }
+                    changed = True
+                    print(f"[计划] {r.get('name')} 已派发 {res['range_label']}", flush=True)
+
+                if changed:
+                    auto_run.save_state(state)
         except Exception as e:  # noqa: BLE001
-            print(f"[自动] 检查出错（忽略）：{e}", flush=True)
+            print(f"[计划] 检查出错（忽略）：{e}", flush=True)
+        _t.sleep(20.0)
 
 
 def _sync_extension_copies() -> None:
@@ -2580,9 +2917,9 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         print(f"热重载未启用（忽略）：{e}")
     try:
-        threading.Thread(target=_auto_runner, daemon=True).start()
+        threading.Thread(target=_schedule_runner, daemon=True).start()
     except Exception as e:  # noqa: BLE001
-        print(f"自动运行未启用（忽略）：{e}")
+        print(f"计划任务未启用（忽略）：{e}")
     try:
         threading.Thread(target=_pending_runner, daemon=True).start()
     except Exception as e:  # noqa: BLE001
