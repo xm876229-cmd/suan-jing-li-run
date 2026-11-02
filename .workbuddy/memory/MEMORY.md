@@ -17,6 +17,15 @@
 注意：打包版代码冻在 `jingli.exe` 内，只拷扩展不够；改了 Python 必须 `--build`。
 `bridge/server.py::_sync_extension_copies()` 在桥启动时也会兜底同步扩展。
 
+## 发布（硬规则：上传前必须校验，防止传旧包）
+- 发布前先：`python -m scripts.verify_release --remote`（版本源 / 构建新鲜度 / 包内容 / 真跑一遍 / 远程哈希）
+- `build/do_release.py` 已内置同样校验：不过就 sys.exit(1)，**绝不上传**
+- 打包前必须关掉 release 目录里跑着的 jingli.exe，否则 exe 被锁、会留下半套目录
+  （build_app 已加前置探测，会直接拒绝并提示，不再复制到一半报 PermissionError）
+- 顺序：改版本号 → `sync_all --build` → `verify_release` → `python build/do_release.py`
+- 传完再跑一次 `verify_release --remote` 作为独立复核
+- 三个版本号必须一致：`浏览器扩展/manifest.json`、`CHANGELOG.md` 首个 `## [vX]`、`do_release.py` 的 TAG
+
 ## 数据与目录
 - 数据根 `数据\stores\<店名>\`：`inbox\{订单表,广告表,联盟佣金表,商品映射}`、`商品SKU表`、`链接资料`、`快照`
 - 店铺身份以 `meta.json` 的 `shop_id` 为准；目录用店名，新店首次识别自动改名
