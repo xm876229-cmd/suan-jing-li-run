@@ -804,6 +804,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .sc-date input{font:inherit;font-size:11.5px;padding:4px 6px;width:104px;
     border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--text)}
 
+  .mn-rep{color:var(--accent);cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}
   .mn-link{margin-top:6px;font-size:12.5px;color:var(--accent);cursor:pointer;user-select:none}
   .mn-link:hover{text-decoration:underline}
   .sc-empty{padding:50px 20px;text-align:center;color:var(--text-3);font-size:13px;
@@ -2177,11 +2178,13 @@ function cardHtml(id, s, labels){
   </div>`;
 }
 
+let LIVE_SIG = '';      // 上一次画卡片时的数据指纹
 function renderCards(){
   const grid = $('#store-grid');
   if(!grid) return;
   const j = LIVE;
   if(!j || !j.stores || !Object.keys(j.stores).length){
+    LIVE_SIG = '';
     // 桥没连上时别说「还没识别到店铺」——那会让人以为要重新登录店铺，
     // 其实只是取数服务被关了（调试页那个按钮），点一下就能起来。
     grid.innerHTML = LIVE_DOWN
@@ -2195,6 +2198,17 @@ function renderCards(){
   }
   const labels = j.labels || {};
   const ids = (j.order && j.order.length) ? j.order : Object.keys(j.stores);
+  // 店铺被移除后，勾选集合里可能还留着它的 id：「已选 3 家」但只看得见 2 家
+  for(const pid of [...PICKED]) if(!j.stores[pid]) PICKED.delete(pid);
+  // 每 3 秒把整面卡片墙 innerHTML 重建一遍，数据和上一轮一样时纯属浪费：
+  // 会丢鼠标悬停状态、白耗 CPU（大店多时更明显）。数据没变就不重画。
+  const sig = JSON.stringify(j.stores) + '||' + JSON.stringify(j.queue || []);
+  if(sig === LIVE_SIG && grid.dataset.ready === '1'){
+    updatePickCount();
+    return;
+  }
+  LIVE_SIG = sig;
+  grid.dataset.ready = '1';
   grid.innerHTML = ids.map(id => cardHtml(id, j.stores[id] || {}, labels)).join('');
 
   grid.querySelectorAll('[data-pick]').forEach(cb => {
@@ -2578,13 +2592,19 @@ async function fileToB64(f){
     throw new Error(`文件有 ${(f.size/1024/1024).toFixed(0)} MB，超过 `
       + `${MAX_UPLOAD/1024/1024} MB 上限。请在平台上把时间区间改小一点，分几次导出`);
   }
-  const buf = new Uint8Array(await f.arrayBuffer());
-  let bin = "";
-  const CH = 0x8000;
-  for(let i = 0; i < buf.length; i += CH){
-    bin += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
-  }
-  return btoa(bin);
+  // 用 FileReader 让浏览器原生转 base64。
+  // 以前是逐块 String.fromCharCode 拼一个 53MB 的字符串（40MB 文件），
+  // 主线程会卡好几秒，界面看着像死了；原生读只要几百毫秒。
+  return await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const s = String(r.result || '');
+      const i = s.indexOf(',');
+      resolve(i >= 0 ? s.slice(i + 1) : s);   // 去掉 "data:...;base64," 前缀
+    };
+    r.onerror = () => reject(r.error || new Error('读不了这个文件'));
+    r.readAsDataURL(f);
+  });
 }
 
 async function importFiles(files, kindHint){
@@ -2891,6 +2911,13 @@ if($('#btn-link-import')) $('#btn-link-import').onclick = async () => {
 let repAll = [];      // 全部报表（两个房间都在里面，靠 room 区分）
 let repStore = '';    // 当前按哪个店铺筛选（空 = 全部）
 let repRoom = 'auto'; // auto = 自动报表 / manual = 手动报表
+
+/** 跳到「报表」页并只看指定房间/店铺（卡片上的报表名点一下就走这里） */
+function openReports(room, store){
+  repRoom = (room === 'manual') ? 'manual' : 'auto';
+  repStore = store || '';
+  go('reports');
+}
 
 /** 当前房间里的报表 */
 function repInRoom(){
@@ -3357,7 +3384,9 @@ function mnCardHtml(s){
         <span class="ic">${last && last.report ? '<span style="color:#12a382">✓</span>'
           : '<span style="color:#c9c7bd">○</span>'}</span>
         <span class="nm">报表</span>
-        <span class="dt" title="${esc(repTxt)}">${esc(repTxt)}</span></div>
+        <span class="dt ${last && last.report ? 'mn-rep' : ''}"
+              title="${last && last.report ? '点一下去「报表 → 手动报表」看这份报表' : esc(repTxt)}"
+              data-mn-rep="${last && last.report ? esc(s.key) : ''}">${esc(repTxt)}</span></div>
       ${s.count ? `<div class="mn-link" data-mn-files="${esc(s.key)}">查看 / 清空文件（${s.count}）›</div>` : ''}
     </div>
     <div class="sc-foot">
@@ -3407,6 +3436,14 @@ function bindMnCards(grid){
   });
   grid.querySelectorAll('[data-mn-run]').forEach(b => {
     b.onclick = () => mnRun(b.dataset.mnRun);
+  });
+  // 报表名点一下 → 报表页「手动报表」房间、只看这家店
+  grid.querySelectorAll('[data-mn-rep]').forEach(el => {
+    if(!el.dataset.mnRep) return;
+    el.onclick = () => {
+      const sp = mnSpace(el.dataset.mnRep);
+      openReports('manual', sp ? sp.name : '');
+    };
   });
   grid.querySelectorAll('[data-mn-files]').forEach(b => {
     b.onclick = () => mnShowFiles(b.dataset.mnFiles);
@@ -3515,6 +3552,7 @@ function mnShowFiles(key){
         <td><button class="mini" data-mn-rm="${esc(f.name)}">删</button></td></tr>`).join('')
     + '</tbody></table>'
     + `<div style="padding:14px 22px;border-top:1px solid var(--line-soft);display:flex;align-items:center;gap:12px">
+         <button class="ghost" id="mn-open" style="width:auto;margin:0">打开文件夹</button>
          <button class="danger" id="mn-clear">清空这家店的手动数据</button>
          <span class="muted" style="font-size:12px">全部文件挪进「数据/回收站」，不是真删，随时能找回</span>
        </div>`;
@@ -3532,6 +3570,17 @@ function mnShowFiles(key){
       loadManual();
     };
   });
+
+  const op = document.getElementById('mn-open');
+  if(op) op.onclick = async () => {
+    const api = window.pywebview && window.pywebview.api;
+    if(api && api.open_folder){
+      const ok = await api.open_folder(s.dir);
+      if(!ok) toast('打不开这个文件夹：' + (s.dir || ''));
+    }else{
+      toast('路径：' + (s.dir || ''));
+    }
+  };
 
   const clr = document.getElementById('mn-clear');
   if(clr) clr.onclick = async () => {

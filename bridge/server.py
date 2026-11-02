@@ -2373,6 +2373,7 @@ class Handler(BaseHTTPRequestHandler):
             rng = auto_run.build_range(auto_run.quick_rule(str(rng.get("kind"))), datetime.now())
 
         sent, offline, jobs = [], [], []
+        _names = _store_dir_names()          # 循环里别反复扫店铺目录
         for sid in ids:
             job = _enqueue(sid, rng, auto=bool(payload.get("auto")),
                            manual=not bool(payload.get("auto")),
@@ -2382,7 +2383,7 @@ class Handler(BaseHTTPRequestHandler):
             jobs.append(job["id"])
             is_on = _online_now(sid)
             (sent if is_on else offline).append(sid)
-            _append_log(f"[运行] 派给 {_store_dir_names().get(sid, sid)}"
+            _append_log(f"[运行] 派给 {_names.get(sid, sid)}"
                         f"{'（在线）' if is_on else '（浏览器没开，排队等 30 分钟）'}")
 
         # 说清楚这次会不会真去平台导：今天同区间已经取全的店，会直接复用，
@@ -2395,7 +2396,7 @@ class Handler(BaseHTTPRequestHandler):
                 _b = str((rng or {}).get("to") or "")
                 for sid in ids:
                     if len(_cap.status(sid, _a, _b).get("reuse") or []) >= 4:
-                        _reuse_names.append(_store_dir_names().get(sid, sid))
+                        _reuse_names.append(_names.get(sid, sid))
             except Exception:  # noqa: BLE001
                 _reuse_names = []
 
@@ -2892,8 +2893,9 @@ class Handler(BaseHTTPRequestHandler):
             # 名字优先用用户在 stores.json 里起的别名，没有就用平台原名。
             store_name = ""
             shop_code = ""
+            _stores = store_list().get("stores", [])
             if store:
-                for st in store_list().get("stores", []):
+                for st in _stores:
                     if st.get("id") == store:
                         country = st.get("country") or country
                         store_name = st.get("name") or ""
@@ -2905,7 +2907,7 @@ class Handler(BaseHTTPRequestHandler):
             # 两个浏览器各登一家时，弹窗里的店铺可能还停在上一次选的那家，
             # 照它算就会把 A 店的名字贴到 B 店的数据上，报表看着正常、数字是别家的。
             if shop_id and store != shop_id:
-                _alias = next((st.get("name") for st in store_list().get("stores", [])
+                _alias = next((st.get("name") for st in _stores
                                if st.get("id") == shop_id), "")
                 _meta: dict = {}
                 try:

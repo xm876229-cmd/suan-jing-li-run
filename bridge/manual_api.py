@@ -7,7 +7,7 @@
 
     数据/店铺/<店名>/手动导入/     ← 手动数据（跟「收件箱」平级）
     数据/店铺/<店名>/收件箱/       ← 自动取数（重算只读这个）
-    报表/<店名>/手动/              ← 手动算出来的报表
+    报表/手动/<店名>/              ← 手动算出来的报表
 
 自动核算只读「收件箱」，所以手动数据天然不会掺进去；反过来，
 手动核算也只读「手动导入」，不会把自动取的数据算进来。
@@ -144,10 +144,14 @@ def _file_records(d: Path, doc: dict) -> list[dict]:
     return out
 
 
-def describe(key: str) -> dict:
-    """一个抽屉的概况：卡片上那几行就靠它。"""
+def describe(key: str, known: list[str] | None = None) -> dict:
+    """一个抽屉的概况：卡片上那几行就靠它。
+
+    known 由调用方批量传进来：卡片墙有 7 家店时，
+    原来每张卡都重新扫一遍店铺目录（7×7 次 meta 读取），没必要。
+    """
     k = str(key or "").strip()
-    if k != TMP_KEY and k not in known_keys():
+    if k != TMP_KEY and k not in (known if known is not None else known_keys()):
         return {}
     d = space_dir(k)
     doc = load_record(d)
@@ -195,10 +199,11 @@ def list_spaces() -> list[dict]:
     人刚记住的位置就没了。现在顺序只跟店名有关，导入、计算都不动位置。
     """
     out: list[dict] = []
-    for k in known_keys():
+    known = known_keys()
+    for k in known:
         if k == TMP_KEY:
             continue
-        item = describe(k)
+        item = describe(k, known)
         if item:
             out.append(item)
     # 只列店铺：手动核算在界面上就是「这家店的手动数据」。

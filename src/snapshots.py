@@ -134,6 +134,32 @@ def signature(files: list[Path]) -> str:
     return hashlib.sha1(sig.encode("utf-8")).hexdigest()[:12]
 
 
+def _count_lines_fast(f: Path, chunk: int = 1 << 20) -> int:
+    """快速数一个文本文件有多少个换行（含表头那行）。
+
+    先看 BOM 判 UTF-16：那种文件换行是 `\n\x00`，按单字节数会永远是 0。
+    """
+    n = 0
+    try:
+        with f.open("rb") as fh:
+            head = fh.read(2)
+            pat = b"\n"
+            if head == b"\xff\xfe":
+                pat = b"\n\x00"
+            elif head == b"\xfe\xff":
+                pat = b"\x00\n"
+            if head:
+                n += head.count(pat)
+            while True:
+                buf = fh.read(chunk)
+                if not buf:
+                    break
+                n += buf.count(pat)
+    except OSError:
+        return 0
+    return n
+
+
 def _quick_stats(f: Path) -> dict:
     """轻量统计一个文件：行数与类型。
 
@@ -148,13 +174,14 @@ def _quick_stats(f: Path) -> dict:
     suffix = f.suffix.lower()
     try:
         if suffix in (".csv", ".txt"):
-            import csv as _csv
-            n = 0
-            with f.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
-                for _ in _csv.reader(fh):
-                    n += 1
-            out["rows"] = max(0, n - 1)      # 去掉表头
-        elif suffix in (".xlsx", ".xls"):
+            # 用二进制数换行，不再用 csv.reader 逐行解析：
+            # 大店订单 40MB / 5.7 万行，csv.reader 要一两秒，而这个数字
+            # 只用来在快照信息里写「订单约 5.7 万行」，差几行没有影响。
+            # 字段里带换行的记录会被多算几行——只影响展示，不影响核算。
+            out["rows"] = max(0, _count_lines_fast(f) - 1)   # 去掉表头
+        elif suffix in (".xlsx", ".xls") and out["bytes"] <= 8 * 1024 * 1024:
+            # xlsx 要 openpyxl 打开才知道行数，几 MB 以上很慢；超过 8MB
+            # 就不数了（留 0），反正只是展示用，别为它拖慢取数。
             import openpyxl
             wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
             ws = wb[wb.sheetnames[0]]
@@ -237,7 +264,14 @@ def create(shop_id: str, files: list[Path], dfrom: str = "", dto: str = "",
             # 先拷成 .part，完整了再改名。断电时留的是 .part（启动时清掉），
             # 不会出现一个「名字正常、内容是半截」的快照文件被下次核算读进去。
             part = dst.with_name(dst.name + ".part")
-            shutil.copy2(f, part)
+            try:
+                # 同盘优先用硬链接：快照和收件箱指向同一份数据，
+                # 大店订单 40MB 复制一次要好几秒、还多占 40MB，硬链接瞬间完成。
+                # 收件箱里的导出文件都是「新文件名」写入的、不会被原地改写，
+                # 所以共享内容安全；跨盘或文件系统不支持时自动退回复制。
+                os.link(f, part)
+            except OSError:
+                shutil.copy2(f, part)
             os.replace(part, dst)
             st = f.stat()
             info = _quick_stats(f)
