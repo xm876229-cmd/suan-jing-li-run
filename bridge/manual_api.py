@@ -377,7 +377,7 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
     final_out = out_dir / f"{base}.xlsx"
     out = final_out
     if final_out.exists():
-        out = out_dir / f".{base}.{os.getpid()}.calc.xlsx"
+        out = out_dir / f".{os.getpid()}.calc.xlsx"   # 短名，别撞 260 路径上限
 
     if paths.is_frozen():
         cmd = [sys.executable, "run"]

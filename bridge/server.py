@@ -1468,11 +1468,16 @@ class Handler(BaseHTTPRequestHandler):
                         failed.append(f"{rel}（找不到文件）")
                         continue
                     if payload.get("with_formula"):
-                        # 带公式版要按原区间重算一次：文件名里带着区间
+                        # 带公式版要按原区间重算一次：文件名里一般带着区间。
+                        # 手动核算的「全部」报表没有区间（名字里是 _全部_），
+                        # 那就按全量算——但其它认不出区间的（自定义命名模板）
+                        # 不能瞎猜成全量，否则算出来的数字跟原报表对不上。
                         m = re.search(r"(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})", src.name)
-                        if not m:
+                        if not m and "_全部_" not in src.name:
                             failed.append(f"{rel}（名字里认不出区间）")
                             continue
+                        _d1 = m.group(1) if m else ""
+                        _d2 = m.group(2) if m else ""
                         # rel 现在是「房间/店名/文件」；老布局是「店名/文件」
                         _parts = str(rel).replace("\\", "/").split("/")
                         if _parts[0] in ("自动", "手动") and len(_parts) > 2:
@@ -1484,7 +1489,7 @@ class Handler(BaseHTTPRequestHandler):
                         # 出来的带公式版，数字跟原报表对不上，还没人看得出来
                         _data_dir = None
                         if _parts[0] == "手动" or "手动" in _parts[:-1]:
-                            from src import manual_api as _mn
+                            from bridge import manual_api as _mn
                             if _parts[0] == "手动" and len(_parts) > 2:
                                 _data_dir = _mn.space_dir(sid) if sid else None
                             elif _parts[0] == "临时手动":
@@ -1494,7 +1499,7 @@ class Handler(BaseHTTPRequestHandler):
                         tmp_dirs.append(_tmp)
                         out = _tmp / f"{Path(rel).stem}_带公式.xlsx"
                         ok, msg = _run_calc_cmd(
-                            _calc_cmd(sid, "", m.group(1), m.group(2), out, True,
+                            _calc_cmd(sid, "", _d1, _d2, out, True,
                                       data_dir=_data_dir))
                         if not ok:
                             failed.append(f"{rel}（{str(msg)[-80:]}）")
@@ -2334,6 +2339,9 @@ class Handler(BaseHTTPRequestHandler):
                                dfrom=str(payload.get("from") or ""),
                                dto=str(payload.get("to") or ""),
                                with_formula=bool(payload.get("with_formula")))
+        except Exception as e:  # noqa: BLE001
+            # 未预料的异常也要给人话，不要把 500 甩到界面上
+            r = {"ok": False, "error": f"计算失败：{e}"}
         finally:
             _lk.release()
         if r.get("ok"):
@@ -3069,7 +3077,9 @@ class Handler(BaseHTTPRequestHandler):
             _replace = bool(payload.get("replace"))
             out = final_out
             if final_out.exists() and _replace:
-                out = out_dir / f".{base_name}.{os.getpid()}.calc.xlsx"
+                # 临时名要短：店名 + 区间 + _手动 已经很长，再加前缀容易撞
+                # Windows 260 字符路径上限（报 WinError 206，算完拿不到文件）
+                out = out_dir / f".{os.getpid()}.calc.xlsx"
                 _tmp_out = out
             elif final_out.exists():
                 i = 2

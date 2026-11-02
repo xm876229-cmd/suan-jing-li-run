@@ -3443,8 +3443,11 @@ async function mnRun(key){
   const n = $('#mn-note');
   const s = mnSpace(key);
   if(!s) return;
-  if(!s.has_orders){
-    note(n, `「${esc(s.name || key)}」还没有订单表——先点「导入」传一份订单导出`, 'err');
+  // 只看「有没有文件」，不拿记录里的类型当门槛：
+  // 记录丢了（或有人直接把表拷进目录）时类型可能显示「未识别」，
+  // 但数据其实是好的，服务端会按真实文件再判一次。
+  if(!s.count){
+    note(n, `「${esc(s.name || key)}」还没有导入任何表——先点「导入」传一份订单导出`, 'err');
     return;
   }
   const cs = document.querySelector('[data-mn-country="' + key + '"]');

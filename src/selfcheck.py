@@ -119,6 +119,22 @@ def _check_reports(actions: list[str]) -> None:
     """报表目录里打不开的 xlsx：挪进隔离目录，别让它挂在列表里骗人。"""
     if not paths.OUTPUT.is_dir():
         return
+
+    # 算到一半被强杀留下的临时报表（`.1234.calc.xlsx`，见 safeio.swap_report）。
+    # 一小时内的可能是另一个进程正在算，不动；更早的一定是残骸。
+    stale = 0
+    try:
+        for f in paths.OUTPUT.rglob("*.calc.xlsx"):
+            try:
+                if f.name.startswith(".") and time.time() - f.stat().st_mtime > 3600:
+                    f.unlink()
+                    stale += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    if stale:
+        actions.append(f"清理算到一半的临时报表 {stale} 个")
     # 必须先把文件列表取出来：rglob 是边走边扫的，
     # 一边扫一边把文件挪进新建的 _隔离_ 目录，它会自己钻进去再挪一遍
     # ——结果同一份坏报表被挪了十几层（真踩过）。

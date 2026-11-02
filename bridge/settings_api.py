@@ -103,7 +103,10 @@ def _find_report(name: str, rel: str = "") -> Path | None:
         return None
     # 报表可能分店放，也可能还在根目录，两边都找
     base = paths.OUTPUT.resolve()
-    for p in [paths.OUTPUT / name, *paths.OUTPUT.glob(f"*/{name}")]:
+    # 三处都要找：老布局（报表/名字）、按店分（报表/店/名字）、
+    # 新布局分房间（报表/自动/店/名字、报表/手动/店/名字）
+    for p in [paths.OUTPUT / name, *paths.OUTPUT.glob(f"*/{name}"),
+              *paths.OUTPUT.glob(f"*/*/{name}")]:
         try:
             if p.is_file() and p.resolve().is_relative_to(base):
                 return p

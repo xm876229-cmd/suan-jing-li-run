@@ -101,12 +101,14 @@ def swap_report(new: Path | str, final: Path | str, trash_dir: Path | str) -> Pa
     if new == final or not new.exists():
         return final if final.exists() else new
     if final.exists():
+        moved_to: Path | None = None
         try:
             trash_dir.mkdir(parents=True, exist_ok=True)
             dst = trash_dir / final.name
             if dst.exists():
                 dst = trash_dir / f"{final.stem} ({time.strftime('%H%M%S')}){final.suffix}"
             shutil.move(str(final), str(dst))
+            moved_to = dst
         except OSError:
             i = 2
             alt = final.with_name(f"{final.stem} ({i}){final.suffix}")
@@ -118,6 +120,18 @@ def swap_report(new: Path | str, final: Path | str, trash_dir: Path | str) -> Pa
                 return alt
             except OSError:
                 return new
+        try:
+            os.replace(new, final)
+            return final
+        except OSError:
+            # 新文件换不过去（被占用/权限），把旧的原样放回来：
+            # 否则用户既没有新报表、旧的那份也进了回收站
+            if moved_to is not None:
+                try:
+                    shutil.move(str(moved_to), str(final))
+                except OSError:
+                    pass
+            return new
     try:
         os.replace(new, final)
         return final

@@ -103,6 +103,39 @@ def check_text(src: str) -> list[str]:
     )
 
 
+def check_imports() -> list[str]:
+    """检查 `from src import xxx` / `from bridge import xxx` 里的模块真的存在。
+
+    为什么需要：这种导入通常写在函数体内（为了不拖慢启动），
+    语法检查查不出来，只有点到那个功能才炸。
+    v0.24.12 就有一处：`from src import manual_api`（实际在 bridge 里），
+    结果「手动报表 → 导出带公式」一点就 500。
+    """
+    import ast
+
+    bad: list[str] = []
+    for f in [*sorted(ROOT.glob("src/*.py")), *sorted(ROOT.glob("bridge/*.py")),
+              *sorted(ROOT.glob("scripts/*.py"))]:
+        try:
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+        except SyntaxError as e:
+            bad.append(f"{f.relative_to(ROOT)} 语法错误：{e}")
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.level or node.module not in ("src", "bridge"):
+                continue
+            for a in node.names:
+                mod = ROOT / node.module / f"{a.name}.py"
+                init = ROOT / node.module / "__init__.py"
+                if mod.is_file():
+                    continue
+                txt = init.read_text(encoding="utf-8") if init.is_file() else ""
+                if f"def {a.name}" in txt or f"{a.name} =" in txt:
+                    continue
+                bad.append(f"{f.relative_to(ROOT)}: from {node.module} import {a.name}")
+    return bad
+
+
 def check(path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -136,6 +169,7 @@ def main() -> int:
     bad = 0
     targets = [(rel, check(ROOT / rel)) for rel in FILES]
     targets.append(("bridge/ui.py（内嵌界面脚本）", check_ui()))
+    targets.append(("模块导入", check_imports()))
     for rel, missing in targets:
         if missing:
             bad += 1
