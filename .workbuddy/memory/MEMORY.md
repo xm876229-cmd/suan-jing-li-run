@@ -32,7 +32,14 @@
 - 店铺身份以 `meta.json` 的 `shop_id` 为准；目录用店名，新店首次识别自动改名
 - 映射主表 `数据\链接映射\master.csv`（全局累积，跨进程锁 `.merge.lock`）
 - 成本 `数据\成本\master.csv`；配置 `配置\{rates,formulas,stores,...}.json`
-- 迁移靠 `paths._cn_sub()`：新名不存在就把英文旧目录改名；两边都在就合并（`_merge_into`）
+- 迁移靠 `paths.migrate_data_dirs(root)`：新名不存在就改名；两边都在就合并（`_merge_into`）。
+  **打包、sync_all、启动三处都调**——只靠启动时改，release/安装版可能永远不启动就一直英文
+- 手动入口 `python -m scripts.migrate_dirs [--check]`（`--check` 只看不改）
+- 坑：任何「按目录名判断」的逻辑在改中文后都会静默失效。已踩过：
+  `_skip_in_pack`（差点把 45 个店铺文件打进包）、`setup_core` 种子成本表、
+  `sync_all.COST_SRC`、`build_app` 的 `数据/costs`。新增目录名判断必须中英都写
+- `数据目录.txt` **绝不能进发布包**（内容是相对路径 `..\..`，用户解压到桌面后
+  数据根会跑到上级目录）。`verify_release` 已加硬检查
 - **`.gitignore` 必须忽略整个 `数据/*`**：改名后旧的 `data/` 规则失效，
   0.24.4 差点把几十 MB 订单表提交进仓库（已改成整目录忽略 + 几个说明文件例外）
 
