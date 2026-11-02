@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from collections import Counter, defaultdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -287,6 +288,27 @@ def _enqueue(store: str, rng: dict, *, task: str = "all", auto: bool = False,
     if with_formula is not None:
         job["with_formula"] = bool(with_formula)
     with _PENDING_LOCK:
+        # 同一家店在队列里最多留一个待领任务，新的顶掉旧的。
+        #
+        # 为什么必须去重：界面上「运行」按钮点一下要等几秒才变状态，
+        # 用户会以为没点上，连着点几下（实测连点 30 次进了 30 个任务）。
+        # 后果是同一家店取数 30 遍、核算 30 遍、出 30 份报表 ——
+        # 对平台还可能是异常高频请求。
+        # 用「新的顶掉旧的」而不是「直接丢弃」：用户改了区间再点，
+        # 应该按最后一次的区间跑，而不是拿到第一下那个。
+        if job["store"]:
+            keep = []
+            replaced = 0
+            for old_job in _PENDING:
+                if (isinstance(old_job, dict)
+                        and old_job.get("store") == job["store"]
+                        and old_job.get("task") == job["task"]):
+                    replaced += 1
+                    continue
+                keep.append(old_job)
+            _PENDING[:] = keep
+            if replaced:
+                job["replaced"] = replaced
         _PENDING.append(job)
     return job
 
@@ -429,6 +451,18 @@ def bridge_uptime() -> str:
     if sec < 3600:
         return f"{sec // 60} 分钟"
     return f"{sec // 3600} 小时 {(sec % 3600) // 60} 分"
+
+
+def _where(exc: BaseException) -> str:
+    """异常发生在哪一行（`server.py:1234`）。写进日志，排查时不用再猜。"""
+    try:
+        tb = traceback.extract_tb(exc.__traceback__)
+        if tb:
+            last = tb[-1]
+            return f"（{Path(last.filename).name}:{last.lineno}）"
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
 
 
 def _json(handler: BaseHTTPRequestHandler, obj, code: int = 200) -> None:
@@ -589,8 +623,11 @@ def discovered_stores() -> list[dict]:
             m = json.loads(meta.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        inbox = d / "inbox"
-        files = [f for f in inbox.iterdir() if f.is_file()] if inbox.is_dir() else []
+        inbox = paths.store_inbox(d)
+        # 递归数：收件箱下面按类型分了子目录（订单表/广告表/…），
+        # 只数直接子文件的话永远是 0，界面上「这家店几个文件」全显示 0，
+        # 看着像没取到数据。
+        files = [f for f in inbox.rglob("*") if f.is_file()] if inbox.is_dir() else []
         out.append({
             "shop_id": m.get("shop_id") or d.name,
             "shop_name": m.get("shop_name") or d.name,
@@ -702,9 +739,16 @@ def store_list() -> dict:
     走 HTTP 这条路，配置改了刷新面板就生效，不用重装扩展。
     """
     stores: list[dict] = []
+    # 这里原来一旦读不到 stores.json 就 return 一个 error + 空列表。
+    # 后果：全新安装（还没有 stores.json）、或者用户手动删掉它之后，
+    # 界面上「一家店都没有」，还顶一条报错 —— 但磁盘上明明有店目录。
+    # 现在缺失/损坏都当「没有手工登记」，继续往下合并自动识别到的店铺。
     try:
-        cfg = json.loads(paths.STORES_FILE.read_text(encoding="utf-8"))
-        for s in cfg.get("stores", []):
+        from src import safeio
+        cfg = safeio.read_json(paths.STORES_FILE, default={}) or {}
+        for s in (cfg.get("stores") or []):
+            if not isinstance(s, dict):
+                continue
             if not s.get("enabled", True):
                 continue
             stores.append({
@@ -714,7 +758,7 @@ def store_list() -> dict:
                 "browserId": str(s.get("zhanfu_browser_id", "") or ""),
             })
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": f"读取 stores.json 失败：{e}", "stores": [], "countries": []}
+        _append_log(f"[店铺] 读 stores.json 失败，按「没有手工登记」继续：{e}")
 
     countries: list[str] = []
     try:
@@ -810,11 +854,94 @@ def _make_snapshot(shop_id: str, payload: dict) -> dict:
         return {}
 
 
+# 请求体上限。普通接口都是几 KB 的 JSON，8MB 已经非常宽松；
+# 上传接口单独放宽（用户在「导入数据」里传整月订单，几十 MB 正常）。
+MAX_BODY = 8 * 1024 * 1024
+# 上传接口单独放宽。不放到 512MB 是因为整个 body 是一次读进内存的：
+# 200MB 的 base64 解码后 150MB，峰值约 350MB，还撑得住；
+# 再大就有被系统 OOM 杀掉的风险，而 OOM 表现出来就是「程序突然没了」。
+MAX_UPLOAD_BODY = 200 * 1024 * 1024
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "JingLiBridge/0.1"
 
+    # 读写都设超时。不设的话，一个只连不发（或声称发 N 兆却只发几个字节）
+    # 的连接会把线程永久占住：read 一直等，线程不释放。
+    # 单次不会拖垮整个桥（每个连接一个线程），但连几百个就把线程耗光了。
+    timeout = 30
+
     def log_message(self, fmt, *args):  # 静音默认访问日志
         pass
+
+    def _safe_json(self, obj, code: int = 200) -> bool:
+        """尽量把 JSON 发回去；响应已经开始写了就闭嘴。
+
+        为什么需要：兜底的 except 里如果 send_response 又失败（客户端早断了），
+        再抛一次异常就变成「异常处理里的异常」，更难查。
+        """
+        try:
+            _json(self, obj, code)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _read_payload(self, limit: int = MAX_BODY):
+        """读请求体并解析成 dict。**出错时直接回 400 并返回 None**。
+
+        原来的写法是每个接口各自：
+            payload = self._read_payload()
+            if payload is None:
+                return
+        三个问题，全都在实测里复现过：
+          · Content-Length 是负数或乱写 → read() 永远等不到，线程卡死
+          · 声称 100MB 只发 10 字节 → 同样卡死（没人读就没人释放）
+          · body 是数组/字符串/null → 后面 payload.get() 抛异常，
+            而那几个接口外层没 try，客户端看到的是「连接被重置」
+            （浏览器里就是 Failed to fetch，用户以为程序坏了）
+        现在统一在这里挡掉，调用方只需要：
+            payload = self._read_payload()
+            if payload is None:
+                return
+        """
+        raw_len = self.headers.get("Content-Length")
+        try:
+            n = int(raw_len or 0)
+        except (TypeError, ValueError):
+            self._safe_json({"ok": False, "error": f"Content-Length 不合法：{raw_len!r}"}, 400)
+            return None
+        if n < 0:
+            self._safe_json({"ok": False, "error": "Content-Length 不能是负数"}, 400)
+            return None
+        if n > limit:
+            mb, lim = n / 1024 / 1024, limit / 1024 / 1024
+            self._safe_json({"ok": False,
+                             "error": f"请求太大（{mb:.1f} MB，上限 {lim:.0f} MB）"}, 413)
+            return None
+        if n == 0:
+            return {}
+
+        try:
+            raw = self.rfile.read(n)
+        except Exception as e:  # noqa: BLE001
+            self._safe_json({"ok": False, "error": f"读取请求失败：{e}"}, 400)
+            return None
+        if len(raw) < n:
+            self._safe_json({"ok": False,
+                             "error": f"请求体只收到 {len(raw)}/{n} 字节（连接被中断？）"}, 400)
+            return None
+
+        try:
+            obj = json.loads(raw or b"{}")
+        except json.JSONDecodeError as e:
+            self._safe_json({"ok": False,
+                             "error": f"JSON 格式错误：第 {e.pos} 个字符附近（{e.msg}）"}, 400)
+            return None
+        if not isinstance(obj, dict):
+            self._safe_json({"ok": False,
+                             "error": f"请求体应该是 JSON 对象，收到的是 {type(obj).__name__}"}, 400)
+            return None
+        return obj
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -822,6 +949,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        """所有 GET 的统一入口（兜底见 _do_get 的说明）。"""
+        try:
+            self._do_get()
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            _append_log(f"[桥] GET {self.path} 出错{_where(e)}：{type(e).__name__}: {e}")
+            self._safe_json({"ok": False, "error": f"服务内部错误：{e}"}, 500)
+
+    def _do_get(self):
         # 这个函数里几个分支各自写了自己的 import，
         # 于是 parse_qs 被当成整个函数的局部名 —— 在前面用就 UnboundLocalError。
         # 统一在入口导一次，谁都能用。
@@ -1076,12 +1212,29 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": "unknown endpoint"}, 404)
 
     def do_POST(self):
+        """所有 POST 的统一入口。
+
+        以前每个分支各写各的 try，漏一个就变成「连接被重置」：
+        浏览器只看到 Failed to fetch，界面上什么提示都没有，日志里也一片空白。
+        实测有 7 个接口（自动运行、计划任务 4 个、改店名、参数页、导入数据）
+        被一个格式不对的请求就打断了。这里兜一层：任何没被接住的异常
+        都变成一条能看懂的 JSON 错误，同时写进日志。
+        """
+        try:
+            self._do_post()
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            _append_log(f"[桥] POST {self.path} 出错{_where(e)}：{type(e).__name__}: {e}")
+            self._safe_json({"ok": False, "error": f"服务内部错误：{e}"}, 500)
+
+    def _do_post(self):
         if self.path.startswith("/api/reports/delete"):
             # 注意必须在 do_POST 里：页面是 POST 过来的，
             # 之前误放在 do_GET 分支，于是报「unknown endpoint」。
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_payload()
+                if payload is None:
+                    return
                 names = payload.get("names") or []
                 if not isinstance(names, list) or not names:
                     _json(self, {"ok": False, "error": "没选中报表"}, 400)
@@ -1096,8 +1249,9 @@ class Handler(BaseHTTPRequestHandler):
             # 「下载」不再靠浏览器跳链接（窗口里不弹下载框，点了没反应），
             # 改成由桥直接存盘，然后告诉界面存到哪了。
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_payload()
+                if payload is None:
+                    return
                 names = [str(x) for x in (payload.get("names") or []) if str(x).strip()]
                 if not names:
                     _json(self, {"ok": False, "error": "没选中报表"}, 400)
@@ -1162,8 +1316,9 @@ class Handler(BaseHTTPRequestHandler):
             # （站点代码、广告账户 ID、导出场景…）写进店里，以后直接用。
             # 存进数据目录而不是配置文件：档案是跟着店走的，换电脑拷数据就行。
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                prof = json.loads(self.rfile.read(length) or b"{}")
+                prof = self._read_payload()
+                if prof is None:
+                    return
                 sid = str(prof.get("shop_id") or "").strip()
                 if not sid:
                     _json(self, {"ok": False, "error": "缺少 shop_id"}, 400)
@@ -1187,8 +1342,9 @@ class Handler(BaseHTTPRequestHandler):
                 _json(self, {"ok": False, "error": f"档案保存失败：{e}"}, 500)
         elif self.path.startswith("/api/stores/remove"):
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_payload()
+                if payload is None:
+                    return
                 sid = str(payload.get("id") or "").strip()
                 if not sid:
                     _json(self, {"ok": False, "error": "缺少店铺 ID"}, 400)
@@ -1239,8 +1395,9 @@ class Handler(BaseHTTPRequestHandler):
             # 导入的文件挪进回收站（不真删），界面上可批量选
             try:
                 from bridge import ui
-                length = int(self.headers.get("Content-Length") or 0)
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_payload()
+                if payload is None:
+                    return
                 rels = payload.get("rels")
                 if not isinstance(rels, list):
                     _json(self, {"ok": False, "error": "缺少 rels"}, 400)
@@ -1277,8 +1434,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _post_capture(self):
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -1313,8 +1471,9 @@ class Handler(BaseHTTPRequestHandler):
         from bridge import config_page
 
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except Exception as e:  # noqa: BLE001
             _json(self, {"ok": False, "error": f"invalid payload: {e}"}, 400)
             return
@@ -1366,8 +1525,9 @@ class Handler(BaseHTTPRequestHandler):
         而且不报错），改落 data/stores/_unknown/<时间戳>/ 并回报一条警告。
         """
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
             name = str(payload.get("name") or "").strip()
             b64 = payload.get("b64") or ""
             if not name or not b64:
@@ -1464,8 +1624,9 @@ class Handler(BaseHTTPRequestHandler):
     def _post_presets(self):
         """预设：保存 / 应用 / 删除 / 回滚。"""
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             payload = {}
 
@@ -1508,8 +1669,9 @@ class Handler(BaseHTTPRequestHandler):
         选错国家 → 列认不出来、费率套错，数字会全错还不报错。
         """
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload(MAX_UPLOAD_BODY)
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -1636,8 +1798,9 @@ class Handler(BaseHTTPRequestHandler):
         （V27-White-10Pcs → V27），跟你手工维护的那列效果一致。
         """
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -1706,8 +1869,9 @@ class Handler(BaseHTTPRequestHandler):
     def _post_mapping(self):
         from bridge import settings_api
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -1718,8 +1882,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _post_rename_store(self):
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -1736,8 +1901,9 @@ class Handler(BaseHTTPRequestHandler):
         多店铺就靠这个分开，不同店的数据永远不会混在一个文件夹里。
         """
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -1768,8 +1934,9 @@ class Handler(BaseHTTPRequestHandler):
         不代表现在还连着 —— 于是点了运行一直排队，人以为程序卡了。
         """
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            p = json.loads(self.rfile.read(length) or b"{}")
+            p = self._read_payload()
+            if p is None:
+                return
         except Exception:  # noqa: BLE001
             _json(self, {"ok": False}, 400)
             return
@@ -1793,8 +1960,9 @@ class Handler(BaseHTTPRequestHandler):
           state: running / done / fail / skip；step 传 "__finish__" 表示整轮结束
         """
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            p = json.loads(self.rfile.read(length) or b"{}")
+            p = self._read_payload()
+            if p is None:
+                return
         except Exception:  # noqa: BLE001
             _json(self, {"ok": False}, 400)
             return
@@ -1852,8 +2020,9 @@ class Handler(BaseHTTPRequestHandler):
         只有那家店的扩展能领走。以前是全局一个队列，谁先轮询谁跑。
         """
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except Exception:  # noqa: BLE001
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -1982,8 +2151,9 @@ class Handler(BaseHTTPRequestHandler):
         from src import auto_run
 
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             payload = {}
         rule = auto_run.normalize_rule(payload.get("rule") or payload or {})
@@ -2003,8 +2173,9 @@ class Handler(BaseHTTPRequestHandler):
         from src import auto_run, settings as cfg_settings
 
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -2056,8 +2227,9 @@ class Handler(BaseHTTPRequestHandler):
         from src import auto_run
 
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             payload = {}
         rid = str(payload.get("id") or "").strip()
@@ -2095,8 +2267,9 @@ class Handler(BaseHTTPRequestHandler):
         from src import auto_run
 
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             payload = {}
         want = payload.get("ids")
@@ -2185,8 +2358,9 @@ class Handler(BaseHTTPRequestHandler):
     def _post_settings(self):
         from src import settings as cfg_settings
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -2198,8 +2372,9 @@ class Handler(BaseHTTPRequestHandler):
     def _post_rates(self):
         from bridge import settings_api
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -2212,8 +2387,9 @@ class Handler(BaseHTTPRequestHandler):
         """成本表「哪一列是编码 / 哪一列是成本」的标题设置。"""
         from bridge import config_page
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -2231,8 +2407,9 @@ class Handler(BaseHTTPRequestHandler):
         """
         from bridge import costs_api
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -2256,8 +2433,9 @@ class Handler(BaseHTTPRequestHandler):
         扩展那边连替换都不用做——它只负责「把请求发出去、把响应带回来」。
         """
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             payload = {}
 
@@ -2287,8 +2465,9 @@ class Handler(BaseHTTPRequestHandler):
         所以调这些逻辑不用刷新扩展。
         """
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             payload = {}
 
@@ -2323,8 +2502,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _post_log(self):
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             payload = {}
         msg = str(payload.get("msg") or "")
@@ -2340,8 +2520,9 @@ class Handler(BaseHTTPRequestHandler):
         不占扩展，也不受浏览器生命周期影响。
         """
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
@@ -2717,8 +2898,9 @@ class Handler(BaseHTTPRequestHandler):
         两个方向都能通，作为第三条通道。
         """
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
+            payload = self._read_payload()
+            if payload is None:
+                return
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return

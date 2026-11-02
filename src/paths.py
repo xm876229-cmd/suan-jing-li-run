@@ -319,6 +319,7 @@ def _safe_folder(name: str, fallback: str) -> str:
 
 
 _STORE_NAMES: dict[str, str] = {}
+_STORE_NAMES_MTIME: float = -1.0
 
 
 def _load_store_names() -> dict[str, str]:
@@ -327,19 +328,34 @@ def _load_store_names() -> dict[str, str]:
     目录用**店名**而不是一串数字：使用者打开文件夹就能看懂是哪家店。
     店名可以在界面上改，所以同时以 meta.json 里的 shop_id 为准做一次核对——
     改了名也不会认错家（旧目录靠 meta.json 找回）。
+
+    缓存按 stores.json 的修改时间失效。以前是「读到一次就永久记住」，
+    于是在界面里改完店名，显示的还是旧名，得重启程序才生效——
+    用户会以为没保存成功，反复点。
     """
-    global _STORE_NAMES
-    if _STORE_NAMES:
+    global _STORE_NAMES, _STORE_NAMES_MTIME
+    try:
+        mtime = STORES_FILE.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    if _STORE_NAMES and mtime == _STORE_NAMES_MTIME:
         return _STORE_NAMES
+
+    names: dict[str, str] = {}
     try:
         if STORES_FILE.is_file():
-            data = json.loads(STORES_FILE.read_text(encoding="utf-8"))
+            from src import safeio
+            data = safeio.read_json(STORES_FILE, default={}) or {}
             for s in (data.get("stores") or []):
+                if not isinstance(s, dict):
+                    continue
                 sid = str(s.get("id") or s.get("shop_id") or "")
                 if sid:
-                    _STORE_NAMES[sid] = str(s.get("name") or sid)
+                    names[sid] = str(s.get("name") or sid)
     except Exception:  # noqa: BLE001
         pass
+    _STORE_NAMES = names
+    _STORE_NAMES_MTIME = mtime
     return _STORE_NAMES
 
 
@@ -394,6 +410,17 @@ def store_root(shop_id: str) -> Path:
         pass
     name = _load_store_names().get(sid, sid)
     return STORES_ROOT / _safe_folder(name, "未识别店铺")
+
+
+def store_inbox(store_root_dir: Path | str) -> Path:
+    """某家「店目录」下面的收件箱。
+
+    为什么单拿出来：改中文名之后，还有好几处代码在写 `d / "inbox"`。
+    它们不报错、只是永远扫不到东西 —— 表现是「店铺文件数是 0」
+    「参数页读不到数据」「映射表补不齐」，全都看不出原因。
+    这里统一走一遍改名逻辑，中文名/英文旧名都能拿到。
+    """
+    return _cn_sub(Path(store_root_dir), *STORE_INBOX)
 
 
 def store_dir(shop_id: str) -> Path:

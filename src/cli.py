@@ -152,6 +152,17 @@ def pick_mapping(explicit: Path | None, store: str = "") -> tuple[Path | None, s
     master = MAPPING_DIR / "master.csv"
     pending = MAPPING_DIR / "master.new.csv"
 
+    # 上一轮如果因为「主表正被 Excel 打开」没能替换成功，结果留在 master.new.csv。
+    # 这里先试着把它顶回主表。不顶的话这个文件会一直躺着，
+    # 每次核算都提示「主表被占用，用的是待写入的那份」——
+    # 用户以为有文件被锁着，其实早就没人占用了。
+    # 真被占着就顶不上，按下面的逻辑继续用 pending，不影响这次核算。
+    try:
+        from scripts.import_mapping import _promote_pending
+        _promote_pending()
+    except Exception:  # noqa: BLE001
+        pass
+
     def _mtime(p: Path) -> float:
         try:
             return p.stat().st_mtime

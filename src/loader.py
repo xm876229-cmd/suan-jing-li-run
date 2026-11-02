@@ -494,15 +494,65 @@ def read_table(path: Path, sheet: Optional[str] = None) -> list[tuple]:
         ) from e
 
 
+# csv 默认单个字段上限 128KB。订单表的「商品名/备注/客户留言」偶尔会超，
+# 一超就抛 _csv.Error，而那个异常没人接 —— 整次核算直接失败，
+# 报的还是英文 "field larger than field limit"，用户完全不知道发生了什么。
+# 这里放宽到 10MB（足够任何一行文本），内存代价可以忽略。
+_CSV_FIELD_LIMIT = 10 * 1024 * 1024
+try:
+    csv.field_size_limit(_CSV_FIELD_LIMIT)
+except (OverflowError, OSError):      # 32 位解释器上限更低
+    csv.field_size_limit(1024 * 1024)
+
+
 def _read_table_inner(path: Path, sheet: Optional[str] = None) -> list[tuple]:
     if path.suffix.lower() in (".csv", ".txt"):
-        for enc in ("utf-8-sig", "gbk", "utf-8"):
+        # 编码依次试。utf-16 排在最后：Excel「Unicode 文本」和部分导出工具
+        # 给的就是 UTF-16，以前不在列表里，读出来是**空表** ——
+        # 于是「该时段没有订单」，数字全是 0，而且不报任何错。
+        # 先看文件头两个字节：UTF-16 有 BOM 才试。
+        # 无 BOM 时硬按 UTF-16 解会「成功」解出一堆乱码（不报错），
+        # 列名全认不出 —— 比直接报错更难查。
+        encs = ("utf-8-sig", "gbk", "utf-8")
+        try:
+            head = path.open("rb").read(2)
+            # 用 "utf-16" 而不是 "utf-16-le"：前者会读 BOM 定字节序
+            # 并把 BOM **去掉**，后者会把 BOM 留在第一个单元格里 ——
+            # 于是首列表头变成 "\ufeff订单号"，跟配置里的「订单号」对不上，
+            # 整张表一列都认不出。
+            if head in (b"\xff\xfe", b"\xfe\xff"):
+                encs = ("utf-16",)
+        except OSError:
+            pass
+
+        last_err: Exception | None = None
+        for enc in encs:
             try:
                 with path.open("r", encoding=enc, newline="") as f:
-                    return [tuple(r) for r in csv.reader(f)]
-            except UnicodeDecodeError:
+                    try:
+                        rows = [tuple(r) for r in csv.reader(f)]
+                        # 兜一层：首行首列如果还带着 BOM，去掉再返回。
+                        # 表头认不出会导致「整表列都对不上」，但不会报错。
+                        if rows and rows[0] and isinstance(rows[0][0], str):
+                            first = rows[0][0].lstrip("\ufeff")
+                            if first != rows[0][0]:
+                                rows[0] = (first,) + tuple(rows[0][1:])
+                        return rows
+                    except csv.Error as e:
+                        raise RuntimeError(
+                            f"「{path.name}」表格格式有问题（{e}）："
+                            "可能是某一行断了引号，或者有超长单元格。"
+                            "用 Excel 打开另存一次 CSV 通常就好了"
+                        ) from e
+            except UnicodeDecodeError as e:
+                last_err = e
                 continue
-        return []
+        # 全部编码都认不出：明确报错，不要静默返回空表。
+        # 静默返回空的后果是「这家店这个月没订单」，看起来像正常结论。
+        raise RuntimeError(
+            f"「{path.name}」编码认不出来（试过 UTF-8 / GBK / UTF-16）："
+            f"{last_err}。用 Excel 另存为「CSV UTF-8」再试"
+        )
     wb = openpyxl.load_workbook(path, data_only=True, read_only=False)
     ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb[wb.sheetnames[0]]
     rows = [tuple(r) for r in ws.iter_rows(values_only=True)]

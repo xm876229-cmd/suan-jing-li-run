@@ -106,17 +106,35 @@ def load() -> dict:
     return out
 
 
+_MISSING = object()
+
+
 def save(patch: dict) -> dict:
-    """合并保存。只传想改的部分就行，其余保留。"""
+    """合并保存。只传想改的部分就行，其余保留。
+
+    **只认 DEFAULTS 里有的分节和字段。** 以前是「传什么就写什么」，
+    实测一个杂字段的请求就能把 `a`、`id`、`rule`、`stores` 这些键
+    永久写进 settings.json，越堆越多；更糟的是 `stores` 这种键
+    本来是列表，被写成字符串后，读配置的地方会拿到意外类型。
+    配置是长期存在的文件，宁可丢掉一个不认识的字段，也不要往里存垃圾。
+    """
     cur = _doc()
     if not cur:
         cur = json.loads(json.dumps(DEFAULTS))
     for section, values in (patch or {}).items():
         if section.startswith("_"):
             continue
-        if isinstance(values, dict) and isinstance(cur.get(section), dict):
-            cur[section].update(values)
+        default = DEFAULTS.get(section, _MISSING)
+        if default is _MISSING:
+            continue                      # 不认识的分节：不存
+        if isinstance(default, dict):
+            if not isinstance(values, dict):
+                continue                  # 类型不对：不存
+            cur.setdefault(section, {}).update(
+                {k: v for k, v in values.items() if k in default})
         else:
+            if type(values) is not type(default):
+                continue                  # 比如 schedules 必须是列表
             cur[section] = values
     try:
         # 原子写：断电/强杀也不会留下半截 JSON（见 src/safeio.py）

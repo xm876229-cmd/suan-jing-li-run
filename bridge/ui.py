@@ -1994,14 +1994,22 @@ function setHomeRange(kind){
 }
 
 let LIVE_DOWN = false;    // 桥连不上（被关了 / 正在重启）
+let LIVE_BUSY = false;    // 上一次轮询还没回来
 
 async function loadLive(){
+  // 上一次没回来就跳过这一轮。
+  // 为什么：算账时桥很忙，3 秒一次的轮询如果每次都发新请求，
+  // 会越堆越多（浏览器同源并发有上限，堆满之后连静态资源都加载不了，
+  // 界面就像卡死了）。跳过比排队更安全——反正下一轮还有。
+  if(LIVE_BUSY) return;
+  LIVE_BUSY = true;
   try{
     const r = await fetch('/api/live');
     if(!r.ok) throw new Error('HTTP ' + r.status);
     LIVE = await r.json();
     LIVE_DOWN = false;
   }catch(e){ LIVE = null; LIVE_DOWN = true; }
+  finally{ LIVE_BUSY = false; }
   renderCards();
 }
 
@@ -2469,7 +2477,16 @@ if($('#imp2-store')) $('#imp2-store').onchange = () => {
 };
 
 /** 读取文件为 base64，分块拼避免一次申请超大字符串。 */
+// 单个文件上限。base64 本身要占 1.34 倍，再加上中间那层字符串，
+// 传一个 300MB 的订单表能让标签页直接崩掉（而且崩得莫名其妙）。
+// 订单表正常几十 MB，200MB 足够宽裕。
+const MAX_UPLOAD = 200 * 1024 * 1024;
+
 async function fileToB64(f){
+  if(f.size > MAX_UPLOAD){
+    throw new Error(`文件有 ${(f.size/1024/1024).toFixed(0)} MB，超过 `
+      + `${MAX_UPLOAD/1024/1024} MB 上限。请在平台上把时间区间改小一点，分几次导出`);
+  }
   const buf = new Uint8Array(await f.arrayBuffer());
   let bin = "";
   const CH = 0x8000;

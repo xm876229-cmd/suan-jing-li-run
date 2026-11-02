@@ -271,7 +271,9 @@ def _latest_inbox() -> Path | None:
     cands: list[tuple[float, Path]] = []
     try:
         for d in paths.STORES_ROOT.iterdir():
-            sub = d / "inbox"
+            if not d.is_dir():
+                continue
+            sub = paths.store_inbox(d)
             if sub.is_dir() and any(sub.iterdir()):
                 cands.append((max(f.stat().st_mtime for f in sub.iterdir()), sub))
     except OSError:

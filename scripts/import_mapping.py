@@ -198,7 +198,7 @@ def load_seller_sku_from_orders(limit_files: int = 10) -> dict[str, str]:
         if not d.is_dir():
             continue
         for sub in ("订单表", "orders"):
-            p = d / "inbox" / sub
+            p = paths.store_inbox(d) / sub
             if not p.is_dir():
                 continue
             for f in p.iterdir():

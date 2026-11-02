@@ -111,7 +111,14 @@ def normalize_rule(raw: dict) -> dict:
 
 def _norm_fields(raw: dict) -> dict:
     r = dict(DEFAULT_RULE)
-    r.update({k: v for k, v in (raw or {}).items() if v is not None or k == "with_formula"})
+    # raw 不是字典就整条按默认值处理。看着像多余的防御，实际踩过：
+    # settings.json 的 schedules 里混进一个字符串（手改、别的版本写坏、
+    # 或旧格式迁移），normalize_rule 就抛 AttributeError，
+    # 于是**整个计划任务页 500、自动运行也 500**——一条坏规则废掉全部功能。
+    # 这个函数的 docstring 早就写着「不该抛异常」，这里是补上实现。
+    if not isinstance(raw, dict):
+        raw = {}
+    r.update({k: v for k, v in raw.items() if v is not None or k == "with_formula"})
 
     if r.get("freq") not in FREQS:
         r["freq"] = "monthly"

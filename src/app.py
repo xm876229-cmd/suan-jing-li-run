@@ -475,12 +475,15 @@ def cmd_doctor() -> int:
 # ---------------- 菜单 ----------------
 
 def _load_stores() -> list[dict]:
-    import json
+    from src import safeio
     try:
-        d = json.loads(paths.STORES_FILE.read_text(encoding="utf-8"))
-    except Exception:
+        d = safeio.read_json(paths.STORES_FILE, default={}) or {}
+        if not isinstance(d, dict):
+            return []
+        return [s for s in (d.get("stores") or [])
+                if isinstance(s, dict) and s.get("enabled", True)]
+    except Exception:  # noqa: BLE001
         return []
-    return [s for s in d.get("stores", []) if s.get("enabled", True)]
 
 
 def _load_countries() -> list[str]:

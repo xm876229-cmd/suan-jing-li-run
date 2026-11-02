@@ -194,6 +194,14 @@ def date_order(samples: Iterable[str]) -> str:
             dmy += 1
         elif b > 12 >= a:
             mdy += 1
+    if dmy == mdy:
+        # 两边都没有证据（整批日期的两段都在 1~12 之间）。
+        # 以前这里直接默认「日在前」，但短区间导出正好会踩：
+        # 只导 10/01~10/05 这几天，一个 >12 的数字都没有，
+        # 于是 10/01 被读成 1 月 10 日 —— 整个区间一行都不剩，
+        # 报表说「该时段没有订单」，其实数据全在。
+        # 交给调用方用别的证据去定（filter_by_date 用区间命中数）。
+        return ""
     return "mdy" if mdy > dmy else "dmy"
 
 
@@ -234,10 +242,35 @@ def filter_by_date(lines: list[OrderLine], dfrom: Optional[date], dto: Optional[
         return lines
     # 先拿前 300 行判断这批数据是「日/月」还是「月/日」，再统一按那个顺序解析。
     # 逐行各猜各的会把 08/10 拆成两个月份，报表就错得没边了。
-    order = date_order((l.created if field == "created" else l.paid) for l in lines[:300])
+    def _src(l: OrderLine) -> str:
+        return l.created if field == "created" else l.paid
+
+    order = date_order(_src(l) for l in lines[:300])
+    if not order:
+        # 前 300 行分不出日/月，就用「哪个读法落进所选区间更多」来定。
+        # 用户选了区间，本身就是最好的证据：真数据不会整批落在区间外。
+        # 只在有区间时才这么判（两个都空的话函数开头已经返回了）。
+        sample = lines[:3000]
+        best, best_n = "dmy", -1
+        for cand in ("dmy", "mdy"):
+            n = 0
+            for l in sample:
+                dt = parse_dt(_src(l), cand)
+                if dt is None:
+                    continue
+                d = dt.date()
+                if dfrom and d < dfrom:
+                    continue
+                if dto and d > dto:
+                    continue
+                n += 1
+            if n > best_n:
+                best, best_n = cand, n
+        order = best
+
     out = []
     for l in lines:
-        dt = parse_dt(l.created if field == "created" else l.paid, order)
+        dt = parse_dt(_src(l), order)
         if dt is None:
             # 选了区间就必须守住区间：时间读不出来的行**不**计入，
             # 只在异常页报数量。以前是「留下照算」，一旦遇上没见过的日期格式，
