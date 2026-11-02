@@ -1528,8 +1528,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <button id="btn-bridge-stop">关闭取数桥</button>
         </div>
         <p class="muted" style="font-size:12.5px;margin:10px 0 0">
-          「重启用本程序的桥」会先关掉别的桥，再起当前程序目录这个；<br>
-          「关闭取数桥」只停不启；下次双击 jingli.exe 会自动再起来。
+          「启动 / 重启」都会先关掉别的桥（比如另一个目录安装的那份），
+          再起<b>当前程序目录</b>这个，保证数据是同一套；<br>
+          「关闭」只停不启。关掉之后：定时任务不会跑，界面刷新也会打不开
+          （界面本身就是桥提供的），但<b>已经开着的窗口还能点上面的按钮把它拉起来</b>。
         </p>
       </div></div>
       <div class="card"><h2>自检与修复<span class="hint">断电、蓝屏、强杀之后用它收拾残局</span></h2>
@@ -1633,11 +1635,15 @@ function setHomeRange(kind){
   $('#home-from').value = a; $('#home-to').value = b;
 }
 
+let LIVE_DOWN = false;    // 桥连不上（被关了 / 正在重启）
+
 async function loadLive(){
   try{
     const r = await fetch('/api/live');
+    if(!r.ok) throw new Error('HTTP ' + r.status);
     LIVE = await r.json();
-  }catch(e){ LIVE = null; }
+    LIVE_DOWN = false;
+  }catch(e){ LIVE = null; LIVE_DOWN = true; }
   renderCards();
 }
 
@@ -1736,7 +1742,14 @@ function renderCards(){
   if(!grid) return;
   const j = LIVE;
   if(!j || !j.stores || !Object.keys(j.stores).length){
-    grid.innerHTML = '<div class="sc-empty">还没识别到店铺。<br>在浏览器里打开店铺后台，扩展会自动认出是哪家店。</div>';
+    // 桥没连上时别说「还没识别到店铺」——那会让人以为要重新登录店铺，
+    // 其实只是取数服务被关了（调试页那个按钮），点一下就能起来。
+    grid.innerHTML = LIVE_DOWN
+      ? '<div class="sc-empty"><b style="display:block;margin-bottom:6px;font-size:14px">取数服务没连上</b>'
+        + '它可能被关掉了，或者正在重启。<br>取数、核算、计划任务都靠它。<br><br>'
+        + '<button class="ghost" style="width:auto;padding:7px 16px;margin:0" '
+        + 'onclick="go(\'debug\')">去调试页启动 →</button></div>'
+      : '<div class="sc-empty">还没识别到店铺。<br>在浏览器里打开店铺后台，扩展会自动认出是哪家店。</div>';
     updatePickCount();
     return;
   }
@@ -1846,7 +1859,10 @@ async function runStores(ids, btn, range){
     })).json();
     if(r.ok) toast(r.note || ('已派给 ' + (r.count || ids.length) + ' 家店'));
     else toast(r.error || '派发失败');
-  }catch(e){ toast('派发失败：' + e.message); }
+  }catch(e){
+    toast(LIVE_DOWN ? '取数服务没连上（可能被关了），去「调试」页点「启动取数服务」'
+                    : ('派发失败：' + e.message));
+  }
   if(btn) btn.disabled = false;
   setTimeout(loadLive, 800);
 }
@@ -3774,7 +3790,11 @@ async function loadBridgeStatus(){
   let s = {}, ok = false;
   try{ s = await (await fetch('/api/bridge/status')).json(); ok = !!s.ok; }catch(e){ ok = false; }
   if(!ok){
-    box.innerHTML = '<div><span class="muted">状态</span>　<b style="color:var(--warn)">读不到（桥可能已停）</b></div>';
+    box.innerHTML = '<div><span class="muted">状态</span>　'
+      + '<b style="color:var(--warn)">已关闭</b></div>'
+      + '<div class="muted" style="font-size:12.5px;margin-top:4px">'
+      + '取数、核算、计划任务都会停。点下面的「启动取数服务」就能拉起来，不用重开程序。</div>';
+    syncBridgeButtons(false);
     return;
   }
   let appDir = '';
@@ -3791,14 +3811,30 @@ async function loadBridgeStatus(){
     `<div><span class="muted">状态</span>　<b style="color:var(--accent)">运行中</b>　端口 ${esc(s.port || 8765)}</div>` +
     `<div><span class="muted">数据根</span>　<span class="mono" style="font-size:12px">${esc(s.root || '')}</span></div>` +
     `<div><span class="muted">桥程序</span>　<span class="mono" style="font-size:12px">${esc(s.exe_dir || '')}</span> ${tag}</div>`;
+  syncBridgeButtons(true);
+}
+
+/** 桥在跑时按钮是「重启」，停了就变成「启动」——不然用户不知道关掉后怎么再开。 */
+function syncBridgeButtons(up){
+  const restart = $('#btn-bridge-restart');
+  const stop = $('#btn-bridge-stop');
+  if(restart){
+    restart.textContent = up ? '重启用本程序的桥' : '启动取数服务';
+    restart.classList.toggle('primary', true);
+  }
+  if(stop){
+    stop.disabled = !up;
+    stop.textContent = up ? '关闭取数桥' : '取数桥已关闭';
+  }
 }
 
 // 重启用本程序的桥：先关掉别的桥，再起当前程序目录这个
 $('#btn-bridge-restart').onclick = async () => {
   const api = (window.pywebview && window.pywebview.api) || null;
   if(!api || !api.restart_bridge){ toast('请在程序窗口里操作'); return; }
-  if(!confirm('会先关掉当前正在跑的桥，再用本程序目录的桥重启。确定？')) return;
-  toast('正在重启取数桥…');
+  const running = !$('#btn-bridge-stop') || !$('#btn-bridge-stop').disabled;
+  if(running && !confirm('会先关掉当前正在跑的桥，再用本程序目录的桥重启。确定？')) return;
+  toast(running ? '正在重启取数服务…' : '正在启动取数服务…');
   try{
     const msg = await api.restart_bridge();
     toast(msg);
@@ -3810,10 +3846,14 @@ $('#btn-bridge-restart').onclick = async () => {
 $('#btn-bridge-stop').onclick = async () => {
   const api = (window.pywebview && window.pywebview.api) || null;
   if(!api || !api.stop_bridge){ toast('请在程序窗口里操作（浏览器里关不了桥）'); return; }
-  if(!confirm('关闭取数桥后，本界面会断开。确定关闭？')) return;
+  if(!confirm('关闭取数服务后：\n'
+    + '· 界面里的运行、核算、报表都会用不了\n'
+    + '· 定时计划任务也不会再跑\n'
+    + '\n随时可以在这一页点「启动取数服务」再开起来。确定关闭？')) return;
   try{
     const ok = await api.stop_bridge();
-    toast(ok ? '取数桥已关闭。下次打开程序会自动再起来' : '没有正在跑的桥');
+    toast(ok ? '取数服务已关闭。要恢复就点上面的「启动取数服务」' : '没有正在跑的桥');
+    setTimeout(loadBridgeStatus, 600);
   }catch(err){ toast('关闭失败：' + err.message); }
 };
 

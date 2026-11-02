@@ -47,6 +47,12 @@ def _port() -> int:
     return int(os.environ.get("JINGLI_PORT") or 8765)
 
 
+def _app_root():
+    """程序根目录：打包时 = exe 所在目录，源码时 = 项目根。"""
+    from src import paths
+    return paths.ROOT
+
+
 def _same_dir(a: str, b: str) -> bool:
     import os
     if not a or not b:
@@ -209,15 +215,33 @@ class NativeApi:
             return ""
 
     def restart_bridge(self) -> str:
-        """关掉别的桥，用「当前程序目录」这个桥重启。"""
+        """关掉别的桥，用「当前程序目录」这个桥重启（关掉之后也能用它启动）。"""
         try:
             import subprocess
+
+            # 打包后 sys.executable 就是 jingli.exe，直接带子命令；
+            # 源码模式下 sys.executable 是 python.exe，必须走 -m，
+            # 否则会变成「python bridge」——python 会把 bridge 当脚本路径，
+            # 报 can't find '__main__' module，而界面还提示「已重启」。
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "bridge", "--force"]
+            else:
+                cmd = [sys.executable, "-m", "src.app", "bridge", "--force"]
+
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "nt" else 0
-            subprocess.run([sys.executable, "bridge", "--force"], timeout=90,
-                           creationflags=flags,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           stdin=subprocess.DEVNULL)
-            return "已用本程序的桥重启"
+            r = subprocess.run(cmd, timeout=90, cwd=str(_app_root()),
+                               creationflags=flags,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               stdin=subprocess.DEVNULL)
+            if r.returncode != 0:
+                return f"重启失败（命令返回 {r.returncode}），去「诊断」页看看"
+
+            # 命令成功不代表桥起来了，探一下再说
+            for _ in range(20):
+                if _bridge_alive(1.0):
+                    return "取数服务已启动（用的是本程序目录）"
+                time.sleep(0.5)
+            return "命令执行了，但取数服务没起来（看诊断页 / 8765 可能被占用）"
         except Exception as e:  # noqa: BLE001
             return f"重启失败：{e}"
 
