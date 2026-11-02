@@ -102,9 +102,8 @@ def _read() -> dict:
 
 
 def _write(doc: dict) -> None:
-    paths.CONFIG.mkdir(parents=True, exist_ok=True)
-    presets_path().write_text(
-        json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    from src import safeio
+    safeio.write_json(presets_path(), doc)
 
 
 def _safe_id(name: str) -> str:
@@ -304,9 +303,8 @@ def apply(preset_id: str, country: str = "") -> dict:
                 doc["exclude_zero_amount"] = True
             else:
                 doc.pop("exclude_zero_amount", None)
-        paths.CONFIG.mkdir(parents=True, exist_ok=True)
-        (paths.CONFIG / "formulas.json").write_text(
-            json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        from src import safeio
+        safeio.write_json(paths.CONFIG / "formulas.json", doc)
         return {"ok": True, "applied": p.get("name"), "builtin": True,
                 "backup": bk.get("files", []),
                 "note": "只调整了订单类型的勾选，公式与列标题保持原样"}
@@ -320,8 +318,8 @@ def apply(preset_id: str, country: str = "") -> dict:
         doc["exclude_zero_amount"] = True
     else:
         doc.pop("exclude_zero_amount", None)
-    (paths.CONFIG / "formulas.json").write_text(
-        json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    from src import safeio
+    safeio.write_json(paths.CONFIG / "formulas.json", doc)
 
     # 费率：按国家合并，只覆盖预设里有的国家
     rates = content.get("rates") or {}
@@ -332,8 +330,7 @@ def apply(preset_id: str, country: str = "") -> dict:
             if isinstance(vals, dict):
                 countries[cname] = {**countries.get(cname, {}), **vals}
         rdoc["countries"] = countries
-        paths.RATES_FILE.write_text(
-            json.dumps(rdoc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        safeio.write_json(paths.RATES_FILE, rdoc)
 
     return {"ok": True, "applied": p.get("name"), "builtin": False,
             "backup": bk.get("files", []),

@@ -76,19 +76,24 @@ def main(argv: list[str] | None = None) -> int:
         for it in items:
             sku_of_item.setdefault(id(it), sku)
 
+    import io
+
+    from src import safeio
+
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=FIELDS)
+    w.writeheader()
     n = 0
-    with OUT.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS)
-        w.writeheader()
-        for sid, item in idx.by_sku_id.items():
-            w.writerow({
-                "sku_id": sid,
-                "product_id": item["product_id"],
-                "seller_sku": sku_of_item.get(id(item), ""),
-                "product_name": item.get("product_name", ""),
-                "style_code": item.get("style_code", ""),
-            })
-            n += 1
+    for sid, item in idx.by_sku_id.items():
+        w.writerow({
+            "sku_id": sid,
+            "product_id": item["product_id"],
+            "seller_sku": sku_of_item.get(id(item), ""),
+            "product_name": item.get("product_name", ""),
+            "style_code": item.get("style_code", ""),
+        })
+        n += 1
+    safeio.write_text(OUT, buf.getvalue(), encoding="utf-8")
 
     print(f"来源：{Path(wb).name} / 「{SHEET}」表")
     print(f"导出 {n} 条 SKU 映射 → {OUT.name}")

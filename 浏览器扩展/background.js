@@ -2636,6 +2636,18 @@ function toRangeObj(r) {
 }
 
 async function checkSchedule() {
+  // 定时已经交给本地桥的「计划任务」了（那边能配多条、能按周期算区间、
+  // 浏览器关着也能排队）。扩展自己这套周/月定时是旧设计，
+  // 两边同时开着的后果是**同一件事跑两遍**：两份报表、两次核算。
+  // 只要桥在线就认桥，扩展这边不再触发。
+  try {
+    const r = await fetch(`${BRIDGE}/health`, { cache: "no-store" });
+    if (r.ok) {
+      const j = await r.json();
+      if (j && j.ok) return null;
+    }
+  } catch (e) { /* 桥没开，才轮到扩展自己定时 */ }
+
   const s = await getSchedule();
   const now = new Date();
   const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -4275,7 +4287,16 @@ async function consumePending() {
   // 单槽位下后一个会把前一个冲掉，表现是「自动任务今天没跑」，
   // 而且不报错，极难发现。改成 FIFO 后两个都会依次执行。
   const { running } = await skGet({ running: null });
-  if (running) return null;                 // 正在跑，等它跑完再领下一个
+  if (running) {
+    // 上次跑到一半断电/关浏览器，running 标记会一直留在 storage 里。
+    // 以前只要它有值就 return，结果**重启之后扩展再也不领任务**，
+    // 界面上看着「在线」，就是不动——这种状态最难查。
+    // 超过 40 分钟一律当残留清掉（单店最长也就十几分钟）。
+    const age = Date.now() - Number(running.at || 0);
+    if (age < 40 * 60 * 1000) return null;   // 真在跑，等它跑完再领下一个
+    await skSet({ running: null });
+    appendTaskLog("上次任务没跑完（断电或中途关了浏览器），已清掉运行标记，继续领任务");
+  }
 
   let p = null;
   try {

@@ -39,6 +39,26 @@ HISTORY = COST_DIR / "history.jsonl"
 FIELDS = ["code", "cost", "effective_from", "updated_at"]
 
 
+def _num(v) -> float:
+    """把成本列转成数字。
+
+    表格里常见「1,234.50」「¥12」「12 元」这种写法，直接 float() 会抛异常，
+    一个格子有问题就让整张成本表导不进来（然后全店净利算错）。
+    这里尽量救：去掉货币符号和千分位；实在认不出就当 0，并在导入时提示。
+    """
+    if isinstance(v, (int, float)):
+        return float(v)
+    raw = str(v or "").strip()
+    if not raw:
+        return 0.0
+    for ch in ("¥", "￥", "RMB", "rmb", "元", ",", " ", "\u00a0"):
+        raw = raw.replace(ch, "")
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.0
+
+
 def load_master() -> dict[str, dict]:
     if not MASTER.exists():
         return {}
@@ -50,7 +70,7 @@ def load_master() -> dict[str, dict]:
                 continue
             out[code] = {
                 "code": code,
-                "cost": float(row.get("cost") or 0),
+                "cost": _num(row.get("cost")),
                 "effective_from": row.get("effective_from") or "",
                 "updated_at": row.get("updated_at") or "",
             }
@@ -58,12 +78,21 @@ def load_master() -> dict[str, dict]:
 
 
 def write_master(data: dict[str, dict]) -> None:
-    COST_DIR.mkdir(parents=True, exist_ok=True)
-    with MASTER.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS)
-        w.writeheader()
-        for code in sorted(data):
-            w.writerow(data[code])
+    """写成本主表：先在内存里拼好，再原子替换。
+
+    直接 open("w") 是先清空再写，断电/强杀会留下半截 CSV——
+    成本表读不全，全店净利都会算错，而且看不出来。
+    """
+    import io
+
+    from src import safeio
+
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=FIELDS)
+    w.writeheader()
+    for code in sorted(data):
+        w.writerow(data[code])
+    safeio.write_text(MASTER, buf.getvalue(), encoding="utf-8")
 
 
 def pick_source(explicit: Path | None) -> Path | None:

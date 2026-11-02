@@ -190,9 +190,8 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
     elif "report_titles" in old:
         out["report_titles"] = old["report_titles"]
 
-    config_path().write_text(
-        json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    from src import safeio
+    safeio.write_json(config_path(), out)
     return {"ok": True, "path": str(config_path()), "params": len(out["params"])}
 
 
@@ -206,7 +205,8 @@ def save_cost_fields(code_titles: list, cost_titles: list) -> dict:
     cf["code"] = {"label": "商品编码", "titles": [str(x).strip() for x in code_titles if str(x).strip()]}
     cf["cost"] = {"label": "成本（人民币）", "titles": [str(x).strip() for x in cost_titles if str(x).strip()]}
     doc["cost_fields"] = cf
-    config_path().write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    from src import safeio
+    safeio.write_json(config_path(), doc)
     return {"ok": True, "cost_fields": cf}
 
 

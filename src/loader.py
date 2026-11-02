@@ -483,6 +483,18 @@ class RawData:
 
 def read_table(path: Path, sheet: Optional[str] = None) -> list[tuple]:
     path = Path(path)
+    try:
+        return _read_table_inner(path, sheet)
+    except OSError as e:
+        # 最常见：这张表正在 Excel/WPS 里开着（Windows 独占锁），
+        # 或者文件被杀毒软件拦着。直接抛一个能看懂的话，
+        # 别让用户对着一串 WinError 32 发呆。
+        raise RuntimeError(
+            f"读不了「{path.name}」：可能正在 Excel/WPS 里打开，或没有访问权限（{e}）"
+        ) from e
+
+
+def _read_table_inner(path: Path, sheet: Optional[str] = None) -> list[tuple]:
     if path.suffix.lower() in (".csv", ".txt"):
         for enc in ("utf-8-sig", "gbk", "utf-8"):
             try:

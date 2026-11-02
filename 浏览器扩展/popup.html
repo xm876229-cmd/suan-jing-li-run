@@ -139,23 +139,11 @@
   </div>
   <hr />
   <div class="sched">
-    <div class="srow">
-      <label><input type="checkbox" id="wOn" /> 每周</label>
-      <select id="wDay">
-        <option value="1">周一</option><option value="2">周二</option><option value="3">周三</option>
-        <option value="4">周四</option><option value="5">周五</option><option value="6">周六</option>
-        <option value="0">周日</option>
-      </select>
-      <input type="number" id="wHour" min="0" max="23" value="9" class="num" /> 点
-      <span class="hint2">算上周</span>
+    <div class="hint2" style="line-height:1.8">
+      定时运行已挪到程序里的 <b>「计划任务」</b> 页：可以配多条、按周期算区间，
+      浏览器关着也会排队补跑。<br>
+      这里原来的「每周 / 每月」定时已停用（两套定时同时开着会让同一件事跑两遍）。
     </div>
-    <div class="srow">
-      <label><input type="checkbox" id="mOn" /> 每月</label>
-      <input type="number" id="mDay" min="1" max="28" value="1" class="num" /> 日
-      <input type="number" id="mHour" min="0" max="23" value="9" class="num" /> 点
-      <span class="hint2">算上月</span>
-    </div>
-    <div id="lastRun" class="hint2" style="margin-top:4px"></div>
   </div>
   <button id="deep" class="ghost" style="font-size:11px">深度抓包 5 分钟（诊断用）</button>
   <button id="toggle" class="ghost">暂停记录</button>

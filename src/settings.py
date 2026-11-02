@@ -75,10 +75,9 @@ _ALIASES = {
 
 
 def _doc() -> dict:
-    try:
-        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    from src import safeio
+    got = safeio.read_json(SETTINGS_FILE, default={})
+    return got if isinstance(got, dict) else {}
 
 
 def load() -> dict:
@@ -119,9 +118,12 @@ def save(patch: dict) -> dict:
             cur[section].update(values)
         else:
             cur[section] = values
-    SETTINGS_FILE.write_text(
-        json.dumps(cur, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    try:
+        # 原子写：断电/强杀也不会留下半截 JSON（见 src/safeio.py）
+        from src import safeio
+        safeio.write_json(SETTINGS_FILE, cur)
+    except OSError as e:
+        return {"ok": False, "error": f"保存失败（磁盘满或被占用？）：{e}"}
     return {"ok": True, "settings": load()}
 
 

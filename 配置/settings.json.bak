@@ -1,0 +1,29 @@
+{
+  "report": {
+    "name_template": "{店铺}_{开始}_{结束}",
+    "auto_copy": false,
+    "download_dir": "",
+    "template_dir": ""
+  },
+  "fx": {
+    "mode": "auto"
+  },
+  "schedules": [
+    {
+      "id": "r1793588813_1",
+      "name": "每月1号导上月",
+      "enabled": true,
+      "freq": "monthly",
+      "time": "09:00",
+      "day": 1,
+      "weekday": 0,
+      "period": "month",
+      "offset": 1,
+      "cut": "end",
+      "cut_day": 1,
+      "stores": [],
+      "download_dir": "",
+      "with_formula": null
+    }
+  ]
+}

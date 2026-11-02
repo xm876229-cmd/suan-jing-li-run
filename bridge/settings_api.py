@@ -19,7 +19,8 @@ from src import paths
 
 def read_rates() -> dict:
     try:
-        doc = json.loads(paths.RATES_FILE.read_text(encoding="utf-8"))
+        from src import safeio
+        doc = safeio.read_json(paths.RATES_FILE, default={}) or {}
     except (OSError, json.JSONDecodeError) as e:
         return {"ok": False, "error": f"读取 rates.json 失败：{e}", "countries": {}}
 
@@ -50,7 +51,8 @@ def save_rates(payload: dict) -> dict:
     免得用户辛苦写的注释被程序冲掉。
     """
     try:
-        doc = json.loads(paths.RATES_FILE.read_text(encoding="utf-8"))
+        from src import safeio
+        doc = safeio.read_json(paths.RATES_FILE, default={}) or {}
     except (OSError, json.JSONDecodeError):
         doc = {}
 
@@ -65,9 +67,11 @@ def save_rates(payload: dict) -> dict:
         if labels:
             doc["labels"] = labels
 
-    paths.RATES_FILE.write_text(
-        json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    try:
+        from src import safeio
+        safeio.write_json(paths.RATES_FILE, doc)
+    except OSError as e:
+        return {"ok": False, "error": f"费率保存失败（磁盘满或被占用？）：{e}"}
     return {"ok": True, "countries": len(doc.get("countries") or {})}
 
 
@@ -80,19 +84,31 @@ def _find_report(name: str, rel: str = "") -> Path | None:
     传了 rel 就按它找——不同店铺的报表可能重名，只按文件名找会张冠李戴。
     """
     if rel:
-        rel = str(rel).replace("\\", "/")
+        rel = str(rel).replace("\\", "/").lstrip("/")
         if ".." in rel.split("/"):
             return None
         p = paths.OUTPUT / rel
+        # 只认「报表目录里面」的文件。
+        # 少了这一步，rel 传一个绝对路径（C:/Windows/...）就能把本机文件读出来；
+        # 桥的 CORS 是全开的，随便一个网页都能来问一次 —— 这种口子不能留。
+        try:
+            if not p.resolve().is_relative_to(paths.OUTPUT.resolve()):
+                return None
+        except (OSError, ValueError):
+            return None
         return p if p.is_file() else None
     if not name or "/" in name or "\\" in name or ".." in name:
         return None
     if not name.lower().endswith(".xlsx"):
         return None
     # 报表可能分店放，也可能还在根目录，两边都找
+    base = paths.OUTPUT.resolve()
     for p in [paths.OUTPUT / name, *paths.OUTPUT.glob(f"*/{name}")]:
-        if p.is_file():
-            return p
+        try:
+            if p.is_file() and p.resolve().is_relative_to(base):
+                return p
+        except (OSError, ValueError):
+            continue
     return None
 
 
@@ -370,5 +386,9 @@ def save_mapping(fields: list) -> dict:
         clean[fid] = {"label": str(f.get("label") or fid), "candidates": uniq}
     out["fields"] = clean
 
-    target.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        from src import safeio
+        safeio.write_json(target, out)
+    except OSError as e:
+        return {"ok": False, "error": f"保存失败：{e}"}
     return {"ok": True, "fields": len(clean)}

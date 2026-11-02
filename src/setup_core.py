@@ -122,12 +122,32 @@ def copy_app_files(dest: Path, source: Path, log=print) -> None:
                 _copy_missing_tree(src, dst)
                 log(f"  {name}（只补缺，不覆盖你改过的）")
                 continue
-            # _internal 里是运行库，必须整目录替换，否则新旧混用会崩
-            if dst.exists():
-                shutil.rmtree(dst, ignore_errors=True)
-            shutil.copytree(src, dst, dirs_exist_ok=True)
+            # _internal 里是运行库，必须整目录替换，否则新旧混用会崩。
+            # 但不能「先删后拷」：正好删完就断电的话，安装目录只剩半套文件，
+            # 双击 exe 直接报缺 dll——用户以为程序彻底坏了。
+            # 改成「旧的改名 → 新的拷进来 → 删旧的」，任何一刻都有完整的一份。
+            old_dir = dest / f"{name}.old"
+            try:
+                if old_dir.exists():
+                    shutil.rmtree(old_dir, ignore_errors=True)
+                if dst.exists():
+                    dst.rename(old_dir)
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+                shutil.rmtree(old_dir, ignore_errors=True)
+            except OSError:
+                # 拷一半失败：把旧目录换回来，保证程序还能启动
+                try:
+                    if dst.exists():
+                        shutil.rmtree(dst, ignore_errors=True)
+                    if old_dir.exists():
+                        old_dir.rename(dst)
+                except OSError:
+                    pass
+                raise
         else:
-            shutil.copy2(src, dst)
+            # 单文件也走「临时文件 + 原子改名」，避免半个 exe
+            from src import safeio
+            safeio.write_bytes(dst, src.read_bytes(), backup=False)
         log(f"  {name}")
 
     # 成本表 / 映射表随包带一份：全新安装时如果没有就补上；

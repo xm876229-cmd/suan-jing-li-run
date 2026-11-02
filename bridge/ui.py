@@ -833,7 +833,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </svg><span>调试</span></a>
     </nav>
     <div class="foot">
-      <div class="row"><span>版本</span><span>{APP_VERSION}</span></div>
+      <div class="row"><span>版本</span><span id="app-ver">{APP_VERSION}</span></div>
       <div class="row"><span>店铺</span><span id="foot-stores">—</span></div>
     </div>
   </aside>
@@ -1529,9 +1529,22 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </div>
         <p class="muted" style="font-size:12.5px;margin:10px 0 0">
           「重启用本程序的桥」会先关掉别的桥，再起当前程序目录这个；<br>
-          「关闭取数桥」只停不启，之后双击程序文件夹里的「启动桥.bat」再开。
+          「关闭取数桥」只停不启；下次双击 jingli.exe 会自动再起来。
         </p>
       </div></div>
+      <div class="card"><h2>自检与修复<span class="hint">断电、蓝屏、强杀之后用它收拾残局</span></h2>
+        <div class="body">
+          <p style="margin:0 0 12px;font-size:13px;color:var(--text-2)">
+            程序每次启动都会自动体检一遍：修好写坏的配置（用 .bak 恢复）、
+            清掉断电留下的半截临时文件、清理早就死掉的合并锁、把打不开的报表挪进隔离目录、
+            日志过大自动轮转。<b>坏文件只挪走、不删除</b>，都在
+            <span class="mono">_损坏文件</span> / <span class="mono">_隔离_日期</span> 里。</p>
+          <div class="tools">
+            <button class="primary" id="btn-selfcheck">立即体检一次</button>
+            <span class="muted" style="font-size:12.5px;align-self:center" id="sc-when"></span>
+          </div>
+          <div id="sc-actions" style="margin-top:12px"></div>
+        </div></div>
       <div class="card"><h2>运行环境</h2><div class="body tight"><div class="kv" id="dbg-env"></div></div></div>
       <div class="card"><h2>扩展日志<span class="hint" id="dbg-log-hint"></span></h2>
         <div class="body"><pre class="log" id="dbg-log">读取中…</pre></div></div>
@@ -1686,8 +1699,14 @@ function cardHtml(id, s, labels){
   const prog = s.progress || {};
   const cur = prog.current || '';
   const anyFail = Object.values(prog.steps || {}).some(x => x.state === 'fail');
-  const dot = cur ? 'run' : (s.online ? (anyFail ? 'warn' : 'on') : 'off');
-  const stateTxt = cur ? '运行中' : (s.online ? (anyFail ? '有失败' : '待命') : '浏览器没开');
+  // 扩展版本和磁盘上的对不上：多半是程序升级了、扩展页没点「刷新」。
+  // 这时候界面是新的、跑的代码是旧的，最容易出现「功能看着有、就是不生效」。
+  const appVer = ($('#app-ver') || {}).textContent || '';
+  const stale = s.ver && appVer && s.ver !== appVer;
+  const dot = cur ? 'run' : (s.online ? (anyFail ? 'warn' : (stale ? 'warn' : 'on')) : 'off');
+  const stateTxt = cur ? '运行中'
+    : (s.online ? (anyFail ? '有失败' : (stale ? ('扩展 ' + s.ver + ' 待刷新') : '待命'))
+                : '浏览器没开');
   const realName = s.shop_name && s.shop_name !== s.store_name ? s.shop_name : '';
   const meta = [realName || ('ID ' + String(id).slice(-8)), s.region].filter(Boolean).join(' · ');
   const picked = PICKED.has(id);
@@ -3794,7 +3813,7 @@ $('#btn-bridge-stop').onclick = async () => {
   if(!confirm('关闭取数桥后，本界面会断开。确定关闭？')) return;
   try{
     const ok = await api.stop_bridge();
-    toast(ok ? '取数桥已关闭。要用时双击「启动桥.bat」或重开程序' : '没有正在跑的桥');
+    toast(ok ? '取数桥已关闭。下次打开程序会自动再起来' : '没有正在跑的桥');
   }catch(err){ toast('关闭失败：' + err.message); }
 };
 
@@ -4469,7 +4488,46 @@ document.addEventListener('change', e => {
   if(cb) toggleRule(cb.dataset.toggle, cb.checked);
 });
 
+async function loadSelfcheck(){
+  try{
+    const j = await (await fetch('/api/selfcheck')).json();
+    renderSelfcheck(j.last || {});
+  }catch(e){ /* 读不到就先不显示 */ }
+}
+
+function renderSelfcheck(rep){
+  const box = $('#sc-actions');
+  const when = $('#sc-when');
+  if(!box) return;
+  if(when) when.textContent = rep.at ? ('上次体检：' + rep.at) : '还没体检过';
+  const acts = rep.actions || [];
+  if(!acts.length){
+    box.innerHTML = '<div class="note show ok" style="margin:0">一切正常，没发现需要处理的东西。</div>';
+    return;
+  }
+  box.innerHTML = '<div class="note show ok" style="margin:0">'
+    + (rep.crashed ? '<b>上次不是正常退出</b>（断电/强杀），已做完整检查。<br>' : '')
+    + acts.map(a => '· ' + esc(a)).join('<br>') + '</div>';
+}
+
+const _scBtn = $('#btn-selfcheck');
+if(_scBtn) _scBtn.onclick = async () => {
+  _scBtn.disabled = true;
+  const old = _scBtn.textContent;
+  _scBtn.textContent = '体检中…';
+  try{
+    const r = await fetch('/api/selfcheck', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    const j = await r.json();
+    if(j.ok){ renderSelfcheck(j.last || {}); toast('体检完成'); }
+    else toast(j.error || '体检失败');
+  }catch(e){ toast('体检失败：' + e.message); }
+  _scBtn.disabled = false;
+  _scBtn.textContent = old;
+};
+
 async function loadDebug(){
+  loadSelfcheck();
   try{
     const j = await (await fetch('/api/debug')).json();
     $('#dbg-env').innerHTML = Object.entries(j.paths || {}).map(([k, v]) =>

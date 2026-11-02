@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -228,7 +229,11 @@ def create(shop_id: str, files: list[Path], dfrom: str = "", dto: str = "",
             continue
         dst = snap_dir / f.name
         try:
-            shutil.copy2(f, dst)
+            # 先拷成 .part，完整了再改名。断电时留的是 .part（启动时清掉），
+            # 不会出现一个「名字正常、内容是半截」的快照文件被下次核算读进去。
+            part = dst.with_name(dst.name + ".part")
+            shutil.copy2(f, part)
+            os.replace(part, dst)
             st = f.stat()
             info = _quick_stats(f)
             kept.append({"name": f.name, "bytes": st.st_size,
@@ -255,8 +260,8 @@ def create(shop_id: str, files: list[Path], dfrom: str = "", dto: str = "",
         "signature": sig,
         "note": note or "",
     }
-    _manifest_path(snap_dir).write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    from src import safeio
+    safeio.write_json(_manifest_path(snap_dir), manifest)
 
     _enforce_limit(shop_id)
     return {"ok": True, "id": snap_id, "dir": str(snap_dir), "reused": False,
@@ -303,6 +308,16 @@ def delete(shop_id: str, snap_id: str) -> bool:
     return not d.exists()
 
 
+def _zip_ok(p: Path) -> bool:
+    """zip 能不能完整读出来。用来区分「压好了」和「压到一半断电了」。"""
+    try:
+        import zipfile
+        with zipfile.ZipFile(p) as z:
+            return z.testzip() is None and bool(z.namelist())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _enforce_limit(shop_id: str) -> None:
     """超过 KEEP_RECENT 份就把最旧的归档成 zip。
 
@@ -322,11 +337,23 @@ def _enforce_limit(shop_id: str) -> None:
         dst = archive / f"{d.name}.zip"
         try:
             if dst.exists():
-                shutil.rmtree(d, ignore_errors=True)
+                if _zip_ok(dst):
+                    # 确认是完整包，才敢删源目录
+                    shutil.rmtree(d, ignore_errors=True)
+                    continue
+                # 残包（上次压到一半断电）：删掉重压。
+                # 以前这里只看「文件在不在」，残包也算数，于是直接 rmtree 源目录
+                # ——那份快照就永久没了。
+                dst.unlink()
+
+            # 先压到点开头的临时名，压完校验，再原子改名。
+            # 用 dst 本身当输出的话，断电留下的半成品文件名跟成品一模一样。
+            tmp_base = archive / f".{d.name}.building"
+            made = Path(shutil.make_archive(str(tmp_base), "zip", root_dir=d))
+            if not _zip_ok(made):
+                made.unlink(missing_ok=True)
                 continue
-            tmp = dst.with_suffix(".tmp")
-            made = shutil.make_archive(str(tmp.with_suffix("")), "zip", root_dir=d)
-            Path(made).rename(dst)
+            os.replace(made, dst)
             shutil.rmtree(d, ignore_errors=True)
         except (OSError, ValueError):
             continue

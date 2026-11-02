@@ -339,7 +339,8 @@ def write_result(name: str, content: str, out_dir: Path | None = None) -> Path:
             i += 1
     # build_csv 已经在首行写了 BOM；再按 utf-8-sig 写一遍就是两个 BOM，
     # Excel 打开表头会变成 "﻿﻿Product ID"，程序按表头认表也会认不出。
-    p.write_text(content.lstrip("\ufeff"), encoding="utf-8-sig")
+    from src import safeio
+    safeio.write_text(p, content.lstrip("\ufeff"), encoding="utf-8-sig")
     return p
 
 
@@ -355,7 +356,8 @@ def _dump_resp(task: str, idx: int, resp) -> None:
         d = paths.DATA / "capture"
         d.mkdir(parents=True, exist_ok=True)
         txt = json.dumps(resp, ensure_ascii=False)
-        (d / f"_last_{task}_step{idx}.json").write_text(txt[:400_000], encoding="utf-8")
+        from src import safeio
+        safeio.write_text(d / f"_last_{task}_step{idx}.json", txt[:400_000])
     except Exception:  # noqa: BLE001
         pass
 

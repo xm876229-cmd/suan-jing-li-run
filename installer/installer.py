@@ -97,6 +97,62 @@ def extract(zip_path: Path, dest: Path, log=print) -> int:
     return total
 
 
+# 这些目录是用户的数据，升级时一律不碰
+USER_DIRS = {"数据", "报表", "配置", "data", "output", "config"}
+
+
+def _rm_tree(p: Path) -> None:
+    import shutil
+    try:
+        shutil.rmtree(p, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _verify_staged(staging: Path) -> None:
+    """确认解压出来的是完整的一套，不是被截断的半套。"""
+    exe = staging / EXE_NAME
+    if not exe.exists():
+        raise RuntimeError(f"找不到 {EXE_NAME}")
+    if exe.stat().st_size < 1024 * 1024:
+        raise RuntimeError(f"{EXE_NAME} 大小异常（{exe.stat().st_size} 字节）")
+    inner = staging / "_internal"
+    if not inner.is_dir() or not any(inner.iterdir()):
+        raise RuntimeError("缺少 _internal 运行库")
+
+
+def _apply_staged(staging: Path, dest: Path) -> None:
+    """把解压好的文件搬进安装目录。
+
+    目录（_internal 这种）用「旧的改名 → 新的搬进来 → 删旧的」，
+    不在原地删，任何一刻断电都还能从 `_internal.old` 手工恢复。
+    用户数据目录（数据/报表/配置）压根不参与替换。
+    """
+    import shutil
+
+    for item in sorted(staging.iterdir()):
+        if item.name in USER_DIRS and (dest / item.name).exists():
+            continue
+        target = dest / item.name
+        if item.is_dir():
+            old = dest / f"{item.name}.old"
+            _rm_tree(old)
+            if target.exists():
+                target.rename(old)
+            shutil.move(str(item), str(target))
+            _rm_tree(old)
+        else:
+            if target.exists():
+                try:
+                    target.unlink()
+                except OSError:
+                    # 正被占用（程序还开着）：直接覆盖写
+                    target.write_bytes(item.read_bytes())
+                    item.unlink()
+                    continue
+            shutil.move(str(item), str(target))
+
+
 def main() -> int:
     # 中文 Windows 控制台是 GBK，打印到某些字符（如替换符、特殊符号）会抛
     # UnicodeEncodeError 直接崩掉。安装程序绝不能崩在半路，统一降级成 ?
@@ -155,12 +211,36 @@ def main() -> int:
             return 0
 
     print("\n[1/3] 解压程序文件…")
+    # 先解到临时目录，全部落地了再往安装目录搬。
+    # 为什么：直接往安装目录解，正好解到一半断电，那里就是一堆**新旧混着的半套文件**,
+    # 下次双击 exe 可能直接报「缺少 xxx.dll」——用户只会觉得「程序坏了」。
+    # 解到临时目录再搬，最坏情况是安装目录还是上一版（完整可用）。
+    staging = dest / f"_安装中_{int(__import__('time').time())}"
     try:
-        size = extract(zip_path, dest)
-        print(f"  完成，共 {human(size)}")
+        size = extract(zip_path, staging)
+        print(f"  解压完成，共 {human(size)}")
     except Exception as e:  # noqa: BLE001
         print(f"  解压失败：{e}")
+        _rm_tree(staging)
         return 1
+
+    try:
+        _verify_staged(staging)
+    except RuntimeError as e:
+        print(f"\n安装包不完整：{e}")
+        print("  请重新下载安装包再装一次（正在解压的文件不会覆盖现有安装）。")
+        _rm_tree(staging)
+        return 1
+
+    print("  正在替换程序文件…")
+    try:
+        _apply_staged(staging, dest)
+    except Exception as e:  # noqa: BLE001
+        print(f"\n替换文件失败：{e}")
+        print("  已经解压好的文件留在下面这个目录，可手工拷回去：")
+        print(f"    {staging}")
+        return 1
+    _rm_tree(staging)
 
     exe = dest / EXE_NAME
     if not exe.exists():

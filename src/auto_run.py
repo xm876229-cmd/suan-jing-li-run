@@ -469,17 +469,14 @@ def state_file() -> Path:
 
 
 def load_state() -> dict:
-    try:
-        raw = json.loads(state_file().read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+    from src import safeio
+    got = safeio.read_json(state_file(), default={})
+    return got if isinstance(got, dict) else {}
 
 
 def save_state(state: dict) -> None:
     try:
-        f = state_file()
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        from src import safeio
+        safeio.write_json(state_file(), state)
     except OSError:
         pass

@@ -189,7 +189,9 @@ def _serve_daemon() -> int:
         return tuple(out)
 
     last = _stamp()
+    fails = 0          # 连续启动失败次数：防止「端口被别的程序占着」时无限重启
     while True:
+        started_at = time.time()
         try:
             proc = subprocess.Popen(cmd, env=env, cwd=str(paths.ROOT),
                                     creationflags=_no_window_flags())
@@ -224,8 +226,27 @@ def _serve_daemon() -> int:
         if rc == 0:
             print("桥正常退出，守护者随之退出")
             return 0
-        print(f"桥意外退出（码 {rc}），2 秒后重新拉起")
-        time.sleep(2)
+
+        # 活过一分钟算「正常跑过」，之前的失败计数清零，
+        # 免得偶尔一次自重启把后面的重试额度用光
+        if time.time() - started_at > 60:
+            fails = 0
+
+        # 端口上已经有一个健康的桥：多半是另一个 jingli.exe 刚起来，
+        # 我这份守护再抢就是死循环（两个进程互踢）。
+        if bridge_running():
+            print("端口上已有另一个桥在正常服务，本守护退出（不会重复拉起）")
+            return 0
+
+        fails += 1
+        if fails >= 6:
+            print(f"桥连续 {fails} 次启动失败，停止重试。")
+            print("  常见原因：8765 被别的程序占用，或被杀毒软件拦了。")
+            print("  可以双击程序文件夹里的「修复-扩展连不上时点我.bat」看提示。")
+            return 1
+        wait = min(2 * fails, 30)
+        print(f"桥意外退出（码 {rc}），{wait} 秒后重新拉起（第 {fails} 次）")
+        time.sleep(wait)
 
 
 def _is_bridge_proc(pid: str) -> bool:
@@ -334,7 +355,7 @@ def _kill_bridge_on_port(port: int) -> list[str]:
 def cmd_bridge(argv: list[str]) -> int:
     """启动 / 重启取数桥（后台、无窗口）。
 
-    双击程序文件夹里的「启动桥.bat」会带 --force：
+    参数里带 --force（双击「修复-扩展连不上时点我.bat」就是走这条）：
       · 先关掉占用 8765 的旧桥（可能是别的目录启动的、读错配置的那个）
       · 再起「当前这个目录」的桥，保证连的是同一份数据
     不带 --force 时是幂等的：已经在跑就什么都不做。
@@ -345,7 +366,7 @@ def cmd_bridge(argv: list[str]) -> int:
 
     if bridge_running() and not force:
         print(f"取数桥已在运行（端口 {_port()}）")
-        print("  想强制换成本目录这个桥：双击「启动桥.bat」，或 jingli.exe bridge --force")
+        print("  想强制换成本目录这个桥：双击「修复-扩展连不上时点我.bat」，或 jingli.exe bridge --force")
         return 0
 
     if force:

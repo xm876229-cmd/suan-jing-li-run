@@ -579,7 +579,9 @@ document.querySelectorAll(".presets button").forEach((b) => {
 // ---------------- 定时设置 ----------------
 
 function renderSchedule(s) {
-  if (!s) return;
+  // 面板上的定时设置已撤掉（交给程序的「计划任务」），
+  // 这些元素不在时直接跳过，别让一个过期的回调把整个面板脚本搞停。
+  if (!s || !$("wOn")) return;
   $("wOn").checked = !!s.weekly?.enabled;
   $("wDay").value = String(s.weekly?.weekday ?? 1);
   $("wHour").value = s.weekly?.hour ?? 9;
@@ -591,6 +593,7 @@ function renderSchedule(s) {
 }
 
 function saveSchedule() {
+  if (!$("wOn")) return;
   const schedule = {
     weekly: { enabled: $("wOn").checked, weekday: +$("wDay").value, hour: +$("wHour").value },
     monthly: { enabled: $("mOn").checked, day: +$("mDay").value, hour: +$("mHour").value },

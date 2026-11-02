@@ -288,7 +288,7 @@ def build_app() -> Path:
 
     # 使用说明：放在最显眼的位置，新手不用翻目录就知道从哪开始
     _write_readme(out)
-    # 启动桥入口：程序文件夹里显眼的一个 bat，双击确保桥在跑（新手友好）
+    # 兜底入口：扩展报「连不上」时双击，关掉旧桥并重启本目录的桥
     _write_bridge_bat(out)
     # 关闭桥入口：要停掉桥时双击这个
     _write_stop_bat(out)

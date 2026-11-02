@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -1116,10 +1117,36 @@ def build_report(res: CalcResult, lines: list[OrderLine], out_path: Path,
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _save_atomic(target: Path) -> None:
+        """先写临时文件、落盘，再原子改名。
+
+        为什么要这么绕：openpyxl 是边算边往文件里写的，几万行明细要写十几秒。
+        正好写到一半断电/强杀，报表目录里就多一个**打不开的 xlsx**——
+        界面能看见、点「查看」报错，用户以为报表坏了。
+        写临时文件的话，断电只会留下一个 .saving 临时文件（启动时会清掉），
+        原报表要么是上一版完整的，要么完全不存在，不会出现半截。
+        """
+        tmp = target.with_name(f".{target.stem}.saving{target.suffix}")
+        try:
+            with tmp.open("wb") as f:
+                wb.save(f)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp, target)
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+
     # 目标文件可能正被 Excel/WPS 打开（Windows 下会独占锁），
     # 直接写会抛 PermissionError 让整次核算白跑。这里逐级换个名字再存。
     try:
-        wb.save(out_path)
+        _save_atomic(out_path)
         return out_path
     except PermissionError:
         pass
@@ -1127,7 +1154,7 @@ def build_report(res: CalcResult, lines: list[OrderLine], out_path: Path,
     for i in range(2, 10):
         alt = out_path.with_name(f"{out_path.stem}_v{i}{out_path.suffix}")
         try:
-            wb.save(alt)
+            _save_atomic(alt)
             print(f"提示：{out_path.name} 正被占用，已改存为 {alt.name}")
             return alt
         except PermissionError:

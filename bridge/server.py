@@ -49,20 +49,28 @@ _PENDING_LOCK = threading.Lock()
 # 多条计划各有各的保存位置，不能共用设置里那一个全局目录。
 _AUTO_DL: dict[str, str] = {}
 
+# 最近一次启动自检的结果（界面上「调试 → 自检与修复」显示这个）
+_SELFCHECK: dict = {}
+
+# 计划任务状态文件是「读-改-写」，后台巡检线程和界面保存会同时碰它。
+# 不加锁的话，两边各读一份、各写一遍：后写的把先写的抹掉，
+# 表现是「刚跑过的计划又跑了一次」或者「刚加的计划丢了上次时间」。
+_SCHED_STATE_LOCK = threading.Lock()
+
 
 def _pending_load() -> dict:
     try:
-        if PENDING_RUNS.is_file():
-            return json.loads(PENDING_RUNS.read_text(encoding="utf-8")) or {}
+        from src import safeio
+        got = safeio.read_json(PENDING_RUNS, default={})
+        return got if isinstance(got, dict) else {}
     except Exception:  # noqa: BLE001
-        pass
-    return {}
+        return {}
 
 
 def _pending_save(d: dict) -> None:
     try:
-        PENDING_RUNS.parent.mkdir(parents=True, exist_ok=True)
-        PENDING_RUNS.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+        from src import safeio
+        safeio.write_json(PENDING_RUNS, d, indent=1)
     except Exception:  # noqa: BLE001
         pass
 
@@ -126,7 +134,12 @@ def _report_out(store_name: str, dfrom: str, dto: str, suffix: str = "") -> Path
     safe = re.sub(r'[\\/:*?"<>|]', "_", store_name or "未命名店铺")
     out_dir = paths.OUTPUT / safe
     out_dir.mkdir(parents=True, exist_ok=True)
-    base = f"{store_name}_{dfrom or '全量'}_{dto or '全量'}{suffix}"
+    # 文件名也要洗一遍：店名是用户在后台起的，可能带 / : * 这类字符，
+    # 目录洗了、文件名没洗的话，Windows 上直接抛「文件名语法不正确」。
+    base = re.sub(r'[\\/:*?"<>|\r\n\t]', "_",
+                  f"{store_name}_{dfrom or '全量'}_{dto or '全量'}{suffix}").strip(" .")
+    if not base:
+        base = "净利报表"
     p = out_dir / f"{base}.xlsx"
     i = 2
     while p.exists():
@@ -171,14 +184,22 @@ def _pending_tick() -> None:
         store_name = str(info.get("store_name") or shop_id)
         dfrom = str(info.get("from") or "")
         dto = str(info.get("to") or "")
-        out = _report_out(store_name, dfrom, dto)
-        _append_log(f"[auto] 订单已到，自动补算：{store_name} {dfrom}~{dto}")
+        # 同一家店可能同时在「手动点运行」和「补算排队」——两边都调核算子进程，
+        # 会各写一份报表、互相抢映射主表。用同一把按店锁串起来，抢不到就下一分钟再说。
+        _lk = _run_lock_for(_canon_shop(shop_id))
+        if not _lk.acquire(blocking=False):
+            continue
         try:
-            ok, msg = _run_calc_cmd(_calc_cmd(shop_id, str(info.get("country") or ""),
-                                              dfrom, dto, out,
-                                              bool(info.get("with_formula"))))
-        except Exception as e:  # noqa: BLE001
-            ok, msg = False, str(e)
+            out = _report_out(store_name, dfrom, dto)
+            _append_log(f"[auto] 订单已到，自动补算：{store_name} {dfrom}~{dto}")
+            try:
+                ok, msg = _run_calc_cmd(_calc_cmd(shop_id, str(info.get("country") or ""),
+                                                  dfrom, dto, out,
+                                                  bool(info.get("with_formula"))))
+            except Exception as e:  # noqa: BLE001
+                ok, msg = False, str(e)
+        finally:
+            _lk.release()
         _pending_drop(key)
         if ok:
             _append_log(f"[auto] 补算完成：{out}")
@@ -204,8 +225,12 @@ _PENDING: list = []          # 待办队列：[{id, task, range, store, country,
 _PENDING_LOCK = threading.Lock()
 
 # 任务多久没被领走就作废。
-# 店一直离线的话，任务不该明天一开浏览器突然跑起来——那会更让人困惑。
+# 手动点的任务 30 分钟：那么久都没开浏览器，多半是忘了，跑起来反而奇怪。
+# 计划任务给 12 小时：它的承诺是「浏览器没开就排队，等它打开自动补」，
+#   只留 30 分钟的话，早上 9 点派的任务，你中午才开电脑就永远不跑了，
+#   界面上还显示「已执行」——这才是最坑的。
 _JOB_TTL_MS = 30 * 60 * 1000
+_AUTO_JOB_TTL_MS = 12 * 60 * 60 * 1000
 
 # 扩展心跳：shop_id → {at, shop_name, region, ver, running}
 # 用来回答界面上那句「这家店的浏览器开着没」。
@@ -303,6 +328,28 @@ _RUN_LOCKS: dict[str, threading.Lock] = {}
 _RUN_LOCKS_GUARD = threading.Lock()
 
 
+def _canon_shop(key: str) -> str:
+    """把「店铺名 / 目录名 / shop_id」统一成 shop_id，给锁和任务用。
+
+    为什么需要：核算入口可能收到三种写法——shop_id、配置里的别名、
+    数据目录名。锁按字符串开，同一家店用两种写法就是两把锁，
+    等于没锁（两个核算进程各写一份报表、互相抢映射表）。
+    """
+    k = (key or "").strip()
+    if not k:
+        return "_all"
+    try:
+        names = _store_dir_names()          # shop_id → 目录名
+    except Exception:  # noqa: BLE001
+        return k
+    if k in names:
+        return k
+    for sid, nm in names.items():
+        if nm == k:
+            return sid
+    return k
+
+
 def _run_lock_for(key: str) -> threading.Lock:
     k = (key or "").strip() or "_all"
     with _RUN_LOCKS_GUARD:
@@ -333,7 +380,12 @@ def _mirror_mapping_to_store(store: str, src) -> None:
         pass
 
 
+_LOG_APPENDS = 0
+_LOG_MAX_BYTES = 8 * 1024 * 1024
+
+
 def _append_log(msg: str) -> None:
+    global _LOG_APPENDS
     line = f"{datetime.now():%Y-%m-%d %H:%M:%S}  {msg}"
     TASK_LOG.append(line)
     if len(TASK_LOG) > 500:
@@ -344,6 +396,20 @@ def _append_log(msg: str) -> None:
             fh.write(line + "\n")
     except OSError:
         pass
+
+    # 长时间挂着跑（几周不关机）时，日志会一直长。启动时轮转过一次不够，
+    # 这里每 200 条看一眼，超过 8MB 就轮转。磁盘被日志占满之后
+    # 最典型的症状是「配置突然保存失败」，很难联想到日志。
+    _LOG_APPENDS += 1
+    if _LOG_APPENDS % 200 == 0:
+        try:
+            if LOG_FILE.stat().st_size > _LOG_MAX_BYTES:
+                old = LOG_FILE.with_name(LOG_FILE.name + ".1")
+                if old.exists():
+                    old.unlink()
+                LOG_FILE.rename(old)
+        except OSError:
+            pass
 
 
 def _cors(handler: BaseHTTPRequestHandler) -> None:
@@ -437,9 +503,8 @@ def rebuild_endpoints() -> dict:
         }
     data = {"updatedAt": datetime.now().isoformat(timespec="seconds"),
             "endpointCount": len(out), "endpoints": dict(sorted(out.items()))}
-    CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
-    (CAPTURE_DIR / "endpoints.json").write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    from src import safeio
+    safeio.write_json(CAPTURE_DIR / "endpoints.json", data)
     return data
 
 
@@ -476,9 +541,8 @@ def remember_store(shop_id: str, info: dict) -> None:
         "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     })
     try:
-        meta_file.parent.mkdir(parents=True, exist_ok=True)
-        meta_file.write_text(json.dumps(cur, ensure_ascii=False, indent=2) + "\n",
-                             encoding="utf-8")
+        from src import safeio
+        safeio.write_json(meta_file, cur)
     except OSError:
         pass
     _retitle_store(meta_file.parent, sid)
@@ -575,9 +639,8 @@ def rename_store(shop_id: str, alias: str) -> dict:
         hit["name"] = alias or hit.get("name") or sid
 
     try:
-        paths.STORES_FILE.parent.mkdir(parents=True, exist_ok=True)
-        paths.STORES_FILE.write_text(
-            json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        from src import safeio
+        safeio.write_json(paths.STORES_FILE, cfg)
     except OSError as e:
         return {"ok": False, "error": f"写入 stores.json 失败：{e}"}
 
@@ -606,8 +669,8 @@ def remove_store(shop_id: str) -> dict:
                 and str(x.get("zhanfu_browser_id") or "") != sid]
         if len(keep) != len(stores):
             cfg["stores"] = keep
-            paths.STORES_FILE.write_text(
-                json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            from src import safeio
+            safeio.write_json(paths.STORES_FILE, cfg)
             removed_cfg = True
     except Exception:  # noqa: BLE001
         pass
@@ -785,6 +848,8 @@ class Handler(BaseHTTPRequestHandler):
                          "extVersion": _ext})
         elif self.path.startswith("/api/schedules"):
             self._get_schedules()
+        elif self.path.startswith("/api/selfcheck"):
+            _json(self, {"ok": True, "last": _SELFCHECK})
         elif self.path.startswith("/endpoints"):
             _json(self, rebuild_endpoints())
         elif self.path.startswith("/log"):
@@ -805,7 +870,8 @@ class Handler(BaseHTTPRequestHandler):
                 for j in _PENDING:
                     if not isinstance(j, dict):
                         continue
-                    if now_ms - int(j.get("at") or 0) > _JOB_TTL_MS:
+                    ttl = _AUTO_JOB_TTL_MS if j.get("auto") else _JOB_TTL_MS
+                    if now_ms - int(j.get("at") or 0) > ttl:
                         dropped += 1
                         continue
                     alive.append(j)
@@ -817,7 +883,8 @@ class Handler(BaseHTTPRequestHandler):
                     job = _PENDING.pop(i)
                     break
             if dropped:
-                _append_log(f"[pending] 清掉 {dropped} 个超过 30 分钟没人领的任务")
+                _append_log(f"[pending] 清掉 {dropped} 个超时没人领的任务"
+                            f"（计划任务 12 小时有效，手动任务 30 分钟）")
             _json(self, {"ok": True, "job": job, "shop": want})
         elif self.path.startswith("/api/live"):
             # 界面轮询这一个口子就够了：谁在线、跑到哪一步、队列里还压着几个。
@@ -936,7 +1003,8 @@ class Handler(BaseHTTPRequestHandler):
                 out_dir = _P(td).expanduser() if td else _paths.OUTPUT
                 out = out_dir / "成本表导入模板.xlsx"
                 out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_bytes(data)
+                from src import safeio
+                safeio.write_bytes(out, data)
                 _json(self, {"ok": True, "path": str(out)})
             except Exception as e:  # noqa: BLE001
                 _json(self, {"ok": False, "error": f"生成模板失败：{e}"}, 500)
@@ -1112,7 +1180,8 @@ class Handler(BaseHTTPRequestHandler):
                         old = {}
                 old.update({k: v for k, v in prof.items() if v not in (None, "")})
                 old["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                f.write_text(json.dumps(old, ensure_ascii=False, indent=2), encoding="utf-8")
+                from src import safeio
+                safeio.write_json(f, old)
                 _json(self, {"ok": True, "path": str(f)})
             except Exception as e:  # noqa: BLE001
                 _json(self, {"ok": False, "error": f"档案保存失败：{e}"}, 500)
@@ -1132,6 +1201,18 @@ class Handler(BaseHTTPRequestHandler):
             self._post_rename_store()
         elif self.path.startswith("/identify"):
             self._post_identify()
+        elif self.path.startswith("/api/selfcheck"):
+            # 手动点「体检一次」：做完整版（含报表体检），慢一点但查得全
+            try:
+                from src import selfcheck
+                rep = selfcheck.run(verbose=True, check_crash=False)
+                _SELFCHECK.clear()
+                _SELFCHECK.update(rep)
+                for a in rep.get("actions") or []:
+                    _append_log(f"[自检] {a}")
+                _json(self, {"ok": True, "last": _SELFCHECK})
+            except Exception as e:  # noqa: BLE001
+                _json(self, {"ok": False, "error": f"自检失败：{e}"}, 500)
         elif self.path.startswith("/api/schedules/preview"):
             self._post_schedules_preview()
         elif self.path.startswith("/api/schedules/save"):
@@ -1294,7 +1375,11 @@ class Handler(BaseHTTPRequestHandler):
         # 加纳秒后缀：两家店同时回传时同一毫秒内会撞名，撞了就会互相覆盖
         tmp_path = tmp_dir / f"upload-{time.time_ns()}-{safe}"
         try:
-            tmp_path.write_bytes(data)
+            # 必须带 fsync：只 write 不落盘的话，断电重启后这个临时文件
+            # 可能「名字在、内容是空」，被挪进 inbox 就是一张空表——
+            # 算出来会说「该时段没有订单」，其实是数据根本没写进去。
+            from src import safeio
+            safeio.write_bytes(tmp_path, data, backup=False)
         except OSError as e:
             _json(self, {"ok": False, "error": f"写文件失败：{e}"}, 500)
             return
@@ -1914,33 +1999,34 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": "缺少 rules"}, 400)
             return
 
-        state = auto_run.load_state()
-        clean = []
-        now = datetime.now()
-        keep_keys = ("id", "name", "enabled", "freq", "time", "day", "weekday",
-                     "period", "offset", "cut", "cut_day", "stores",
-                     "download_dir", "with_formula")
-        for i, raw in enumerate(raw_rules):
-            if not isinstance(raw, dict):
-                continue
-            # 只存规则本身：界面上那些 next / range_label 是算出来的，
-            # 存进配置只会越积越大，还会跟真正重算出来的值打架
-            r = auto_run.normalize_rule({k: raw.get(k) for k in keep_keys if k in raw})
-            if not r.get("id"):
-                r["id"] = f"r{int(now.timestamp())}_{i + 1}"
-            clean.append(r)
-            # 新规则先记一个「刚处理过」，免得刚建就被判成漏跑
-            if r["id"] not in state:
-                due = auto_run.last_due(r, now)
-                state[r["id"]] = {"mark": (due or now).strftime("%Y-%m-%d %H:%M"),
-                                  "seeded": True}
+        with _SCHED_STATE_LOCK:
+            state = auto_run.load_state()
+            clean = []
+            now = datetime.now()
+            keep_keys = ("id", "name", "enabled", "freq", "time", "day", "weekday",
+                         "period", "offset", "cut", "cut_day", "stores",
+                         "download_dir", "with_formula")
+            for i, raw in enumerate(raw_rules):
+                if not isinstance(raw, dict):
+                    continue
+                # 只存规则本身：界面上那些 next / range_label 是算出来的，
+                # 存进配置只会越积越大，还会跟真正重算出来的值打架
+                r = auto_run.normalize_rule({k: raw.get(k) for k in keep_keys if k in raw})
+                if not r.get("id"):
+                    r["id"] = f"r{int(now.timestamp())}_{i + 1}"
+                clean.append(r)
+                # 新规则先记一个「刚处理过」，免得刚建就被判成漏跑
+                if r["id"] not in state:
+                    due = auto_run.last_due(r, now)
+                    state[r["id"]] = {"mark": (due or now).strftime("%Y-%m-%d %H:%M"),
+                                      "seeded": True}
 
-        # 删掉的规则把状态一起清掉，省得以后同 id 复活带出旧记录
-        keep = {r["id"] for r in clean}
-        for rid in list(state):
-            if rid not in keep:
-                state.pop(rid, None)
-        auto_run.save_state(state)
+            # 删掉的规则把状态一起清掉，省得以后同 id 复活带出旧记录
+            keep = {r["id"] for r in clean}
+            for rid in list(state):
+                if rid not in keep:
+                    state.pop(rid, None)
+            auto_run.save_state(state)
 
         try:
             cfg_settings.save({"schedules": clean})
@@ -1966,21 +2052,22 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": "没找到这条计划"}, 404)
             return
 
-        done = []
-        state = auto_run.load_state()
-        for r in rules:
-            res = _dispatch_rule(r, datetime.now())
-            # 只记「显示用的上次」，不动 mark：手动跑一次不等于这次定时已经跑过，
-            # 到点该跑还得跑。
-            st = dict(state.get(r["id"]) or {})
-            st["last"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-            st["at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st["range"] = res["range_label"]
-            st["stores"] = len(res["ids"])
-            state[r["id"]] = st
-            done.append({"id": r["id"], "name": r.get("name"),
-                         "stores": len(res["ids"]), "range": res["range_label"]})
-        auto_run.save_state(state)
+        with _SCHED_STATE_LOCK:
+            done = []
+            state = auto_run.load_state()
+            for r in rules:
+                res = _dispatch_rule(r, datetime.now())
+                # 只记「显示用的上次」，不动 mark：手动跑一次不等于这次定时已经跑过，
+                # 到点该跑还得跑。
+                st = dict(state.get(r["id"]) or {})
+                st["last"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                st["at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st["range"] = res["range_label"]
+                st["stores"] = len(res["ids"])
+                state[r["id"]] = st
+                done.append({"id": r["id"], "name": r.get("name"),
+                             "stores": len(res["ids"]), "range": res["range_label"]})
+            auto_run.save_state(state)
         _json(self, {"ok": True, "ran": done,
                      "note": f"已派发 {sum(d['stores'] for d in done)} 个任务"})
 
@@ -2000,31 +2087,32 @@ class Handler(BaseHTTPRequestHandler):
         want = payload.get("ids")
         want = [str(x) for x in want] if isinstance(want, list) and want else None
 
-        state = auto_run.load_state()
-        done, skipped = [], []
-        for r in _rules_now():
-            rid = r["id"]
-            st = dict(state.get(rid) or {})
-            at = _parse_stamp(st.get("missed_at"))
-            if not at:
-                continue
-            if want and rid not in want:
-                continue
-            if not r.get("enabled"):
-                skipped.append({"id": rid, "name": r.get("name"), "why": "计划已关闭"})
-                continue
-            res = _dispatch_rule(r, at)
-            st.pop("missed_at", None)
-            st.pop("missed_name", None)
-            st["mark"] = at.strftime("%Y-%m-%d %H:%M")
-            st["last"] = at.strftime("%Y-%m-%d %H:%M")
-            st["at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st["range"] = res["range_label"]
-            st["stores"] = len(res["ids"])
-            state[rid] = st
-            done.append({"id": rid, "name": r.get("name"),
-                         "range": res["range_label"], "stores": len(res["ids"])})
-        auto_run.save_state(state)
+        with _SCHED_STATE_LOCK:
+            state = auto_run.load_state()
+            done, skipped = [], []
+            for r in _rules_now():
+                rid = r["id"]
+                st = dict(state.get(rid) or {})
+                at = _parse_stamp(st.get("missed_at"))
+                if not at:
+                    continue
+                if want and rid not in want:
+                    continue
+                if not r.get("enabled"):
+                    skipped.append({"id": rid, "name": r.get("name"), "why": "计划已关闭"})
+                    continue
+                res = _dispatch_rule(r, at)
+                st.pop("missed_at", None)
+                st.pop("missed_name", None)
+                st["mark"] = at.strftime("%Y-%m-%d %H:%M")
+                st["last"] = at.strftime("%Y-%m-%d %H:%M")
+                st["at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st["range"] = res["range_label"]
+                st["stores"] = len(res["ids"])
+                state[rid] = st
+                done.append({"id": rid, "name": r.get("name"),
+                             "range": res["range_label"], "stores": len(res["ids"])})
+            auto_run.save_state(state)
 
         if not done and not skipped:
             _json(self, {"ok": True, "ran": [], "note": "没有需要补跑的计划"})
@@ -2043,8 +2131,22 @@ class Handler(BaseHTTPRequestHandler):
 
         from src import auto_run, settings as cfg_settings
 
-        cfg = (cfg_settings.load().get("auto") or {})
         now = datetime.now()
+
+        # 新版本的计划任务和旧版本的「自动运行」是两套配置，同时生效会重复跑。
+        # 有启用的计划就按第一条跑（等价于在计划页点「立即跑」），
+        # 没有才退回旧配置。
+        _rules = [r for r in _rules_now() if r.get("enabled")]
+        if _rules:
+            res = _dispatch_rule(_rules[0], now)
+            _json(self, {"ok": True, "range": res["range"], "count": len(res["ids"]),
+                         "offline": [n for s2, n in _store_dir_names().items()
+                                     if s2 in res["ids"] and not _online_now(s2)],
+                         "note": f"已按计划「{_rules[0].get('name')}」"
+                                 f"派给 {len(res['ids'])} 家店（{res['range_label']}）"})
+            return
+
+        cfg = (cfg_settings.load().get("auto") or {})
         rng = auto_run.build_range(auto_run.quick_rule(str(cfg.get("range") or "last_month")), now)
         stores = [str(s) for s in (cfg.get("stores") or []) if str(s).strip()]
         # 一家店一个任务、store 写死：以前只派一个、store 留空，
@@ -2276,7 +2378,7 @@ class Handler(BaseHTTPRequestHandler):
                 shop_code = str(_meta.get("shop_code") or shop_code)
 
             # 一家店一把锁：两家店可以同时算，同一家店不能重复算
-            _lk = _run_lock_for(shop_id or store or "_all")
+            _lk = _run_lock_for(_canon_shop(shop_id or store))
             _got_lock = _lk.acquire(blocking=False)
             if not _got_lock:
                 _lk = None
@@ -2434,8 +2536,8 @@ class Handler(BaseHTTPRequestHandler):
             # 带不带公式：手动跑用界面上的勾选；计划任务带自己的开关
             _wf = payload.get("with_formula")
             if _wf is None:
-                _wf = ((cfg_settings.load().get("auto") or {}).get("with_formula")
-                       if payload.get("auto") else stg.get("with_formula"))
+                # 计划里没指定 = 跟随「设置 → 报表」，不再去读旧 auto 的开关
+                _wf = stg.get("with_formula")
             if _wf:
                 cmd += ["--with-formula"]
             if dfrom:
@@ -2546,9 +2648,14 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     _dl = stg.get("download_dir") or ""
                     if payload.get("auto"):
-                        sid = shop_id or store
-                        _dl = _AUTO_DL.get(sid) or \
-                            (cfg_settings.load().get("auto") or {}).get("download_dir") or _dl
+                        # 计划任务派下来的：以那条计划为准（空 = 只留程序目录）。
+                        # 只有「没有登记过」时才退回旧配置，免得旧 auto 的目录
+                        # 被新计划悄悄继承，报表跑进一个你早就不用的文件夹。
+                        _sid = _canon_shop(shop_id or store)
+                        if _sid in _AUTO_DL:
+                            _dl = _AUTO_DL[_sid]
+                        else:
+                            _dl = (cfg_settings.load().get("auto") or {}).get("download_dir") or _dl
                     copied = cfg_settings.copy_to_download_dir(out, _dl)
                 except Exception:  # noqa: BLE001
                     copied = None
@@ -2568,6 +2675,9 @@ class Handler(BaseHTTPRequestHandler):
                     brief = "这个日期区间内没有订单，换个区间再试"
                 elif "没有解析出任何商品" in tail:
                     brief = "没有解析出商品：检查商品 SKU 表是否取到"
+                elif "读不了「" in tail:
+                    brief = ("有表格读不出来：多半是那个文件正在 Excel/WPS 里开着。"
+                             "关掉它再点一次运行")
                 else:
                     brief = tail or "核算失败"
                 _append_log(f"[run] 失败：{brief.splitlines()[-1] if brief else 'unknown'}")
@@ -2763,10 +2873,11 @@ def _dispatch_rule(rule: dict, when: datetime | None = None) -> dict:
     dl = str(rule.get("download_dir") or "")
     jobs = []
     for sid in ids:
-        if dl:
-            # 核算那一步的报表复制目录：按店记着，_post_run 里取。
-            # 不走设置里的全局 auto.download_dir，多条计划各有各的去处。
-            _AUTO_DL[sid] = dl
+        # 核算那一步的报表复制目录：按店记着，_post_run 里取。
+        # 不走设置里的全局 auto.download_dir，多条计划各有各的去处。
+        # 空值也要写：否则上一条计划留下的目录会被下一条「继承」，
+        # 报表莫名其妙跑到别的文件夹里。
+        _AUTO_DL[sid] = dl
         job = _enqueue(sid, rng, auto=True, with_formula=rule.get("with_formula"))
         jobs.append(job["id"])
 
@@ -2815,6 +2926,7 @@ def _schedule_runner() -> None:
             rules = _rules_now()
             if rules:
                 now = datetime.now()
+                _SCHED_STATE_LOCK.acquire()
                 state = auto_run.load_state()
                 changed = False
                 for r in rules:
@@ -2872,7 +2984,12 @@ def _schedule_runner() -> None:
 
                 if changed:
                     auto_run.save_state(state)
+                _SCHED_STATE_LOCK.release()
         except Exception as e:  # noqa: BLE001
+            try:
+                _SCHED_STATE_LOCK.release()
+            except RuntimeError:
+                pass
             print(f"[计划] 检查出错（忽略）：{e}", flush=True)
         _t.sleep(20.0)
 
@@ -2905,9 +3022,30 @@ def _sync_extension_copies() -> None:
 
 
 def main() -> int:
+    # 自检要放在接日志之前：它会把过大的日志改名轮转，
+    # 先打开的话文件被占用，Windows 上改名会失败。
+    try:
+        from src import selfcheck
+        _SELFCHECK.update(selfcheck.run())
+    except Exception as e:  # noqa: BLE001
+        _SELFCHECK.update({"ok": False, "error": f"自检跳过：{e}", "actions": []})
+
     _setup_log_file()
     _sync_extension_copies()
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+
+    if _SELFCHECK.get("crashed"):
+        # 界面上已经有一条横幅说这件事了，这里只写日志，不重复塞进 actions
+        print("[自检] 上次没有正常退出（断电/强杀），已做完整检查")
+        _append_log("[自检] 上次没有正常退出（断电/强杀），已做完整检查")
+    for _a in _SELFCHECK.get("actions") or []:
+        print(f"[自检] {_a}")
+        _append_log(f"[自检] {_a}")
+    try:
+        from src import selfcheck
+        selfcheck.mark_running()
+    except Exception:  # noqa: BLE001
+        pass
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"本地桥已启动：http://127.0.0.1:{PORT}")
     print(f"抓包写入：{CAPTURE_DIR}")
@@ -2930,6 +3068,11 @@ def main() -> int:
         print("\n已停止")
     finally:
         srv.server_close()
+        try:
+            from src import selfcheck
+            selfcheck.clear_running()
+        except Exception:  # noqa: BLE001
+            pass
     return 0
 
 

@@ -33,16 +33,15 @@ TIMEOUT = 8
 
 
 def _read_cache() -> dict:
-    try:
-        return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    from src import safeio
+    got = safeio.read_json(CACHE_FILE, default={})
+    return got if isinstance(got, dict) else {}
 
 
 def _write_cache(obj: dict) -> None:
     try:
-        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_FILE.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+        from src import safeio
+        safeio.write_json(CACHE_FILE, obj)
     except OSError:
         pass
 

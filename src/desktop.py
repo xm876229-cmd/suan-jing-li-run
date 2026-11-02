@@ -335,7 +335,25 @@ def main() -> int:
         js_api=NativeApi(),
     )
     # 关窗口就退出界面进程；桥是独立子进程，会继续在后台跑
-    webview.start(_boot, win)
+    try:
+        webview.start(_boot, win)
+    except Exception as e:  # noqa: BLE001
+        # WebView2 起不来（运行时缺失、被杀软拦、系统组件损坏）时，
+        # 不能让用户对着一个闪一下就没的窗口发呆。退回浏览器打开，
+        # 功能一模一样，只是没有独立窗口。
+        if ensure_bridge():
+            import webbrowser
+            try:
+                webbrowser.open(f"http://127.0.0.1:{_port()}/")
+            except Exception:  # noqa: BLE001
+                pass
+            _fatal(
+                "窗口组件没能启动，已经改用浏览器打开。\n\n"
+                f"如果浏览器也没打开，手动访问：http://127.0.0.1:{_port()}/\n\n"
+                f"（技术原因：{e}）"
+            )
+            return 0
+        return _fatal(f"界面和取数服务都没起来：{e}")
     return 0
 
 

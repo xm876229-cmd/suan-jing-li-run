@@ -27,6 +27,13 @@
 - 一家店一个浏览器、各装一份扩展；核算锁按 shop_id 分开，可并行
 - 店铺名以「浏览器实际登录的店铺」为准，弹窗选错不会串店
 
+## 计划任务（0.24.1）
+- 规则存在 `配置/settings.json` 的 `schedules[]`；状态在 `数据/schedule_state.json`
+- 一条规则 = 触发(每天/每周几/每月几号+时间) + 周期(day/week/month/last7/all) + 偏移(0本期) + 截到哪天(end/today/day)
+- 派单统一走 `_dispatch_rule()` → `_enqueue()` → `auto_run.normalize_range()`
+- **派单区间必须补齐 startDate/to/endDateExclusive/startMs/endMs**：缺了订单会按 undefined 查，报「该时段没有订单」
+- 漏跑容差 600 秒；补跑用「当时该跑的时刻」算区间，不是用今天
+
 ## 约定
 - CHANGELOG.md 用 Python 写，别用 heredoc/regex
 - 扩展改完要升 `manifest.json` 版本号，否则刷新后看不出变没变

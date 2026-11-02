@@ -310,12 +310,40 @@ def merge_file(path: Path, master: dict[str, dict], events: list[dict], now: str
     return added, rebound, same
 
 
+def _pid_alive(pid: int) -> bool:
+    """这个进程还活着吗。用来判断锁是不是「上一个进程断电留下的尸体」。"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            h = k32.OpenProcess(0x1000, False, int(pid))   # QUERY_LIMITED_INFORMATION
+            if not h:
+                return False
+            code = ctypes.c_ulong()
+            ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+            k32.CloseHandle(h)
+            return bool(ok) and code.value == 259          # STILL_ACTIVE
+        except Exception:  # noqa: BLE001
+            return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+
+
 def _acquire_merge_lock(timeout: float = 90.0):
     """跨进程互斥：两家店同时核算时，主表只能由一个进程写。
 
     没有锁的时候，两个核算子进程会各读一份主表、各写一遍——
     后写的把先写的覆盖掉（少一批 SKU），或者读到写了一半的文件（整个表废掉）。
-    锁文件放在 mapping 目录里，进程崩了超过 10 分钟自动作废，不会永远卡住。
+
+    锁文件里写着持有者的 PID。**断电/强杀之后锁文件会留在磁盘上**，
+    以前只按「超过 10 分钟」判死亡，意味着断电重启后第一轮核算要干等，
+    甚至直接放弃加锁。现在先看 PID：进程不在了立刻接管；
+    读不出 PID 才退回按时间判断（3 分钟）。
     """
     lock = MAPPING_DIR / ".merge.lock"
     try:
@@ -326,16 +354,24 @@ def _acquire_merge_lock(timeout: float = 90.0):
     while True:
         try:
             fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
+            os.write(fd, f"{os.getpid()} {time.time():.0f}".encode())
             os.close(fd)
             return lock
         except FileExistsError:
+            stale = False
             try:
-                if time.time() - lock.stat().st_mtime > 600:
+                raw = lock.read_text(encoding="utf-8", errors="ignore").strip()
+                pid = int(raw.split()[0]) if raw else 0
+                age = time.time() - lock.stat().st_mtime
+                stale = (pid > 0 and not _pid_alive(pid)) or age > 180
+            except (OSError, ValueError):
+                stale = False
+            if stale:
+                try:
                     lock.unlink()
                     continue
-            except OSError:
-                pass
+                except OSError:
+                    pass
             if time.time() - t0 > timeout:
                 return None
             time.sleep(0.3)
