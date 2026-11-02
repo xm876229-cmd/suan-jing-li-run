@@ -385,11 +385,14 @@ def folder_name(name: str, fallback: str = "未识别店铺") -> str:
     return _safe_folder(name, fallback)
 
 
-def store_display_name(shop_id: str) -> str:
+def store_pretty_name(shop_id: str) -> str:
     """这家店对外该叫什么：stores.json 里的别名 → 平台店名 → 店铺 ID。
 
     别名优先，是因为用户会在程序里把店改成自己认得的名（「马来一号店」），
     平台原名（「Party Pop Hub」）反而认不出来。
+
+    注意跟 `store_display_name()` 的区别：那个是**目录名**（报表分文件夹用），
+    这个是**给人看的名字**（新建目录、提示语用）。
     """
     sid = (shop_id or "").strip()
     if not sid:
@@ -483,6 +486,39 @@ def store_kind_dir(shop_id: str, kind: str) -> Path:
     缺哪一类，目录就是空的，不用去翻文件名猜。
     """
     return store_dir(shop_id) / kind_dirname(kind)
+
+
+def store_index() -> list[dict]:
+    """所有认出来的店铺，按店名排好序（稳定顺序）。
+
+    为什么要统一排序：
+        驾驶舱和手动核算都是「一店一张卡」。以前两个页面各自用
+        `iterdir()` 的原始顺序，还按「有没有数据」往前挪，
+        结果在手动核算里导完一批表，卡片就跳到第一位——人刚记住的位置没了。
+        现在两边都用这一个函数，顺序只跟店名有关，跟数据、时间、导入次数都无关。
+
+    返回：[{shop_id, dir, name, meta}]，name 是目录名（也是报表文件夹名）。
+    """
+    out: list[dict] = []
+    try:
+        dirs = [d for d in STORES_ROOT.iterdir() if d.is_dir()]
+    except OSError:
+        return out
+    for d in dirs:
+        meta_file = d / "meta.json"
+        if not meta_file.is_file():
+            continue
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        sid = str((meta or {}).get("shop_id") or "").strip()
+        if not sid:
+            continue
+        out.append({"shop_id": sid, "dir": d, "name": d.name, "meta": meta})
+    # casefold 让大小写不影响顺序；再用原名兜底，保证同一次运行里绝对稳定
+    out.sort(key=lambda x: (x["name"].casefold(), x["name"], x["shop_id"]))
+    return out
 
 
 # 报表分两个房间：报表/自动/<店名>/ 和 报表/手动/<店名>/

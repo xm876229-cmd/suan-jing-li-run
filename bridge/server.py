@@ -371,34 +371,17 @@ def _enqueue(store: str, rng: dict, *, task: str = "all", auto: bool = False,
 
 
 def _known_store_ids() -> list[str]:
-    """磁盘上已经认出过的店铺（有 meta.json 的那些）。"""
-    out: list[str] = []
-    try:
-        for d in paths.STORES_ROOT.iterdir():
-            if d.is_dir() and (d / "meta.json").is_file():
-                out.append(d.name)
-    except Exception:  # noqa: BLE001
-        pass
-    return out
+    """磁盘上已经认出过的店铺目录名，按店名排序（顺序稳定）。"""
+    return [it["name"] for it in paths.store_index()]
 
 
 def _store_dir_names() -> dict[str, str]:
-    """shop_id → 目录名。派任务时前端可能传 id 也可能传店名，这里统一一下。"""
-    out: dict[str, str] = {}
-    try:
-        for d in paths.STORES_ROOT.iterdir():
-            meta = d / "meta.json"
-            if not (d.is_dir() and meta.is_file()):
-                continue
-            try:
-                sid = str(json.loads(meta.read_text(encoding="utf-8")).get("shop_id") or "")
-            except Exception:  # noqa: BLE001
-                sid = ""
-            if sid:
-                out[sid] = d.name
-    except Exception:  # noqa: BLE001
-        pass
-    return out
+    """shop_id → 目录名。派任务时前端可能传 id 也可能传店名，这里统一一下。
+
+    顺序取自 `paths.store_index()`：驾驶舱卡片墙就是按这个 dict 的顺序排的，
+    排好序才不会因为某家店刚跑过一次就跳位置。
+    """
+    return {it["shop_id"]: it["name"] for it in paths.store_index()}
 
 # 核算锁按店铺分开：两家店各开一个浏览器同时点运行是正常用法，
 # 用一把全局锁会让第二家直接报「已有核算任务在进行」——多店铺等于用不了。
@@ -655,7 +638,7 @@ def _retitle_store(cur, shop_id: str) -> None:
     已经有数据的店一律不动——正在跑的核算读到一半路径变了，比目录难看严重得多。
     """
     try:
-        want = paths.store_display_name(shop_id)
+        want = paths.store_pretty_name(shop_id)
     except Exception:  # noqa: BLE001
         return
     safe = re.sub(r'[\\/:*?"<>|]', "_", want or "").strip(" .")

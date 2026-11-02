@@ -70,21 +70,13 @@ def _meta(shop_id: str) -> dict:
 
 
 def known_keys() -> list[str]:
-    """有档案的店铺 + 临时抽屉。别的 key 一律不认，免得建出一堆野目录。"""
+    """有档案的店铺 + 临时抽屉。别的 key 一律不认，免得建出一堆野目录。
+
+    顺序跟驾驶舱一致（`paths.store_index()`，按店名排），
+    这样两个页面的卡片一一对应，找同一家店不用重新找。
+    """
     out: list[str] = [TMP_KEY]
-    try:
-        for d in paths.STORES_ROOT.iterdir():
-            meta = d / "meta.json"
-            if not (d.is_dir() and meta.is_file()):
-                continue
-            try:
-                sid = str(json.loads(meta.read_text(encoding="utf-8")).get("shop_id") or "")
-            except Exception:  # noqa: BLE001
-                sid = ""
-            if sid:
-                out.append(sid)
-    except OSError:
-        pass
+    out.extend(it["shop_id"] for it in paths.store_index())
     return out
 
 
@@ -191,7 +183,11 @@ def describe(key: str) -> dict:
 
 
 def list_spaces() -> list[dict]:
-    """所有店铺 + 临时抽屉。有手动数据的排前面，其余按店名。"""
+    """所有店铺的抽屉，顺序固定按店名（跟驾驶舱一致）。
+
+    以前是「有手动数据的排前面」——导完一批表，那张卡就跳到第一位，
+    人刚记住的位置就没了。现在顺序只跟店名有关，导入、计算都不动位置。
+    """
     out: list[dict] = []
     for k in known_keys():
         if k == TMP_KEY:
@@ -199,7 +195,6 @@ def list_spaces() -> list[dict]:
         item = describe(k)
         if item:
             out.append(item)
-    out.sort(key=lambda x: (0 if x["count"] else 1, x["name"] or x["key"]))
     # 只列店铺：手动核算在界面上就是「这家店的手动数据」。
     # 临时抽屉（不属于任何店）先不摆出来，接口还留着，以后要加再说。
     return out
