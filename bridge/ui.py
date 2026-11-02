@@ -105,12 +105,27 @@ def _all_reports() -> list[dict]:
                 continue
             st = p.stat()
             rel = p.relative_to(paths.OUTPUT)
+            parts = rel.parts
+            # 两个「房间」：报表\自动\<店名>\ 与 报表\手动\<店名>\。
+            # 用目录区分而不是文件名后缀——名字可以改，目录结构不会骗人。
+            # 同时兼容两种老布局：报表\<店名>\（自动）、报表\<店名>\手动\（手动）。
+            p0 = parts[0] if parts else ""
+            if p0 in ("自动", "手动"):
+                room = "manual" if p0 == "手动" else "auto"
+                store = parts[1] if len(parts) > 2 else ""
+            elif p0 in ("临时手动", "手动核算"):
+                room = "manual"
+                store = parts[1] if len(parts) > 2 else "未指定"
+            else:
+                room = "manual" if "手动" in parts[:-1] else "auto"
+                store = p0 if len(parts) > 1 else ""
             out.append({
                 "name": p.name,
                 # rel：相对 output 目录的完整路径。不同店的报表可能重名，
                 # 勾选下载时靠它区分，只靠文件名会张冠李戴。
                 "rel": str(rel).replace("\\", "/"),
-                "group": str(rel.parent) if str(rel.parent) != "." else "",
+                "group": store if store and store != p.name else "",
+                "room": room,
                 "size": st.st_size,
                 "mtime": st.st_mtime,
             })
@@ -148,6 +163,7 @@ def reports() -> dict:
             "name": r["name"],
             "rel": r.get("rel") or r["name"],
             "group": r["group"],
+            "room": r.get("room") or "auto",
             "size_mb": round(r["size"] / 1048576, 2),
             "at": datetime.fromtimestamp(r["mtime"]).strftime("%Y-%m-%d %H:%M"),
             "stamp": int(r["mtime"]),
@@ -779,6 +795,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .sc-date input{font:inherit;font-size:11.5px;padding:4px 6px;width:104px;
     border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--text)}
 
+  .mn-link{margin-top:6px;font-size:12.5px;color:var(--accent);cursor:pointer;user-select:none}
+  .mn-link:hover{text-decoration:underline}
   .sc-empty{padding:50px 20px;text-align:center;color:var(--text-3);font-size:13px;
     border:1px dashed var(--line);border-radius:var(--radius);grid-column:1/-1}
 
@@ -910,12 +928,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <rect x="3" y="13.5" width="7.5" height="7.5" rx="2.2"/>
           <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2.2"/>
         </svg><span>驾驶舱</span></a>
-      <a href="#/run" data-view="run">
+      <a href="#/manual" data-view="manual">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
              stroke-linecap="round" stroke-linejoin="round">
-          <path d="M20.2 12a8.2 8.2 0 11-2.6-6"/>
-          <path d="M20.4 4.4v4.2h-4.2"/>
-        </svg><span>重新计算</span></a>
+          <rect x="3.2" y="4.2" width="17.6" height="15.6" rx="2.6"/>
+          <path d="M3.2 9.4h17.6M9.2 9.4v10.4M15.4 9.4v10.4"/>
+        </svg><span>手动核算</span></a>
       <a href="#/plan" data-view="plan">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
              stroke-linecap="round" stroke-linejoin="round">
@@ -936,12 +954,6 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <path d="M12 3v11"/><path d="M7.6 10.4L12 14.8l4.4-4.4"/>
           <path d="M4 16v3.4A1.6 1.6 0 005.6 21h12.8a1.6 1.6 0 001.6-1.6V16"/>
         </svg><span>导入数据</span></a>
-      <a href="#/manual" data-view="manual">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
-             stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3.2" y="4.2" width="17.6" height="15.6" rx="2.6"/>
-          <path d="M3.2 9.4h17.6M9.2 9.4v10.4M15.4 9.4v10.4"/>
-        </svg><span>手动核算</span></a>
       <a href="#/stores" data-view="stores">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
              stroke-linecap="round" stroke-linejoin="round">
@@ -1044,216 +1056,48 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="body" id="trend"><div class="empty">还没有核算记录</div></div></div>
     </section>
 
-    <section class="page" id="view-run" hidden>
-      <div class="head"><h1>重新计算</h1>
-        <p>用<b>已经在本机上的数据</b>出报表，不会重新去店铺抓数。
-          改了佣金费率、成本表、汇率之后，在这儿点「重新计算」就行，几十秒出新数字。<br>
-          要去平台重新导一遍，回「驾驶舱」点运行。</p></div>
-
-      <div class="card"><h2>数据从哪来<span class="hint">这里不用选，也选不了</span></h2>
-        <div class="body">
-          <p style="margin:0;font-size:13px;line-height:1.7">
-            只用<b>这家店收件箱里、盖得住所选时间段的最新一份自动取数数据</b>
-            （也就是驾驶舱「运行」取回来的那批）。<br>
-            <span class="muted">想拿别的表格单独算——供应商给的、别人电脑上拷来的——
-            去左边的<b>「手动核算」</b>：那里自己建一批、自己传表、单独出报表，跟店铺数据完全隔开。</span>
-          </p>
-        </div></div>
-
-      <div class="card"><h2>① 算哪家店、哪段时间</h2>
-        <div class="body">
-          <div class="row" style="align-items:flex-end;gap:16px">
-            <div class="field" style="min-width:230px"><label>店铺</label>
-              <select id="store"><option value="">全部店铺（逐个核算）</option></select></div>
-            <div class="field"><label>时间区间</label>
-              <button class="rbtn" id="run-range" title="点一次，起止日期一起选">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="3" y="4.6" width="18" height="16.4" rx="3"/><path d="M3 10h18M8 2.6v4M16 2.6v4"/>
-                </svg><span id="run-range-txt">全部数据</span>
-              </button></div>
-            <div class="chips" id="chips" style="margin:0 0 2px">
-              <button data-k="month">本月</button><button data-k="lastmonth">上月</button>
-              <button data-k="d7">最近 7 天</button><button data-k="d30">最近 30 天</button>
-              <button data-k="all" class="on">全部</button></div>
-          </div>
-          <p class="muted" style="font-size:12.5px;margin:12px 0 0">
-            区间只影响「哪些订单算进来」，不会去平台重新导出。选「全部」= 不按日期过滤。</p>
-        </div></div>
-
-      <div class="card"><h2>② 出报表</h2>
-        <div class="body">
-          <label class="switch">
-            <input type="checkbox" id="with-formula">
-            <span><b>导出带公式的报表</b>
-              <em>明细页多出「订单类别 / 是否样品 / 净利贡献」等几列；汇总页用 SUMIFS 引用明细，
-                在 Excel 里改「口径」页的开关就能自己切含 / 不含样品，不用回程序重算。
-                不带公式：文件小、打开快，数字是最终值。</em></span>
-          </label>
-          <div class="row" style="margin-top:16px;align-items:center;gap:14px">
-            <button class="primary" id="btn-run" style="padding:10px 26px">重新计算</button>
-            <span class="muted" style="font-size:12.5px">
-              只算不取数，几秒到几十秒 · 同名报表会被这一版替换，旧版留在「数据\回收站」</span>
-          </div>
-          <div class="note" id="run-note"></div>
-        </div></div>
-
-      <div class="card"><h2>会用到哪些数据<span class="hint" id="run-files-hint"></span></h2>
-        <div class="body tight" id="run-files"><div class="empty">读取中…</div></div>
-        <div class="body" style="border-top:1px solid var(--line-soft);padding-top:12px">
-          <div class="row" style="gap:12px;align-items:center">
-            <button class="ghost" style="width:auto;padding:7px 16px;margin:0" onclick="go('manual')">＋ 拿一批表单独算（手动核算）</button>
-            <span class="muted" style="font-size:12.5px">不想掺进店铺数据？去「手动核算」自己建一批，单独出报表</span>
-          </div>
-        </div></div>
-    </section>
-
-    <section class="page" id="view-import" hidden>
-      <div class="head"><h1>导入数据<span class="tag">补进店铺，参与自动核算</span></h1>
-        <p>这里传的表会进<b>所选店铺的收件箱</b>，跟扩展自动取到的数据一起参与核算——
-           用在「自动取数没拿到、手工补一张」的场景。<br>
-           想拿一批表<b>单独算</b>、不掺店里数据，去左边的<b>「手动核算」</b>。</p></div>
-
-      <div class="card"><h2>① 这份数据是哪家店、哪个国家<span class="hint">选错国家，列名认不出、费率也套错</span></h2>
-        <div class="body">
-          <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap">
-            <div class="field" style="flex:1;min-width:240px"><label>店铺</label>
-              <select id="imp2-store"><option value="">未识别店铺（公共目录）</option></select></div>
-            <div class="field" style="min-width:190px"><label>国家（决定费率与列名）</label>
-              <select id="imp2-country"><option value="">跟随店铺</option></select></div>
-          </div>
-          <p class="muted" style="font-size:12.5px;margin:10px 0 0">
-            选店铺后国家会自动带上，一般不用改。订单表的列名按国家/语言分（马来站和菲律宾站不一样），
-            费率也按国家分——<b>选错了不会报错，但数字会全错</b>。
-          </p>
-        </div></div>
-
-      <div class="card"><h2>② 把表拖进来<span class="hint">可一次多选，程序自动认是哪种表</span></h2>
-        <div class="body">
-          <div class="dropzone" id="imp2-drop">
-            <svg width="26" height="26" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-                 stroke-width="1.3" style="color:var(--text-3)"><path d="M8 2.6v7.2M5.2 7l2.8 2.8L10.8 7"
-                 stroke-linecap="round" stroke-linejoin="round"/><path d="M2.8 11.2v1.4a1.6 1.6 0 001.6 1.6h7.2a1.6 1.6 0 001.6-1.6v-1.4" stroke-linecap="round"/></svg>
-            <div style="margin:6px 0 2px"><b>把导出的文件拖到这里</b></div>
-            <div class="muted" style="font-size:12.5px">
-              或者 <label class="mini-btn" style="margin:0">选择文件
-                <input type="file" id="imp2-file" multiple hidden accept=".csv,.xlsx,.xls,.txt,.json"></label>
-              （csv / xlsx / xls，可多选）
-            </div>
-            <div class="muted" style="font-size:12px;margin-top:10px">
-              订单表 · 广告表 · 联盟佣金表 · 商品映射表 都能认
-            </div>
-          </div>
-          <input type="file" id="imp2-link-file" accept=".xlsx,.xls,.csv" hidden>
-          <input type="file" id="imp2-map-file" accept=".xlsx,.xls,.csv" hidden>
-          <div class="tools" style="margin-top:12px;flex-wrap:wrap">
-            <button class="ghost" id="btn-imp2-map">单独导入「商品映射表」（SKU → 商品ID）</button>
-            <button class="ghost" id="btn-imp2-link">单独导入「链接资料」（款式编码）</button>
-          </div>
-          <p class="muted" style="font-size:12.5px;margin:10px 0 0">
-            <b>商品映射表很关键</b>：订单导出表里只有 SKU ID / 商家 SKU，<b>没有商品 ID</b>，
-            所以「哪笔订单属于哪条链接」全靠这张映射表。不传的话程序只能按 SKU 猜，
-            猜不出来的全归到「无ID」——汇总页就只剩一行，看不出是哪个链接赚的。<br>
-            从店铺后台「商品 → 批量编辑 / 导出」下载商品表（里面要有 <span class="mono">Product ID</span>
-            和 <span class="mono">SKU ID</span> 两列），点上面这个按钮传上来即可。<br>
-            链接资料是全局的、不分店铺；不传就按商家 SKU 自动推款式编码
-            （<span class="mono">V27-White</span> → <span class="mono">V27</span>）。
-          </p>
-          <div class="note" id="imp2-note"></div>
-          <div id="imp2-result"></div>
-        </div></div>
-
-      <div class="card"><h2>③ 已经传了哪些<span class="hint" id="imp2-hint"></span></h2>
-        <div class="body tight" id="imp2-files"><div class="empty">读取中…</div></div>
-        <div class="body" style="border-top:1px solid var(--line-soft);padding-top:12px">
-          <div class="row">
-            <button onclick="go('stores')">管理店铺</button>
-          </div>
-        </div></div>
-    </section>
-
     <section class="page" id="view-manual" hidden>
       <div class="head"><h1>手动核算<span class="tag">独立数据区</span></h1>
-        <p>自己传一批表，<b>单独算一份</b>，跟店铺的自动取数数据完全隔开：
-           这批文件放在 <span class="mono">数据\手动核算\&lt;批次&gt;\</span>，
-           报表出在 <span class="mono">报表\手动核算\&lt;批次&gt;\</span>。<br>
-           驾驶舱的「重算」永远只读店铺收件箱，这里的表不会掺进去，反过来也一样。</p></div>
+        <p>每张卡就是一家店：<b>在哪张卡导入，数据就属于哪家店</b>，跟驾驶舱的自动取数完全隔开。
+           文件放 <span class="mono">数据\店铺\&lt;店名&gt;\手动导入\</span>，
+           报表放 <span class="mono">报表\手动\&lt;店名&gt;\</span>。<br>
+           驾驶舱的「重算」永远只读收件箱，这里的表不会掺进去，反过来也一样。</p></div>
 
-      <div class="card"><h2>这批数据叫什么<span class="hint">换一批就换一个名字，互不干扰</span></h2>
-        <div class="body">
-          <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap">
-            <div class="field" style="flex:1;min-width:240px"><label>当前批次</label>
-              <select id="mn-batch"></select></div>
-            <div class="field" style="min-width:220px"><label>新批次的名字（可留空）</label>
-              <input type="text" id="mn-new-name" placeholder="例如 供应商对账_10月"></div>
-            <button class="ghost" id="mn-new" style="margin-bottom:1px">＋ 新建一批</button>
-            <button class="danger" id="mn-del" style="margin-bottom:1px">删除这批</button>
-          </div>
-          <p class="muted" style="font-size:12.5px;margin:10px 0 0" id="mn-hint"></p>
-        </div></div>
-
-      <div class="card"><h2>① 把表传进这批<span class="hint">订单表必须有；广告 / 佣金 / SKU 选填</span></h2>
-        <div class="body">
-          <div class="dropzone" id="mn-drop">
-            <svg width="26" height="26" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-                 stroke-width="1.3" style="color:var(--text-3)"><path d="M8 2.6v7.2M5.2 7l2.8 2.8L10.8 7"
-                 stroke-linecap="round" stroke-linejoin="round"/><path d="M2.8 11.2v1.4a1.6 1.6 0 001.6 1.6h7.2a1.6 1.6 0 001.6-1.6v-1.4" stroke-linecap="round"/></svg>
-            <div style="margin:6px 0 2px"><b>把这一批要用的表拖到这里</b></div>
-            <div class="muted" style="font-size:12.5px">
-              或者 <label class="mini-btn" style="margin:0">选择文件
-                <input type="file" id="mn-file" multiple hidden accept=".csv,.xlsx,.xls,.txt,.json"></label>
-              （csv / xlsx / xls，可多选）
-            </div>
-            <div class="muted" style="font-size:12px;margin-top:10px">
-              只进这一批，不进店铺收件箱；传错了可以单个删
-            </div>
-          </div>
-          <div class="note" id="mn-note"></div>
-        </div></div>
-
-      <div class="card"><h2>② 这批里有哪些文件<span class="hint" id="mn-files-hint"></span></h2>
-        <div class="body tight" id="mn-files"><div class="empty">读取中…</div></div>
+      <div class="bar">
+        <div class="inline"><span style="color:var(--text-3)">区间</span>
+          <button class="rbtn" id="mn-range" title="点一次，起止日期一起选">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="4.6" width="18" height="16.4" rx="3"/><path d="M3 10h18M8 2.6v4M16 2.6v4"/>
+            </svg><span id="mn-range-txt">全部数据</span>
+          </button>
+        </div>
+        <div class="chips tight" id="mn-chips" style="margin:0">
+          <button data-k="all" class="on">全部</button>
+          <button data-k="month">本月</button><button data-k="lastmonth">上月</button>
+        </div>
+        <label class="chk"><input type="checkbox" id="mn-formula"> 导出带公式</label>
+        <div class="grow"></div>
+        <span class="muted" id="mn-hint" style="font-size:12.5px"></span>
       </div>
 
-      <div class="card"><h2>③ 算这一批</h2>
-        <div class="body">
-          <div class="row" style="align-items:flex-end;gap:16px;flex-wrap:wrap">
-            <div class="field" style="min-width:190px"><label>国家（决定费率与列名）</label>
-              <select id="mn-country"></select></div>
-            <div class="field"><label>时间区间</label>
-              <button class="rbtn" id="mn-range" title="点一次，起止日期一起选">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-                     stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="3" y="4.6" width="18" height="16.4" rx="3"/><path d="M3 10h18M8 2.6v4M16 2.6v4"/>
-                </svg><span id="mn-range-txt">全部数据</span>
-              </button></div>
-            <div class="chips" id="mn-chips" style="margin:0 0 2px">
-              <button data-k="all" class="on">全部</button>
-              <button data-k="month">本月</button><button data-k="lastmonth">上月</button>
-            </div>
-          </div>
-          <label class="switch" style="margin-top:14px">
-            <input type="checkbox" id="mn-formula">
-            <span><b>导出带公式的报表</b>
-              <em>和「重新计算」那边一致：带公式能在 Excel 里自己切含/不含样品，文件更大、打开更慢。</em></span>
-          </label>
-          <div class="row" style="margin-top:16px;align-items:center;gap:14px">
-            <button class="primary" id="mn-run" style="padding:10px 26px">计算这一批</button>
-            <span class="muted" style="font-size:12.5px">只读这一批自己的文件，不碰店铺收件箱 ·
-              成本表 / 费率 / 计算参数用的是全局那一套</span>
-          </div>
-          <div class="note" id="mn-result"></div>
-        </div></div>
+      <div class="store-grid" id="mn-grid"><div class="sc-empty">正在读取店铺…</div></div>
+      <div class="note" id="mn-note"></div>
+      <input type="file" id="mn-file" multiple hidden accept=".csv,.xlsx,.xls,.txt,.json">
     </section>
 
     <section class="page" id="view-reports" hidden>
       <div class="head"><h1>报表</h1>
-        <p>每次核算出的 Excel 都在这里。点「查看」直接在界面里看汇总和费用拆解，不用打开 Excel。</p></div>
+        <p>两个房间分开放：<b>自动报表</b>是驾驶舱取数、卡片「重算」跑出来的；<b>手动报表</b>是「手动核算」跑出来的。
+           两边都能按店铺筛、都能下载到自己指定的位置。点「查看」直接在界面里看汇总和费用拆解。</p></div>
 
-      <div class="card"><h2>全部报表<span class="hint" id="rep-hint"></span></h2>
+      <div class="card"><h2><span id="rep-room-title">自动报表</span><span class="hint" id="rep-hint"></span></h2>
         <div class="body" style="padding:14px 20px 0">
+          <div class="chips" id="rep-rooms" style="margin-bottom:10px">
+            <button data-room="auto" class="on">自动报表</button>
+            <button data-room="manual">手动报表</button></div>
           <div class="chips" id="rep-filter" style="margin-bottom:12px">
-            <button data-store="" class="on">所有报表</button></div>
+            <button data-store="" class="on">所有店铺</button></div>
 
           <div class="rep-bar">
             <label class="chk"><input type="checkbox" id="rep-all-chk"> 全选</label>
@@ -1276,8 +1120,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
             </label>
           </div>
 
-          <p class="muted" style="font-size:12.5px;margin:4px 0 14px;line-height:1.7">
-            报表按店铺分目录存（<span class="mono">报表\店名\</span>）。
+          <p class="muted" style="font-size:12.5px;margin:4px 0 14px;line-height:1.7" id="rep-note">
+            报表按「房间」分目录存（<span class="mono">报表\自动\店名\</span>、
+            <span class="mono">报表\手动\店名\</span>）。
             勾「导出带公式」会按原区间重算一份带 SUMIFS 的版本，能在 Excel 里自己切含/不含样品。<br>
             删除只是挪进 <span class="mono">报表\_已删除\</span>，删错了能找回来。</p>
         </div>
@@ -1788,13 +1633,13 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <div>取数 vs 重算</div><div><b>取数</b>是去店铺后台把订单/广告/佣金导下来，慢（大店订单要等平台生成几分钟）；
             <b>重算</b>只用已经在本机的数据重新出报表，几十秒。</div>
           <div>什么时候重算</div><div>改了<b>佣金费率、成本表、计算参数、汇率</b>之后——保存完屏幕下方会冒出
-            「重新计算」的按钮，点一下就行；也可以在各店卡片上点<b>「重算」</b>。</div>
+            「重新计算」的按钮，点一下就行；也可以回「驾驶舱」在各店卡片上点<b>「重算」</b>。</div>
           <div>同一天重复跑</div><div>同一天、<b>同一个起止日期</b>再跑一次，会直接复用当天第一次导的数据（快）。
             <b>换区间就要重新取数</b>——数据是平台按区间导的，不能拿一段充另一段。</div>
           <div>数据确实变了</div><div>勾上驾驶舱工具条上的<b>「强制重新取数」</b>，就忽略当天的记录，重新去平台导一遍。</div>
-          <div>数据分两条线</div><div><b>驾驶舱 / 重新计算</b>只认店铺收件箱里自动取到的数据；
+          <div>数据分两条线</div><div><b>驾驶舱</b>（运行 / 重算）只认店铺收件箱里自动取到的数据；
             <b>「手动核算」</b>是独立的一块：自己建批次、自己传表，报表单独放在
-            <span class="mono">报表\手动核算\&lt;批次&gt;</span>。两边不互相掺，
+            <span class="mono">报表\手动\&lt;店名&gt;</span>。两边不互相掺，
             手动传的表不会进店铺、也不会被下次自动核算带上。</div>
         </div></div></div>
 
@@ -2487,10 +2332,6 @@ async function recalcMany(ids, rg, onProgress){
         body: JSON.stringify({store: ids[i],
                               from: (rg && rg.startDate) || null,
                               to: (rg && rg.to) || null,
-                              // 没手动动过这个勾就不传，让桥按「设置 → 报表」来，
-                              // 免得重算出来的报表和平时设置的不一样
-                              with_formula: ($('#with-formula') && $('#with-formula').dataset.touched)
-                                ? !!$('#with-formula').checked : undefined,
                               // 重算覆盖同一份报表，别再堆 (2)(3)——一天改几次费率
                               // 就能堆出十几份，报表页直接没法看。
                               replace: true})});
@@ -2588,9 +2429,8 @@ function go(view){
   if(view === 'plan') loadPlan();
   if(view === 'debug') loadDebug();
   if(view === 'stores') loadStores();
-  if(view === 'run'){ loadRunFiles(); }
   if(view === 'import'){ loadImportOptions(); loadImportFiles(); }
-  if(view === 'manual'){ loadImportOptions(); loadManual(); }
+  if(view === 'manual'){ loadManual(); }
   if(view === 'overview') initHome(); else stopLive();
   if(location.hash !== '#/' + view) location.hash = '#/' + view;
 }
@@ -2663,515 +2503,68 @@ async function loadTrend(){
   }catch(e){}
 }
 
-let RUN_RANGE = null;     // 核算页的区间；null = 全部数据
-
-function paintRunRange(){
-  const el = $('#run-range-txt');
-  if(el) el.textContent = RUN_RANGE ? fmtRange(RUN_RANGE) : '全部数据';
-  document.querySelectorAll('#chips button').forEach(b => {
-    b.classList.toggle('on', b.dataset.k === 'all' ? !RUN_RANGE : false);
-  });
-}
-
-function setRange(key){
-  const now = new Date();
-  if(key === 'all'){
-    RUN_RANGE = null;
-  }else{
-    let from = '', to = '';
-    if(key === 'month'){ from = iso(new Date(now.getFullYear(), now.getMonth(), 1)); to = iso(now); }
-    else if(key === 'lastmonth'){
-      from = iso(new Date(now.getFullYear(), now.getMonth()-1, 1));
-      to = iso(new Date(now.getFullYear(), now.getMonth(), 0));
-    } else if(key === 'd7'){ const d = new Date(now); d.setDate(d.getDate()-6); from = iso(d); to = iso(now); }
-    else if(key === 'd30'){ const d = new Date(now); d.setDate(d.getDate()-29); from = iso(d); to = iso(now); }
-    RUN_RANGE = { startDate: from, to };
-  }
-  paintRunRange();
-}
-document.querySelectorAll('#chips button').forEach(b => b.onclick = () => setRange(b.dataset.k));
-
-const _runRangeBtn = $('#run-range');
-if(_runRangeBtn) _runRangeBtn.onclick = () => openRangePicker(_runRangeBtn, RUN_RANGE, r => {
-  RUN_RANGE = r;
-  paintRunRange();
-});
-
-async function loadRunFiles(){
-  // 「带公式」勾选默认跟随「设置 → 报表」，而不是每次进来都是未勾选：
-  // 用户在设置里选了带公式，回核算页却看到没勾，一出报表又是不带的，
-  // 只会觉得「设置没保存」。
-  if($('#with-formula') && !$('#with-formula').dataset.init){
-    $('#with-formula').dataset.init = '1';
-    try{
-      const st = await (await fetch('/api/settings')).json();
-      const wf = ((st.settings || {}).report || {}).with_formula;
-      if(typeof wf === 'boolean') $('#with-formula').checked = wf;
-    }catch(e){ /* 读不到就按未勾选 */ }
-  }
-  try{
-    const j = await (await fetch('/api/data-files')).json();
-    const groups = (j.groups || []).filter(g => g.items.length);
-    const legacy = j.legacy || [];
-    const unknown = j.unknown || [];
-    if(!groups.length && !legacy.length && !unknown.length){
-      $('#run-files-hint').textContent = '';
-      $('#run-files').innerHTML = '<div class="empty"><b>还没有数据文件</b>在战斧浏览器里打开店铺页面，点扩展面板的「立即运行」</div>';
-      return;
-    }
-    let n = legacy.length + unknown.length;
-    groups.forEach(g => n += g.items.length);
-    $('#run-files-hint').textContent = n + ' 个文件';
-    let html = '';
-    // 后端给的 kinds 键已经是中文（订单表 / 广告表 / 联盟佣金表），
-    // 以前这里按英文键去查表，查不到就渲染成 "undefined 1 · undefined 1"。
-    const KIND_CN = {orders:'订单', ads:'广告', affiliate:'联盟', mapping:'映射',
-                     other:'其他', 订单表:'订单', 广告表:'广告', 联盟佣金表:'联盟',
-                     商品映射表:'映射', 链接资料:'链接'};
-    groups.forEach(g => {
-      const k = g.kinds || {};
-      const kbits = Object.keys(k).filter(x => x !== 'other' && x !== '其他')
-        .map(x => (KIND_CN[x] || x) + ' ' + k[x]).join(' · ');
-      html += `<div style="padding:13px 20px 6px;font-size:12.5px;color:var(--text-2);background:#fcfcfa;
-        border-bottom:1px solid var(--line-soft)">${esc(g.name)}
-        <span class="tag gray">${esc(g.country || '')}</span>
-        ${kbits ? '<span class="tag">' + esc(kbits) + '</span>' : ''}</div>`;
-      html += '<table><tbody>' + g.items.map(f => `<tr>
-        <td style="width:58%">${esc(f.name)}</td><td class="muted" style="width:16%">${f.size_kb} KB</td>
-        <td class="muted" style="width:26%">${f.at}</td></tr>`).join('') + '</tbody></table>';
-    });
-    if(unknown.length){
-      html += `<div style="padding:13px 20px 6px;font-size:12.5px;color:var(--warn);background:#fdf6f5;
-        border-bottom:1px solid var(--line-soft)">⚠ 未识别店铺的数据（${unknown.length} 个）——不会参与核算</div>`;
-      html += '<table><tbody>' + unknown.map(f => `<tr>
-        <td style="width:58%">${esc(f.name)}</td><td class="muted" style="width:16%">${f.size_kb} KB</td>
-        <td class="muted" style="width:26%">${f.at}</td></tr>`).join('') + '</tbody></table>';
-    }
-    if(legacy.length){
-      html += `<div style="padding:13px 20px 6px;font-size:12.5px;color:var(--text-2);background:#fcfcfa;
-        border-bottom:1px solid var(--line-soft)">未归到店铺的旧数据</div>`;
-      html += '<table><tbody>' + legacy.map(f => `<tr>
-        <td style="width:58%">${esc(f.name)}</td><td class="muted" style="width:16%">${f.size_kb} KB</td>
-        <td class="muted" style="width:26%">${f.at}</td></tr>`).join('') + '</tbody></table>';
-    }
-    $('#run-files').innerHTML = html;
-  }catch(e){}
-}
-
-/** 换店铺时刷新快照列表与文件清单：快照是按店分开存的，
- *  A 店的快照在 B 店下拉里不该出现。 */
-if($('#store')) $('#store').onchange = () => { loadRunFiles(); };
-
-/* ---------------- 手动导入 ---------------- */
-/* 自动取数这条路依赖平台接口和风控参数，平台一改版就可能断。
-   断了之后不能让人干等着，所以留一条人工通路：
-   用户自己导出表 → 在这里上传 → 落进该店铺的 inbox → 和自动数据一样算。 */
-
-/** 填充导入区的「店铺」和「国家」下拉。 */
-async function loadImportOptions(){
-  try{
-    // 直接进「导入数据」页时缓存可能是空的，自己补一次
-    if(!storesCache.length){
-      try{ storesCache = (await (await fetch('/api/stores')).json()).stores || []; }catch(e){}
-    }
-    const sel = $('#imp2-store');
-    if(sel){
-      const keep = sel.value;
-      sel.innerHTML = '<option value="">未识别店铺（公共目录）</option>';
-      storesCache.forEach(s => {
-        const o = document.createElement('option');
-        o.value = s.id;
-        o.textContent = (s.name || s.id) + (s.country ? '（' + s.country + '）' : '');
-        sel.append(o);
-      });
-      if(keep) sel.value = keep;
-    }
-    const r = await (await fetch('/api/rates')).json();
-    const cs = $('#imp2-country');
-    if(cs){
-      const keep = cs.value;
-      cs.innerHTML = '<option value="">跟随店铺</option>';
-      Object.keys(r.countries || {}).forEach(c => {
-        const o = document.createElement('option');
-        o.value = c; o.textContent = c;
-        cs.append(o);
-      });
-      if(keep) cs.value = keep;
-    }
-    // 手动核算那边的国家下拉：没有「跟随店铺」，就是个纯国家选择
-    const mc = $('#mn-country');
-    if(mc){
-      const keep = mc.value;
-      mc.innerHTML = '';
-      Object.keys(r.countries || {}).forEach(c => {
-        const o = document.createElement('option');
-        o.value = c; o.textContent = c;
-        mc.append(o);
-      });
-      const def = (r.default && Object.keys(r.countries || {}).includes(r.default))
-        ? r.default : (Object.keys(r.countries || {})[0] || '');
-      mc.value = keep || def;
-    }
-  }catch(e){}
-}
-
-/** 选店铺时把国家自动带上：各国费率、列名都不同，选错就全错。 */
-if($('#imp2-store')) $('#imp2-store').onchange = () => {
-  const st = $('#imp2-store'), cs = $('#imp2-country');
-  const s = storesCache.find(x => x.id === st.value);
-  if(s && cs && s.country) cs.value = s.country;
-};
-
-/** 读取文件为 base64，分块拼避免一次申请超大字符串。 */
-// 单个文件上限。base64 本身要占 1.34 倍，再加上中间那层字符串，
-// 传一个 300MB 的订单表能让标签页直接崩掉（而且崩得莫名其妙）。
-// 订单表正常几十 MB，200MB 足够宽裕。
-const MAX_UPLOAD = 200 * 1024 * 1024;
-
-async function fileToB64(f){
-  if(f.size > MAX_UPLOAD){
-    throw new Error(`文件有 ${(f.size/1024/1024).toFixed(0)} MB，超过 `
-      + `${MAX_UPLOAD/1024/1024} MB 上限。请在平台上把时间区间改小一点，分几次导出`);
-  }
-  const buf = new Uint8Array(await f.arrayBuffer());
-  let bin = "";
-  const CH = 0x8000;
-  for(let i = 0; i < buf.length; i += CH){
-    bin += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
-  }
-  return btoa(bin);
-}
-
-async function importFiles(files, kindHint){
-  const n = $('#imp2-note'), box = $('#imp2-result');
-  if(!files || !files.length) return;
-  note(n, '导入中…（' + files.length + ' 个文件）', 'ok');
-  if(box) box.innerHTML = '';
-  const lines = [];
-  for(const f of files){
-    try{
-      const b64 = await fileToB64(f);
-      const r = await fetch('/api/data-import', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          name: f.name, b64,
-          shop_id: ($('#imp2-store') ? $('#imp2-store').value : '') || '',
-          country: ($('#imp2-country') ? $('#imp2-country').value : '') || '',
-          kind: kindHint || '',
-        }),
-      });
-      const j = await r.json();
-      const warn = j.warning ? ` <span style="color:#B45309">⚠ ${esc(j.warning)}</span>` : '';
-      lines.push(j.ok
-        ? `✓ ${esc(f.name)} → <b>${esc(j.label)}</b>`
-          + `<span class="muted">（按${esc(j.country || '默认')}的列标题识别）</span>${warn}`
-        : `✕ ${esc(f.name)} → <span style="color:#C0392B">失败：${esc(j.error || '')}</span>`);
-    }catch(err){
-      lines.push(`✕ ${esc(f.name)} → <span style="color:#C0392B">失败：${esc(err.message || String(err))}</span>`);
-    }
-  }
-  note(n, lines.join('<br>'), 'ok');
-  // 导入完立刻刷新：本页清单、核算页文件、快照、总览数字
-  loadImportFiles(); loadRunFiles(); loadStatus();
-}
-
-if($('#imp2-file')) $('#imp2-file').onchange = (e) => {
-  importFiles(Array.from(e.target.files || []));
-  e.target.value = "";            // 清空，同一个文件才能再选一次
-};
-
-/* 拖放：整块区域都能接文件，不用先点按钮再翻路径 */
-(function bindImportDrop(){
-  const dz = $('#imp2-drop');
-  if(!dz) return;
-  const stop = e => { e.preventDefault(); e.stopPropagation(); };
-  ['dragenter', 'dragover'].forEach(ev =>
-    dz.addEventListener(ev, e => { stop(e); dz.classList.add('over'); }));
-  ['dragleave', 'drop'].forEach(ev =>
-    dz.addEventListener(ev, e => { stop(e); dz.classList.remove('over'); }));
-  dz.addEventListener('drop', e => {
-    const fs = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
-    if(fs.length) importFiles(fs);
-  });
-  dz.addEventListener('click', e => {
-    if(e.target.closest('label')) return;   // 点「选择文件」让它自己弹
-    const inp = $('#imp2-file');
-    if(inp) inp.click();
-  });
-})();
-
-/** 单独导入「商品映射表」（SKU → 商品ID）：强制按映射表存，不靠表头猜 */
-if($('#btn-imp2-map')) $('#btn-imp2-map').onclick = () => {
-  const inp = $('#imp2-map-file');
-  if(inp) inp.click();
-};
-if($('#imp2-map-file')) $('#imp2-map-file').onchange = (e) => {
-  const fs = Array.from(e.target.files || []);
-  if(fs.length) importFiles(fs, 'mapping');
-  e.target.value = '';
-};
-
-/** 单独导入「链接资料」（款式编码）：全局生效，不分店铺 */
-if($('#btn-imp2-link')) $('#btn-imp2-link').onclick = () => {
-  const inp = $('#imp2-link-file');
-  if(inp) inp.click();
-};
-if($('#imp2-link-file')) $('#imp2-link-file').onchange = async (e) => {
-  const f = (e.target.files || [])[0];
-  if(!f) return;
-  const n = $('#imp2-note');
-  note(n, '正在读取链接资料…', 'ok');
-  try{
-    const b64 = await fileToB64(f);
-    const j = await (await fetch('/api/link-info', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name: f.name, b64}),
-    })).json();
-    note(n, j.ok
-      ? `✓ 链接资料已导入：<b>${j.sku_count}</b> 个 SKU / <b>${j.link_count}</b> 条链接`
-        + (j.multi_count ? `<span class="muted">（其中 ${j.multi_count} 条链接含多个款式编码）</span>` : '')
-      : '导入失败：' + esc(j.error || '未知原因'), j.ok ? 'ok' : 'err');
-  }catch(err){ note(n, '出错：' + esc(err.message), 'err'); }
-  e.target.value = '';
-};
-
-/** 「已经传了哪些」：按店铺列文件，没选店铺的单独标出来。
- *  可以勾选删除——文件只会挪进「数据/回收站」，随时能找回来。 */
-const IMP_SEL = new Set();
-
-const KIND_CN = {orders:'订单', ads:'广告', affiliate:'联盟', mapping:'映射',
-                 other:'其他', 订单表:'订单', 广告表:'广告', 联盟佣金表:'联盟',
-                 商品映射表:'映射', 商品SKU表:'SKU', 链接资料:'链接'};
-function kindLabel(x){ return KIND_CN[x] || x; }   // 认不出就直接显示目录名
-
-async function loadImportFiles(){
-  const box = $('#imp2-files'), hint = $('#imp2-hint');
-  if(!box) return;
-  try{
-    const j = await (await fetch('/api/data-files')).json();
-    const groups = (j.groups || []).filter(g => (g.items || []).length);
-    const unknown = j.unknown || [], legacy = j.legacy || [];
-    let n = legacy.length + unknown.length;
-    groups.forEach(g => n += g.items.length);
-    let totalKb = 0;
-    groups.forEach(g => g.items.forEach(f => totalKb += Number(f.size_kb) || 0));
-    unknown.forEach(f => totalKb += Number(f.size_kb) || 0);
-    legacy.forEach(f => totalKb += Number(f.size_kb) || 0);
-    if(hint){
-      hint.textContent = n
-        ? `${n} 个文件 · 共 ${(totalKb / 1024).toFixed(totalKb > 10240 ? 0 : 1)} MB`
-        : '';
-    }
-    if(!n){
-      box.innerHTML = '<div class="empty"><b>还没传过文件</b>上面选好店铺，把后台导出的表拖进来就行</div>';
-      return;
-    }
-
-    // 勾选状态按 rel 存；列表重画后还在（rel 是稳定的相对路径）
-    const alive = new Set();
-    const collect = arr => arr.forEach(f => { if(f.rel) alive.add(f.rel); });
-    groups.forEach(g => collect(g.items));
-    collect(unknown); collect(legacy);
-    [...IMP_SEL].forEach(x => { if(!alive.has(x)) IMP_SEL.delete(x); });
-
-    const bar = `<div class="imp-bar">
-      <label class="chk"><input type="checkbox" id="imp-all"> 全选</label>
-      <span class="muted" id="imp-sel">已选 ${IMP_SEL.size} 个</span>
-      <span style="flex:1"></span>
-      <button class="danger" id="imp-del" ${IMP_SEL.size ? '' : 'disabled'}>删除选中</button>
-    </div>`;
-
-    const row = f => `<tr>
-      <td style="width:34px"><input type="checkbox" data-rel="${esc(f.rel || '')}"
-           ${IMP_SEL.has(f.rel) ? 'checked' : ''} ${f.rel ? '' : 'disabled'}></td>
-      <td>${esc(f.name)}</td>
-      <td class="muted" style="width:90px;white-space:nowrap">${f.size_kb} KB</td>
-      <td class="muted" style="width:110px;white-space:nowrap">${f.at}</td>
-      <td style="width:64px"><button class="mini" data-rm="${esc(f.rel || '')}">删除</button></td>
-    </tr>`;
-
-    let html = bar;
-    groups.forEach(g => {
-      const k = g.kinds || {};
-      const bits = Object.keys(k).filter(x => x !== 'other')
-        .map(x => kindLabel(x) + ' ' + k[x]).join(' · ');
-      html += `<div class="imp-grp">${esc(g.name)}
-        <span class="tag gray">${esc(g.country || '')}</span>
-        ${bits ? '<span class="tag">' + esc(bits) + '</span>' : ''}</div>`;
-      html += '<table><tbody>' + g.items.map(row).join('') + '</tbody></table>';
-    });
-    if(unknown.length){
-      html += `<div class="imp-grp warn">⚠ 没选店铺的数据（${unknown.length} 个）——不会参与核算</div>`;
-      html += '<table><tbody>' + unknown.map(row).join('') + '</tbody></table>';
-    }
-    if(legacy.length){
-      html += `<div class="imp-grp">公共目录（老的导入方式）</div>`;
-      html += '<table><tbody>' + legacy.map(f => `<tr>
-        <td style="width:34px"></td><td>${esc(f.name)}</td>
-        <td class="muted" style="width:90px">${f.size_kb} KB</td>
-        <td class="muted" style="width:110px">${f.at}</td><td></td></tr>`).join('') + '</tbody></table>';
-    }
-    box.innerHTML = html;
-
-    const refreshBar = () => {
-      const el = $('#imp-sel'); if(el) el.textContent = '已选 ' + IMP_SEL.size + ' 个';
-      const btn = $('#imp-del'); if(btn) btn.disabled = !IMP_SEL.size;
-      const all = $('#imp-all');
-      const boxes = [...box.querySelectorAll('input[data-rel]:not([disabled])')];
-      if(all){
-        all.checked = boxes.length > 0 && boxes.every(b => b.checked);
-        all.indeterminate = !all.checked && boxes.some(b => b.checked);
-      }
-    };
-
-    box.querySelectorAll('input[data-rel]').forEach(cb => {
-      cb.onchange = () => {
-        const r = cb.dataset.rel;
-        if(!r) return;
-        if(cb.checked) IMP_SEL.add(r); else IMP_SEL.delete(r);
-        refreshBar();
-      };
-    });
-    const all = $('#imp-all');
-    if(all) all.onchange = () => {
-      box.querySelectorAll('input[data-rel]:not([disabled])').forEach(cb => {
-        cb.checked = all.checked;
-        if(all.checked) IMP_SEL.add(cb.dataset.rel); else IMP_SEL.delete(cb.dataset.rel);
-      });
-      refreshBar();
-    };
-    box.querySelectorAll('[data-rm]').forEach(b => {
-      b.onclick = () => {
-        const r = b.dataset.rm;
-        if(!r) return;
-        impDelete([r]);
-      };
-    });
-    const del = $('#imp-del');
-    if(del) del.onclick = () => impDelete([...IMP_SEL]);
-    refreshBar();
-  }catch(err){
-    box.innerHTML = '<div class="empty">读取失败：' + esc(err.message) + '</div>';
-  }
-}
-
-async function impDelete(rels){
-  if(!rels || !rels.length) return;
-  if(!confirm(`把选中的 ${rels.length} 个文件移到回收站？\n\n`
-    + '· 不会真删，需要时能从「数据\\回收站」找回来\n'
-    + '· 删掉的如果是唯一的订单/SKU 数据，这家店就算不出报表了')) return;
-  try{
-    const j = await (await fetch('/api/data-files/delete', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({rels})})).json();
-    if(!j.ok){ toast('删除失败：' + (j.error || '')); return; }
-    rels.forEach(r => IMP_SEL.delete(r));
-    toast(`已移到回收站 ${j.moved} 个` + (j.missing?.length ? `，跳过 ${j.missing.length} 个已不存在的` : ''));
-    loadImportFiles();
-    if(typeof loadStatus === 'function') loadStatus();
-  }catch(e){ toast('删除失败：' + e.message); }
-}
-
-/** 导入店铺后台下载的「链接资料」表，读出每条链接的款式编码。 */
-if($('#btn-link-import')) $('#btn-link-import').onclick = async () => {
-  const inp = $('#link-file');
-  const btn = $('#btn-link-import'), n = $('#link-note'), st = $('#link-stat');
-  const f = inp && inp.files && inp.files[0];
-  if(!f){ note(n, '先选一个文件', 'err'); return; }
-  btn.disabled = true;
-  note(n, '正在读取…', 'ok');
-  try{
-    const b64 = await fileToB64(f);
-    const r = await fetch('/api/link-info', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name: f.name, b64}),
-    });
-    const j = await r.json();
-    if(!j.ok){
-      note(n, '导入失败：' + (j.error || '未知原因'), 'err');
-      st.textContent = '';
-      return;
-    }
-    note(n, `导入成功：${j.sku_count} 个 SKU / ${j.link_count} 条链接`, 'ok');
-    const rows = (j.samples || []).map(x =>
-      `<tr><td class="mono" style="font-size:11.5px">${esc(x.link)}</td>
-       <td><b>${esc(x.styles)}</b></td></tr>`).join('');
-    st.innerHTML = j.multi_count
-      ? `其中 <b>${j.multi_count}</b> 条链接含多个款式编码（已用 / 连接）。下面是前几条：`
-      : '下面是前几条链接的款式编码：';
-    st.innerHTML += rows
-      ? `<table style="margin-top:8px;width:auto"><tbody>${rows}</tbody></table>`
-      : '';
-  }catch(e){
-    note(n, '出错：' + e.message, 'err');
-  }
-  btn.disabled = false;
-  if(inp) inp.value = "";
-};
-
-// 手动动过「带公式」就记一笔：驾驶舱的「重算」据此判断要不要沿用这个选择
-$('#with-formula') && ($('#with-formula').onchange = () => {
-  $('#with-formula').dataset.touched = '1';
-});
-
-$('#btn-run').onclick = async () => {
-  const btn = $('#btn-run'), n = $('#run-note');
-  const store = $('#store').value;
-  const ids = store ? [store] : storesCache.map(s => s.id).filter(Boolean);
-  if(!ids.length){ note(n, '没有可核算的店铺，先去「店铺」页看看识别到没有', 'err'); return; }
-  btn.disabled = true;
-  const results = [];
-  const runRg = {startDate: RUN_RANGE ? RUN_RANGE.startDate : '', to: RUN_RANGE ? RUN_RANGE.to : ''};
-  for(let i = 0; i < ids.length; i++){
-    note(n, '正在重算（' + (i+1) + '/' + ids.length + '）…', 'ok');
-    try{
-      const r = await fetch('/run', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({store: ids[i],
-                             from: RUN_RANGE ? RUN_RANGE.startDate : null,
-                             to: RUN_RANGE ? RUN_RANGE.to : null,
-                             // 这里本来就是「只算不取数」，同名报表直接替换，
-                             // 不然改一次费率就多一份 (2)(3)，报表页没法看
-                             replace: true,
-                             with_formula: !!( $('#with-formula') && $('#with-formula').checked )})})
-      results.push(await r.json());
-    }catch(e){ results.push({ok:false, error:e.message, store: ids[i]}); }
-  }
-  const ok = results.filter(x => x.ok), bad = results.filter(x => !x.ok);
-  let t = '';
-  if(ok.length) t = '<b>核算完成 ' + ok.length + ' 家</b><br>' + ok.map(x =>
-    esc(x.store_name || '') + '：净利 ' + fmt2(x.net_local) + '　' + esc(x.report_name || '')
-    + (x.copied_to ? '　<span class="muted">已复制</span>' : '')).join('<br>');
-  if(bad.length) t += (t ? '<br>' : '') + '<b>失败 ' + bad.length + ' 家</b><br>'
-    + bad.map(x => esc(x.store || '') + '：' + esc(String(x.error || '').slice(0, 120))).join('<br>');
-  note(n, t, bad.length ? 'err' : 'ok');
-  if(ok.length) rememberRun(runRg);      // 下次「重算」默认还按这一段
-  btn.disabled = false;
-  loadStatus(); loadTrend();
-};
-
-let repAll = [];      // 全部报表
+let repAll = [];      // 全部报表（两个房间都在里面，靠 room 区分）
 let repStore = '';    // 当前按哪个店铺筛选（空 = 全部）
+let repRoom = 'auto'; // auto = 自动报表 / manual = 手动报表
+
+/** 当前房间里的报表 */
+function repInRoom(){
+  return repAll.filter(x => (x.room || 'auto') === repRoom);
+}
 
 async function loadReports(){
   try{
     const j = await (await fetch('/api/reports')).json();
     repAll = j.items || [];
-    $('#rep-hint').textContent = repAll.length ? '共 ' + repAll.length + ' 份' : '';
-    // 店铺筛选条：所有报表 + 每家店
-    const stores = [...new Set(repAll.map(x => x.group || ''))];
+    const autoN = repAll.filter(x => (x.room || 'auto') === 'auto').length;
+    const manN = repAll.length - autoN;
+
+    // 两个房间：份数都标出来，一眼知道手动算过几份
+    const rooms = $('#rep-rooms');
+    if(rooms){
+      rooms.innerHTML =
+        `<button data-room="auto" class="${repRoom === 'auto' ? 'on' : ''}">自动报表（${autoN}）</button>`
+        + `<button data-room="manual" class="${repRoom === 'manual' ? 'on' : ''}">手动报表（${manN}）</button>`;
+      rooms.querySelectorAll('[data-room]').forEach(b => b.onclick = () => {
+        repRoom = b.dataset.room;
+        repStore = '';
+        loadReports();          // 切房间要重读：下载目录也跟着换
+      });
+    }
+    const title = $('#rep-room-title');
+    if(title) title.textContent = repRoom === 'auto' ? '自动报表' : '手动报表';
+    const note = $('#rep-note');
+    if(note){
+      note.innerHTML = repRoom === 'auto'
+        ? '自动报表按店铺放在 <span class="mono">报表\\自动\\店名\\</span>（驾驶舱取数、卡片「重算」跑出来的）。<br>'
+          + '勾「导出带公式」会按原区间重算一份带 SUMIFS 的版本；删除只是挪进 <span class="mono">报表\\_已删除\\</span>，能找回。'
+        : '手动报表按店铺放在 <span class="mono">报表\\手动\\店名\\</span>（「手动核算」跑出来的）。<br>'
+          + '下面「下载到」只管手动报表——自动报表那边有自己的一份，互不影响。';
+    }
+
+    const roomItems = repInRoom();
+    const hint = $('#rep-hint');
+    if(hint) hint.textContent = roomItems.length ? ('共 ' + roomItems.length + ' 份') : '';
+
+    // 店铺筛选条：只列这个房间里真有的店
+    const stores = [...new Set(roomItems.map(x => x.group || ''))];
     const fc = $('#rep-filter');
     if(fc){
-      fc.innerHTML = '<button data-store="" class="' + (repStore ? '' : 'on') + '">所有报表</button>'
+      fc.innerHTML = '<button data-store="" class="' + (repStore ? '' : 'on') + '">所有店铺</button>'
         + stores.map(s => `<button data-store="${esc(s)}" class="${repStore === s ? 'on' : ''}">`
-          + esc(s || '未分店') + '（' + repAll.filter(x => (x.group||'') === s).length + '）</button>').join('');
+          + esc(s || '未分店') + '（' + roomItems.filter(x => (x.group || '') === s).length + '）</button>').join('');
       fc.querySelectorAll('[data-store]').forEach(b => b.onclick = () => {
         repStore = b.dataset.store || '';
         loadReports();
       });
     }
-    const items = repStore ? repAll.filter(x => (x.group||'') === repStore) : repAll;
+
+    const items = repStore ? roomItems.filter(x => (x.group || '') === repStore) : roomItems;
     if(!items.length){
-      $('#rep-list').innerHTML = '<div class="empty"><b>这里还没有报表</b>去「重新计算」跑一次</div>';
+      $('#rep-list').innerHTML = repRoom === 'auto'
+        ? '<div class="empty"><b>自动报表还是空的</b>去「驾驶舱」点一次「运行」，或在卡片上点「重算」</div>'
+        : '<div class="empty"><b>手动报表还是空的</b>去「手动核算」给某家店导表、点「计算」</div>';
+      repSyncSel();
       return;
     }
     $('#rep-list').innerHTML = '<table><thead><tr><th style="width:34px"></th><th>文件名</th>'
@@ -3185,20 +2578,21 @@ async function loadReports(){
           <td><div class="ops"><button class="mini" data-view-report="${esc(it.rel || it.name)}">查看</button><button class="mini" data-dl-report="${esc(it.rel || it.name)}">下载</button></div></td></tr>`).join('') + '</tbody></table>';
     document.querySelectorAll('[data-view-report]').forEach(b =>
       b.onclick = () => viewReport(b.dataset.viewReport));
-    loadRepDir();
     document.querySelectorAll('[data-dl-report]').forEach(b =>
       b.onclick = () => saveReports([b.dataset.dlReport], b));
     document.querySelectorAll('#rep-list [data-rep]').forEach(cb =>
       cb.onchange = () => repSyncSel());
+    loadRepDir();
     repSyncSel();
   }catch(e){ $('#rep-list').innerHTML = '<div class="empty">读取失败</div>'; }
 }
 
-/** 「保存到」：记住上次选的目录，存在设置里（report.download_dir） */
+/** 「下载到」：两个房间各记一份（report.download_dir / report.manual_download_dir） */
 async function loadRepDir(){
   try{
     const j = await (await fetch('/api/settings')).json();
-    const dir = ((j.settings || {}).report || {}).download_dir || '';
+    const rp = (j.settings || {}).report || {};
+    const dir = repRoom === 'auto' ? (rp.download_dir || '') : (rp.manual_download_dir || '');
     const el = document.getElementById('rep-dir');
     if(el) el.value = dir;
   }catch(e){ /* 读不到就留空，留空=桌面 */ }
@@ -3206,9 +2600,12 @@ async function loadRepDir(){
 
 async function saveRepDir(dir){
   try{
+    const body = repRoom === 'auto'
+      ? {report: {download_dir: dir || ''}}
+      : {report: {manual_download_dir: dir || ''}};
     await fetch('/api/settings', {method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({report: {download_dir: dir || ''}})});
+      body: JSON.stringify(body)});
   }catch(e){ /* 存不上也不影响这次保存 */ }
 }
 
@@ -3323,7 +2720,8 @@ $('#rep-dl').onclick = (e) => {
   saveReports(names, e.currentTarget);
 };
 $('#rep-dl-all').onclick = (e) => {
-  const items = repStore ? repAll.filter(x => (x.group||'') === repStore) : repAll;
+  // 只下当前房间（自动 / 手动）里、当前店铺筛选下的那批
+  const items = repInRoom().filter(x => !repStore || (x.group || '') === repStore);
   if(!items.length){ toast('这里没有报表'); return; }
   saveReports(items.map(x => x.rel || x.name), e.currentTarget);
 };
@@ -3501,126 +2899,145 @@ const normParams = list => (list || []).map(p => ({
 function cur(){ return scopeData[scope] || scopeData[""]; }
 function rowsOf(){ return cur().params; }
 
-/* ---------------- 手动核算 ----------------
-   自己传一批表单独算：文件在 数据\手动核算\<批次>\，报表在 报表\手动核算\<批次>\。
-   和驾驶舱那条线（店铺收件箱）完全不交叉——重算读不到这里的表，
-   这里的计算也不会去读店铺的数据。 */
-const MN = {items: [], cur: ''};
-let MN_RANGE = null;            // null = 全部（不按日期过滤）
+/* ---------------- 手动核算（按店铺的卡片墙） ----------------
+   一家店一张卡：这家店自己传的表放 数据\店铺\<店名>\手动导入\，
+   算出来的报表放 报表\<店名>\手动\。跟驾驶舱那条线（收件箱）完全不交叉。 */
+const MN = {spaces: [], busy: {}};
+let MN_RANGE = null;                 // null = 全部（不按日期过滤）
 
-function mnCurrent(){
-  return MN.items.find(x => x.name === MN.cur) || null;
-}
-
-async function loadManual(keep){
-  const sel = $('#mn-batch');
-  if(!sel) return;
-  // 国家下拉是另一处填的，第一次进来可能还没填完——不等它，批次里存的
-  // 国家就选不上，会被默认值盖掉
-  if($('#mn-country') && !$('#mn-country').options.length) await loadImportOptions();
-  try{
-    const j = await (await fetch('/api/manual')).json();
-    MN.items = j.items || [];
-  }catch(e){ MN.items = []; }
-  if(!MN.items.length){
-    MN.cur = '';
-    sel.innerHTML = '<option value="">（还没有批次，先新建一批）</option>';
-  }else{
-    const want = keep || MN.cur || MN.items[0].name;
-    MN.cur = MN.items.some(x => x.name === want) ? want : MN.items[0].name;
-    sel.innerHTML = MN.items.map(x =>
-      `<option value="${esc(x.name)}"${x.name === MN.cur ? ' selected' : ''}>${esc(x.name)}</option>`).join('');
-  }
-  applyManualBatch();
-}
-
-function applyManualBatch(){
-  const it = mnCurrent();
-  const del = $('#mn-del'); if(del) del.disabled = !it;
-
-  // 国家：沿用这批上次用的，没有就用下拉里的默认值
-  const cs = $('#mn-country');
-  if(cs && it && it.country && [...cs.options].some(o => o.value === it.country)){
-    cs.value = it.country;
-  }
-
-  // 区间：沿用这批上次算的那一段；没算过就是「全部」
-  if(it && it.from && it.to) MN_RANGE = {startDate: it.from, to: it.to};
-  else if(it) MN_RANGE = null;
-  paintMnRange();
-
-  const hint = $('#mn-hint');
-  if(hint){
-    hint.textContent = it
-      ? `${it.count} 个文件 · 建于 ${it.created}`
-        + (it.last ? ` · 上次算于 ${it.last.at}：净利 ${fmt2(it.last.net)}` : ' · 还没算过')
-      : '还没有批次。给这批起个名字（或留空自动起），点「新建一批」。';
-  }
-  renderManualFiles(it);
-}
+function mnSpace(key){ return MN.spaces.find(x => x.key === key) || null; }
 
 function paintMnRange(){
   const t = $('#mn-range-txt');
-  if(!t) return;
-  t.textContent = MN_RANGE ? (MN_RANGE.startDate + ' ~ ' + (MN_RANGE.to || '今天')) : '全部数据';
+  if(t) t.textContent = MN_RANGE ? (MN_RANGE.startDate + ' ~ ' + (MN_RANGE.to || '今天')) : '全部数据';
   document.querySelectorAll('#mn-chips button').forEach(b => {
     const k = b.dataset.k;
     let on = false;
     if(k === 'all') on = !MN_RANGE;
-    else if(MN_RANGE) { const [a, c] = rangeOf(k); on = (a === MN_RANGE.startDate && c === MN_RANGE.to); }
+    else if(MN_RANGE){ const [a, c] = rangeOf(k); on = (a === MN_RANGE.startDate && c === MN_RANGE.to); }
     b.classList.toggle('on', on);
   });
 }
 
-function renderManualFiles(it){
-  const box = $('#mn-files'), hint = $('#mn-files-hint');
-  if(!box) return;
-  if(!it){ box.innerHTML = '<div class="empty">先新建一批</div>'; if(hint) hint.textContent = ''; return; }
-  const files = it.files || [];
-  if(hint) hint.textContent = files.length ? (files.length + ' 个文件') : '';
-  if(!files.length){
-    box.innerHTML = '<div class="empty"><b>这批还是空的</b>把订单表拖上来（订单表必须有，广告 / 佣金 / SKU 选填）</div>';
+const MN_KINDS = [['order', '订单表'], ['ads', '广告表'],
+                  ['affiliate', '联盟佣金表'], ['mapping', 'SKU/映射']];
+
+function mnCardHtml(s){
+  const kinds = s.kinds || {};
+  const rows = MN_KINDS.map(([k, label]) => {
+    const n = kinds[k] || 0;
+    return `<div class="step ${n ? 'done' : ''}">
+      <span class="ic">${n ? '<span style="color:#12a382">✓</span>' : '<span style="color:#c9c7bd">○</span>'}</span>
+      <span class="nm">${label}</span>
+      <span class="dt">${n ? n + ' 个文件' : '缺'}</span></div>`;
+  }).join('');
+  const last = s.last;
+  const span = last && last.from && last.to
+    ? ('　' + last.from.slice(5) + '~' + last.to.slice(5)) : '';
+  const busy = !!MN.busy[s.key];
+  // 「计算」这一行说进度：正在算 / 上次算完的时间与净利 / 还没算过
+  const calcTxt = busy ? '计算中…'
+    : (last ? ('完成 ' + (last.at || '').slice(-5) + '　净利 ' + fmt2(last.net) + span)
+            : (s.count ? '还没算过' : '还没导入'));
+  // 「报表」这一行说结果：出没出、叫什么名字。点一下去报表的手动房间
+  const repTxt = last && last.report ? String(last.report) : '还没有';
+  // 跟驾驶舱一样的身份行：平台店名 + ID 后 8 位 + 站点
+  const meta = [
+    (s.shop_name && s.shop_name !== s.name) ? s.shop_name : '',
+    'ID ' + String(s.key || '').slice(-8),
+    s.region || s.country || ''
+  ].filter(Boolean).join(' · ');
+  return `<div class="sc" data-mn-card="${esc(s.key)}">
+    <div class="sc-head">
+      <div class="sc-title"><div class="n">${esc(s.name || s.key)}</div>
+        <div class="m">${esc(meta || '—')}</div></div>
+      <span class="sc-state"><i class="dot ${s.count ? 'on' : 'off'}"></i>${s.count ? '有数据' : '空'}</span>
+    </div>
+    <div class="sc-body">${rows}
+      <div class="step ${busy ? 'run' : (last ? 'done' : '')}">
+        <span class="ic">${busy ? '<span style="color:#3b82d6">◐</span>'
+          : (last ? '<span style="color:#12a382">✓</span>' : '<span style="color:#c9c7bd">○</span>')}</span>
+        <span class="nm">计算</span><span class="dt">${esc(calcTxt)}</span></div>
+      <div class="step ${last && last.report ? 'done' : ''}">
+        <span class="ic">${last && last.report ? '<span style="color:#12a382">✓</span>'
+          : '<span style="color:#c9c7bd">○</span>'}</span>
+        <span class="nm">报表</span>
+        <span class="dt" title="${esc(repTxt)}">${esc(repTxt)}</span></div>
+      ${s.count ? `<div class="mn-link" data-mn-files="${esc(s.key)}">查看 / 清空文件（${s.count}）›</div>` : ''}
+    </div>
+    <div class="sc-foot">
+      <div class="last">${esc(s.count ? ('最后导入 ' + (s.last_file || '')) : '也可以把表直接拖到卡片上')}</div>
+      <button class="ghost" data-mn-imp="${esc(s.key)}">导入</button>
+      <button class="primary" data-mn-run="${esc(s.key)}"
+              title="用这家店的手动数据算。改了佣金费率就再点一次">计算</button>
+    </div>
+  </div>`;
+}
+
+async function loadManual(){
+  const grid = $('#mn-grid');
+  if(!grid) return;
+  try{
+    const j = await (await fetch('/api/manual')).json();
+    MN.spaces = j.spaces || [];
+  }catch(e){ MN.spaces = []; }
+  if(!MN.spaces.length){
+    grid.innerHTML = '<div class="sc-empty">还没识别到店铺。<br>在浏览器里打开店铺后台，扩展会自动认出是哪家店。</div>';
     return;
   }
-  box.innerHTML = '<table><thead><tr><th>文件名</th><th style="width:120px">识别为</th>'
-    + '<th style="width:84px">大小</th><th style="width:130px">上传时间</th><th style="width:64px"></th>'
-    + '</tr></thead><tbody>' + files.map(f => `<tr>
-        <td>${esc(f.name)}</td>
-        <td>${f.kind ? '<span class="tag">' + esc(f.label) + '</span>'
-                    : '<span class="tag warn">未识别</span>'}</td>
-        <td class="muted">${f.size_kb} KB</td>
-        <td class="muted">${esc(f.at)}</td>
-        <td><button class="mini" data-mn-rm="${esc(f.name)}">删</button></td></tr>`).join('')
-    + '</tbody></table>';
+  const done = MN.spaces.filter(x => x.count).length;
+  const hint = $('#mn-hint');
+  if(hint) hint.textContent = MN.spaces.length + ' 家' + (done ? ('，' + done + ' 家有手动数据') : '，都还没有手动数据');
+  grid.innerHTML = MN.spaces.map(mnCardHtml).join('');
+  bindMnCards(grid);
+  paintMnRange();
+}
 
-  box.querySelectorAll('[data-mn-rm]').forEach(b => {
-    b.onclick = async () => {
-      if(!MN.cur) return;
-      if(!confirm('把这个文件从这批里移走？\n\n会挪进「数据\\回收站」，不是真删。')) return;
-      try{
-        const j = await (await fetch('/api/manual/delete', {method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({batch: MN.cur, file: b.dataset.mnRm})})).json();
-        if(!j.ok) toast('删不掉：' + (j.error || ''));
-      }catch(e){ toast('删不掉：' + e.message); }
-      loadManual(MN.cur);
+function bindMnCards(grid){
+  grid.querySelectorAll('[data-mn-imp]').forEach(b => {
+    b.onclick = () => {
+      const inp = $('#mn-file');
+      if(!inp) return;
+      inp.dataset.key = b.dataset.mnImp;
+      inp.click();
     };
+  });
+  grid.querySelectorAll('[data-mn-run]').forEach(b => {
+    b.onclick = () => mnRun(b.dataset.mnRun);
+  });
+  grid.querySelectorAll('[data-mn-files]').forEach(b => {
+    b.onclick = () => mnShowFiles(b.dataset.mnFiles);
+  });
+  // 整张卡都能接拖进来的文件
+  grid.querySelectorAll('[data-mn-card]').forEach(card => {
+    const key = card.dataset.mnCard;
+    const stop = e => { e.preventDefault(); e.stopPropagation(); };
+    ['dragenter', 'dragover'].forEach(ev =>
+      card.addEventListener(ev, e => { stop(e); card.classList.add('picked'); }));
+    ['dragleave', 'drop'].forEach(ev =>
+      card.addEventListener(ev, e => { stop(e); card.classList.remove('picked'); }));
+    card.addEventListener('drop', e => {
+      const fs = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+      if(fs.length) mnUpload(key, fs);
+    });
   });
 }
 
-async function mnUpload(files){
+async function mnUpload(key, files){
   const n = $('#mn-note');
-  if(!MN.cur){ note(n, '先新建一批，再往这批里传表', 'err'); return; }
+  const s = mnSpace(key);
+  if(!s){ note(n, '没找到这家店', 'err'); return; }
   if(!files || !files.length) return;
-  note(n, '正在传（' + files.length + ' 个文件）…', 'ok');
-  const country = ($('#mn-country') && $('#mn-country').value) || '';
+  const cs = document.querySelector('[data-mn-country="' + key + '"]');
+  const country = (cs && cs.value) || s.country || '';
+  note(n, `正在传 ${files.length} 个文件到「${s.name || key}」…`, 'ok');
   const lines = [];
   for(const f of files){
     try{
       const b64 = await fileToB64(f);
       const j = await (await fetch('/api/manual/upload', {method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({batch: MN.cur, name: f.name, b64, country})})).json();
+        body: JSON.stringify({key, name: f.name, b64, country})})).json();
       if(j.ok){
         lines.push(`✓ ${esc(f.name)} → <b>${esc(j.label || '未识别')}</b>`
           + (j.kind ? '' : ' <span style="color:#B45309">（表头没认出来，确认下是不是这类表）</span>'));
@@ -3631,69 +3048,114 @@ async function mnUpload(files){
       lines.push(`✕ ${esc(f.name)} → <span style="color:#C0392B">${esc(err.message || String(err))}</span>`);
     }
   }
-  note(n, lines.join('<br>'), 'ok');
-  loadManual(MN.cur);
+  note(n, `<b>${esc(s.name || key)}</b><br>` + lines.join('<br>'), 'ok');
+  loadManual();
+}
+
+async function mnRun(key){
+  const n = $('#mn-note');
+  const s = mnSpace(key);
+  if(!s) return;
+  if(!s.has_orders){
+    note(n, `「${esc(s.name || key)}」还没有订单表——先点「导入」传一份订单导出`, 'err');
+    return;
+  }
+  const cs = document.querySelector('[data-mn-country="' + key + '"]');
+  const country = (cs && cs.value) || s.country || '';
+  const rg = MN_RANGE;
+  // 卡片上立刻显示「计算中…」，不然点了没反应，人会以为没点上
+  MN.busy[key] = 1;
+  loadManual();
+  try{
+    const j = await (await fetch('/api/manual/run', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({key, country,
+                            from: rg ? rg.startDate : '',
+                            to: rg ? rg.to : '',
+                            with_formula: !!($('#mn-formula') && $('#mn-formula').checked)})})).json();
+    if(j.ok){
+      note(n, `<b>${esc(s.name || key)} 算完了</b>　GMV ${fmt2(j.gmv)}　`
+        + `净利 <b>${fmt2(j.net_local)}</b>（人民币 ${fmt2(j.net_cny)}）　`
+        + `净利率 ${(Number(j.net_margin) * 100).toFixed(2)}%<br>`
+        + `报表：${esc(j.report_name)}<span class="muted">（在「报表 → 手动报表」里）</span>`
+        + (j.copied_to ? `<br><span class="muted">已复制到 ${esc(j.copied_to)}</span>` : ''), 'ok');
+    }else{
+      note(n, '算不出来：' + esc(j.error || '未知原因'), 'err');
+    }
+  }catch(e){ note(n, '出错：' + esc(e.message), 'err'); }
+  delete MN.busy[key];
+  loadManual();
+}
+
+function mnShowFiles(key){
+  const s = mnSpace(key);
+  if(!s) return;
+  $('#modal').classList.add('show');
+  $('#modal-title').textContent = (s.name || key) + ' · 手动数据';
+  $('#modal-sub').textContent = s.dir || '';
+  const files = s.files || [];
+  if(!files.length){
+    $('#modal-body').innerHTML = '<div class="empty">这家店还没有手动数据</div>';
+    return;
+  }
+  $('#modal-body').innerHTML = '<table><thead><tr><th>文件名</th><th style="width:120px">识别为</th>'
+    + '<th style="width:90px">大小</th><th style="width:130px">时间</th><th style="width:60px"></th>'
+    + '</tr></thead><tbody>' + files.map(f => `<tr>
+        <td>${esc(f.name)}</td>
+        <td>${f.kind ? '<span class="tag">' + esc(f.label) + '</span>'
+                    : '<span class="tag warn">未识别</span>'}</td>
+        <td class="muted">${f.size_kb} KB</td>
+        <td class="muted">${esc(f.at)}</td>
+        <td><button class="mini" data-mn-rm="${esc(f.name)}">删</button></td></tr>`).join('')
+    + '</tbody></table>'
+    + `<div style="padding:14px 22px;border-top:1px solid var(--line-soft);display:flex;align-items:center;gap:12px">
+         <button class="danger" id="mn-clear">清空这家店的手动数据</button>
+         <span class="muted" style="font-size:12px">全部文件挪进「数据/回收站」，不是真删，随时能找回</span>
+       </div>`;
+
+  $('#modal-body').querySelectorAll('[data-mn-rm]').forEach(b => {
+    b.onclick = async () => {
+      if(!confirm('把这个文件从「' + (s.name || key) + '」移走？\n\n会挪进「数据\\回收站」，不是真删。')) return;
+      try{
+        const j = await (await fetch('/api/manual/delete', {method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({key, file: b.dataset.mnRm})})).json();
+        if(!j.ok) toast('删不掉：' + (j.error || ''));
+      }catch(e){ toast('删不掉：' + e.message); }
+      mnShowFiles(key);
+      loadManual();
+    };
+  });
+
+  const clr = document.getElementById('mn-clear');
+  if(clr) clr.onclick = async () => {
+    if(!confirm('清空「' + (s.name || key) + '」的全部手动数据？\n\n'
+                + '· ' + (s.files || []).length + ' 个文件会挪进「数据\\回收站」，能找回\n'
+                + '· 驾驶舱的自动数据不受影响')) return;
+    clr.disabled = true;
+    try{
+      const j = await (await fetch('/api/manual/clear', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({key})})).json();
+      if(j.ok) toast('已清空 ' + (j.moved || 0) + ' 个文件（在回收站里能找回）');
+      else toast('清空失败：' + (j.error || ''));
+    }catch(e){ toast('清空失败：' + e.message); }
+    mnShowFiles(key);
+    loadManual();
+  };
 }
 
 (function bindManualUi(){
-  if(!$('#mn-batch')) return;
-
-  $('#mn-batch').onchange = () => { MN.cur = $('#mn-batch').value; applyManualBatch(); };
-
-  $('#mn-new').onclick = async () => {
-    const name = (($('#mn-new-name') && $('#mn-new-name').value) || '').trim();
-    try{
-      const j = await (await fetch('/api/manual/new', {method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({name})})).json();
-      if(!j.ok){ toast('新建失败：' + (j.error || '')); return; }
-      if($('#mn-new-name')) $('#mn-new-name').value = '';
-      MN.cur = (j.batch || {}).name || '';
-      await loadManual(MN.cur);
-      toast('已新建：' + MN.cur + '，可以把表传进来了');
-    }catch(e){ toast('新建失败：' + e.message); }
-  };
-
-  $('#mn-del').onclick = async () => {
-    if(!MN.cur) return;
-    if(!confirm('删除整批「' + MN.cur + '」？\n\n· 这批文件会挪进「数据\\回收站」，能找回\n'
-                + '· 已经生成的报表不受影响')) return;
-    try{
-      const j = await (await fetch('/api/manual/delete', {method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({batch: MN.cur})})).json();
-      if(!j.ok){ toast('删不掉：' + (j.error || '')); return; }
-      MN.cur = '';
-      await loadManual();
-      toast('这批已删除（在回收站里能找回）');
-    }catch(e){ toast('删不掉：' + e.message); }
-  };
-
+  if(!$('#mn-grid')) return;
   $('#mn-file').onchange = (e) => {
-    mnUpload(Array.from(e.target.files || []));
+    const key = e.target.dataset.key || '';
+    const fs = Array.from(e.target.files || []);
     e.target.value = '';
+    if(key && fs.length) mnUpload(key, fs);
   };
-
-  // 拖放整块都能接
-  const dz = $('#mn-drop');
-  const stop = e => { e.preventDefault(); e.stopPropagation(); };
-  ['dragenter', 'dragover'].forEach(ev =>
-    dz.addEventListener(ev, e => { stop(e); dz.classList.add('over'); }));
-  ['dragleave', 'drop'].forEach(ev =>
-    dz.addEventListener(ev, e => { stop(e); dz.classList.remove('over'); }));
-  dz.addEventListener('drop', e => {
-    const fs = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
-    if(fs.length) mnUpload(fs);
-  });
-  dz.addEventListener('click', e => {
-    if(e.target.closest('label')) return;
-    const inp = $('#mn-file'); if(inp) inp.click();
-  });
-
   $('#mn-range').onclick = () => {
     openRangePicker($('#mn-range'), MN_RANGE, r => { MN_RANGE = r; paintMnRange(); });
   };
-
   document.querySelectorAll('#mn-chips button').forEach(b => {
     b.onclick = () => {
       const k = b.dataset.k;
@@ -3702,33 +3164,6 @@ async function mnUpload(files){
       paintMnRange();
     };
   });
-
-  $('#mn-run').onclick = async () => {
-    const btn = $('#mn-run'), n = $('#mn-result');
-    if(!MN.cur){ note(n, '先新建一批（或在上面选中已有的一批）', 'err'); return; }
-    const country = ($('#mn-country') && $('#mn-country').value) || '';
-    btn.disabled = true;
-    note(n, '正在算这一批，几十秒…', 'ok');
-    try{
-      const j = await (await fetch('/api/manual/run', {method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({batch: MN.cur, country,
-                              from: MN_RANGE ? MN_RANGE.startDate : '',
-                              to: MN_RANGE ? MN_RANGE.to : '',
-                              with_formula: !!($('#mn-formula') && $('#mn-formula').checked)})})).json();
-      if(j.ok){
-        note(n, `<b>算完了</b><br>GMV ${fmt2(j.gmv)}　净利 <b>${fmt2(j.net_local)}</b>`
-          + `（人民币 ${fmt2(j.net_cny)}）　净利率 ${(Number(j.net_margin) * 100).toFixed(2)}%<br>`
-          + `商品 ${j.products}　订单 ${j.orders}　异常 ${j.issues} 条<br>`
-          + `报表：${esc(j.report_name)}<span class="muted">（在「报表」页的「手动核算/${esc(j.batch)}」下）</span>`,
-          'ok');
-        loadManual(MN.cur);
-      }else{
-        note(n, '算不出来：' + esc(j.error || '未知原因'), 'err');
-      }
-    }catch(e){ note(n, '出错：' + esc(e.message), 'err'); }
-    btn.disabled = false;
-  };
 })();
 
 /* ---------------- 预设 ---------------- */
@@ -5693,8 +5128,6 @@ async function loadDebug(){
   }catch(e){}
 }
 
-setRange('all');
-paintRunRange();
 go((location.hash || '#/overview').replace('#/', '') || 'overview');
 loadTrend();
 setInterval(() => { if(!$('#view-overview').hidden) loadStatus(); }, 20000);

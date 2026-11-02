@@ -91,10 +91,14 @@ def _pending_drop(key: str) -> None:
 
 
 def _calc_cmd(shop_id: str, country: str, dfrom: str, dto: str,
-              out: Path, with_formula: bool) -> list[str]:
-    """拼出核算子进程的命令（和界面点「核算」走的是同一条路）。"""
+              out: Path, with_formula: bool, data_dir: Path | None = None) -> list[str]:
+    """拼出核算子进程的命令（和界面点「核算」走的是同一条路）。
+
+    data_dir 只给手动核算用：数据在「店铺/手动导入」，但费率口径还按这家店来，
+    所以 --dir 指手动目录、--store 照样传。
+    """
     base = [sys.executable, "run"] if paths.is_frozen() else [sys.executable, "-m", "src.cli"]
-    cmd = base + ["--dir", str(paths.store_dir(shop_id))]
+    cmd = base + ["--dir", str(data_dir or paths.store_dir(shop_id))]
     cmd += ["--store", shop_id] if shop_id else ["--country", country or "马来西亚"]
     cmd += ["--out", str(out), "--json"]
     if with_formula:
@@ -1290,10 +1294,9 @@ class Handler(BaseHTTPRequestHandler):
             from bridge import config_page
             _json(self, config_page.order_headers())
         elif self.path.startswith("/api/manual"):
-            # 手动核算：自己传一批表单独算，跟店铺收件箱完全隔开
+            # 手动核算：按店铺（+临时）分抽屉，跟店铺收件箱完全隔开
             from bridge import manual_api
-            _json(self, {"ok": True, "items": manual_api.list_batches(),
-                         "root": str(manual_api.root())})
+            _json(self, {"ok": True, "spaces": manual_api.list_spaces()})
         elif self.path.startswith("/api/capture"):
             # 「今天这个区间取过没有」——扩展跑之前问一句，取过的就不再导。
             # 参数：shop / from / to，缺区间就直说判断不了（照常全部重取）。
@@ -1392,14 +1395,29 @@ class Handler(BaseHTTPRequestHandler):
                         if not m:
                             failed.append(f"{rel}（名字里认不出区间）")
                             continue
-                        shop = rel.split("/")[0] if "/" in rel else ""
+                        # rel 现在是「房间/店名/文件」；老布局是「店名/文件」
+                        _parts = str(rel).replace("\\", "/").split("/")
+                        if _parts[0] in ("自动", "手动") and len(_parts) > 2:
+                            shop = _parts[1]
+                        else:
+                            shop = _parts[0] if len(_parts) > 1 else ""
                         sid = _shop_id_by_name(shop)
+                        # 手动报表要按「手动导入」那份数据重算；拿收件箱的算
+                        # 出来的带公式版，数字跟原报表对不上，还没人看得出来
+                        _data_dir = None
+                        if _parts[0] == "手动" or "手动" in _parts[:-1]:
+                            from src import manual_api as _mn
+                            if _parts[0] == "手动" and len(_parts) > 2:
+                                _data_dir = _mn.space_dir(sid) if sid else None
+                            elif _parts[0] == "临时手动":
+                                _data_dir = _mn.tmp_dir()
                         # 重算的产物放临时目录：下完就删，别在「报表」页堆一堆 _带公式
                         _tmp = Path(tempfile.mkdtemp(prefix="jingli_dl_"))
                         tmp_dirs.append(_tmp)
                         out = _tmp / f"{Path(rel).stem}_带公式.xlsx"
                         ok, msg = _run_calc_cmd(
-                            _calc_cmd(sid, "", m.group(1), m.group(2), out, True))
+                            _calc_cmd(sid, "", m.group(1), m.group(2), out, True,
+                                      data_dir=_data_dir))
                         if not ok:
                             failed.append(f"{rel}（{str(msg)[-80:]}）")
                             continue
@@ -1520,10 +1538,10 @@ class Handler(BaseHTTPRequestHandler):
                 _json(self, {"ok": False, "error": f"删除失败：{e}"}, 500)
         elif self.path.startswith("/api/data-import"):
             self._post_data_import()
-        elif self.path.startswith("/api/manual/new"):
-            self._post_manual_new()
         elif self.path.startswith("/api/manual/upload"):
             self._post_manual_upload()
+        elif self.path.startswith("/api/manual/clear"):
+            self._post_manual_clear()
         elif self.path.startswith("/api/manual/delete"):
             self._post_manual_delete()
         elif self.path.startswith("/api/manual/run"):
@@ -2137,21 +2155,7 @@ class Handler(BaseHTTPRequestHandler):
                         + (f"（{p.get('detail')}）" if p.get("detail") else ""))
         _json(self, {"ok": True})
 
-    # ---------------- 手动核算（独立数据区，不碰店铺收件箱） ----------------
-
-    def _post_manual_new(self):
-        from bridge import manual_api
-
-        try:
-            payload = self._read_payload()
-            if payload is None:
-                return
-        except (ValueError, json.JSONDecodeError):
-            payload = {}
-        r = manual_api.create(str(payload.get("name") or ""))
-        if r.get("ok"):
-            _append_log(f"[手动核算] 新建批次：{(r.get('batch') or {}).get('name', '?')}")
-        _json(self, r)
+    # ---------------- 手动核算（按店铺分抽屉，不碰收件箱） ----------------
 
     def _post_manual_upload(self):
         from bridge import manual_api
@@ -2163,20 +2167,20 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             _json(self, {"ok": False, "error": "invalid json"}, 400)
             return
-        batch = str(payload.get("batch") or "").strip()
+        key = str(payload.get("key") or "").strip()
         name = str(payload.get("name") or "").strip()
         b64 = payload.get("b64") or ""
-        if not batch or not name or not b64:
-            _json(self, {"ok": False, "error": "缺少批次、文件名或内容"}, 400)
+        if not key or not name or not b64:
+            _json(self, {"ok": False, "error": "缺少店铺、文件名或内容"}, 400)
             return
         try:
             data = base64.b64decode(b64)
         except Exception as e:  # noqa: BLE001
             _json(self, {"ok": False, "error": f"内容解码失败：{e}"}, 400)
             return
-        r = manual_api.save_file(batch, name, data, str(payload.get("country") or ""))
+        r = manual_api.save_file(key, name, data, str(payload.get("country") or ""))
         if r.get("ok"):
-            _append_log(f"[手动核算] {batch} ← {r.get('name')}（{r.get('label')}）")
+            _append_log(f"[手动核算] {key} ← {r.get('name')}（{r.get('label')}）")
         _json(self, r)
 
     def _post_manual_delete(self):
@@ -2188,15 +2192,32 @@ class Handler(BaseHTTPRequestHandler):
                 return
         except (ValueError, json.JSONDecodeError):
             payload = {}
-        batch = str(payload.get("batch") or "").strip()
+        key = str(payload.get("key") or "").strip()
         fname = str(payload.get("file") or "").strip()
-        if not batch:
-            _json(self, {"ok": False, "error": "缺少批次"}, 400)
+        if not key or not fname:
+            _json(self, {"ok": False, "error": "缺少店铺或文件名"}, 400)
             return
-        r = manual_api.delete_file(batch, fname) if fname else manual_api.delete_batch(batch)
+        r = manual_api.delete_file(key, fname)
         if r.get("ok"):
-            _append_log(f"[手动核算] 删除 {batch}"
-                        f"{('/' + fname) if fname else '（整批）'} → 回收站")
+            _append_log(f"[手动核算] 删除 {key}/{fname} → 回收站")
+        _json(self, r)
+
+    def _post_manual_clear(self):
+        from bridge import manual_api
+
+        try:
+            payload = self._read_payload()
+            if payload is None:
+                return
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+        key = str(payload.get("key") or "").strip()
+        if not key:
+            _json(self, {"ok": False, "error": "缺少店铺"}, 400)
+            return
+        r = manual_api.clear_space(key)
+        if r.get("ok"):
+            _append_log(f"[手动核算] 清空 {key} 的手动数据：{r.get('moved', 0)} 个文件 → 回收站")
         _json(self, r)
 
     def _post_manual_run(self):
@@ -2208,13 +2229,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
         except (ValueError, json.JSONDecodeError):
             payload = {}
-        batch = str(payload.get("batch") or "").strip()
-        if not batch:
-            _json(self, {"ok": False, "error": "缺少批次"}, 400)
+        key = str(payload.get("key") or "").strip()
+        if not key:
+            _json(self, {"ok": False, "error": "缺少店铺"}, 400)
             return
-        _append_log(f"[手动核算] 开始计算 {batch} "
+        _append_log(f"[手动核算] 开始计算 {key} "
                     f"{payload.get('from') or '全部'}~{payload.get('to') or '全部'}")
-        r = manual_api.run(batch,
+        r = manual_api.run(key,
                            country=str(payload.get("country") or ""),
                            dfrom=str(payload.get("from") or ""),
                            dto=str(payload.get("to") or ""),
@@ -2926,9 +2947,11 @@ class Handler(BaseHTTPRequestHandler):
                                       f"报表会出现在「报表」页。"})
                 return
 
-            # 报表放到该店铺自己的子目录，文件名按设置里的模板生成
+            # 报表放到「自动」房间里该店铺自己的子目录，文件名按设置里的模板生成。
+            # 自动 / 手动分两个房间（报表\自动、报表\手动），各自下面再按店铺。
             cfg_settings.load()
-            out_dir = paths.OUTPUT / re.sub(r'[\\/:*?"<>|]', "_", store_name)
+            out_dir = (paths.store_reports_dir(shop_id) if shop_id else
+                       paths.report_room_dir("auto") / re.sub(r'[\\/:*?"<>|]', "_", store_name))
             out_dir.mkdir(parents=True, exist_ok=True)
 
             stg = cfg_settings.load().get("report", {})
@@ -3491,6 +3514,17 @@ def main() -> int:
     _setup_log_file()
     _sync_extension_copies()
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 老报表搬进「自动」房间（报表\<店名>\ → 报表\自动\<店名>\）。
+    # 放在启动时做：只搬一次，之后目录结构就稳定了；搬不动的（Excel 开着）下次再试。
+    try:
+        _moved = paths.migrate_report_dirs()
+        if _moved:
+            _append_log(f"[报表] 老报表搬进「自动」房间：{len(_moved)} 份")
+            for _m in _moved[:5]:
+                print(f"[报表] {_m}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[报表] 目录迁移跳过：{e}")
 
     if _SELFCHECK.get("crashed"):
         # 界面上已经有一条横幅说这件事了，这里只写日志，不重复塞进 actions

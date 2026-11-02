@@ -476,17 +476,97 @@ def store_kind_dir(shop_id: str, kind: str) -> Path:
     return store_dir(shop_id) / kind_dirname(kind)
 
 
-def store_reports_dir(shop_id: str) -> Path:
-    """某家店的报表目录：报表根下按店名分。
+# 报表分两个房间：报表/自动/<店名>/ 和 报表/手动/<店名>/
+# 自动 = 驾驶舱取数 + 卡片「重算」出来的；手动 = 手动核算那批表算出来的。
+REPORT_ROOMS = {"auto": "自动", "manual": "手动"}
+
+
+def store_display_name(shop_id: str) -> str:
+    """报表分目录用的店名 = 店目录名。
+
+    为什么不直接用 stores.json 的别名：别名可能改过，而店目录是
+    `store_root()` 靠 meta.json 认出来的那个真实目录——报表分目录、
+    以及「按目录名反查 shop_id」都以它为准，用别名会把同一家店拆成两个文件夹。
+    """
+    sid = (shop_id or "").strip()
+    if not sid:
+        return "未识别店铺"
+    d = store_root(sid)
+    return _safe_folder(d.name or sid, "未识别店铺")
+
+
+def report_room_dir(room: str = "auto") -> Path:
+    """报表根下的房间目录：自动 / 手动。"""
+    return OUTPUT / REPORT_ROOMS.get(room, REPORT_ROOMS["auto"])
+
+
+def store_reports_dir(shop_id: str, room: str = "auto") -> Path:
+    r"""某家店在某个房间里的报表目录：报表\自动\<店名>\ / 报表\手动\<店名>\。
 
     不放在店数据目录里——报表是给人看的结果，数据是给程序用的原料，
     混在一起的话「数据」文件夹里就会塞满 xlsx。
     """
     sid = (shop_id or "").strip()
     if not sid:
-        return OUTPUT
-    name = _load_store_names().get(sid, sid)
-    return OUTPUT / _safe_folder(name, "未识别店铺")
+        return report_room_dir(room)
+    return report_room_dir(room) / store_display_name(sid)
+
+
+def migrate_report_dirs(root: Path | str | None = None) -> list[str]:
+    r"""把老的报表布局搬进「自动 / 手动」两个房间。
+
+    老布局：报表\<店名>\x.xlsx（自动）、报表\<店名>\手动\x.xlsx（手动）
+    新布局：报表\自动\<店名>\x.xlsx、报表\手动\<店名>\x.xlsx
+
+    只搬 xlsx，不删任何东西；目标已存在同名文件就跳过（留旧的不动）。
+    文件被 Excel 开着搬不动时跳过，下次启动再试。
+    """
+    base = Path(root) if root else OUTPUT
+    moved: list[str] = []
+    rooms = set(REPORT_ROOMS.values())
+    try:
+        dirs = [d for d in base.iterdir() if d.is_dir()]
+    except OSError:
+        return moved
+    for d in dirs:
+        if d.name in rooms or d.name.startswith("_"):
+            continue
+        auto_dst = base / REPORT_ROOMS["auto"] / d.name
+        manual_src = d / "手动"
+        # ① 这家店目录下直接放着的 xlsx = 自动报表
+        for f in list(d.glob("*.xlsx")):
+            try:
+                auto_dst.mkdir(parents=True, exist_ok=True)
+                dst = auto_dst / f.name
+                if dst.exists():
+                    continue
+                f.replace(dst)
+                moved.append(f"{d.name}/{f.name} → 自动/{d.name}/")
+            except OSError:
+                continue
+        # ② 店目录下的「手动」子目录 → 手动/<店名>/
+        if manual_src.is_dir():
+            manual_dst = base / REPORT_ROOMS["manual"] / d.name
+            for f in list(manual_src.glob("*.xlsx")):
+                try:
+                    manual_dst.mkdir(parents=True, exist_ok=True)
+                    dst = manual_dst / f.name
+                    if dst.exists():
+                        continue
+                    f.replace(dst)
+                    moved.append(f"{d.name}/手动/{f.name} → 手动/{d.name}/")
+                except OSError:
+                    continue
+            try:
+                manual_src.rmdir()      # 空了就删掉；不空说明还有别的文件，留着
+            except OSError:
+                pass
+        # ③ 整店目录空了就收掉，免得 报表/ 里还挂着一堆空文件夹
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+    return moved
 
 
 def unknown_dir(stamp: str = "") -> Path:

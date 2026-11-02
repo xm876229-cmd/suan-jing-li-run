@@ -28,6 +28,8 @@ DEFAULTS: dict = {
         # 核算完自动复制一份到 download_dir
         "auto_copy": False,
         "download_dir": "",
+        # 手动核算的报表放哪儿（跟自动报表分开记：两边常放不同文件夹）
+        "manual_download_dir": "",
         # 「下载导入模板」存到哪儿（空 = 存到程序里的「报表」目录）
         "template_dir": "",
         # 导出的报表带不带 Excel 公式。
