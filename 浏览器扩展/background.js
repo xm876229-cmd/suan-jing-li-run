@@ -737,6 +737,9 @@ async function identifyShop(host, log, opts = {}) {
     } catch (e) { /* 桥不在也不影响识别本身 */ }
 
     try { await chrome.storage.local.set({ currentShop: CURRENT_SHOP }); } catch (e) {}
+    // 认出是哪家店了，立刻告诉桥一声 —— 界面上的卡片马上从「离线」变「在线」，
+    // 不用等下一分钟的闹钟。
+    beatBridge();
     // 顺手把这家店的基本档案落盘（站点代码/区域）。这些是"这家店的身份证"，
     // 换电脑拷数据时一起带过去，不用重新摸一遍。
     try {
@@ -2499,6 +2502,9 @@ try {
     chrome.alarms.create("ads-poll", { periodInMinutes: 3, delayInMinutes: 2 });
     chrome.alarms.create("pending-watch", { periodInMinutes: 1, delayInMinutes: 1 });
     chrome.alarms.onAlarm.addListener((a) => {
+      // 心跳跟轮询绑在一起：界面靠它判断「这家店的浏览器开着没」。
+      // 每分钟一次，桥那边超过 150 秒没收到就算离线。
+      if (a.name === "pending-watch") beatBridge().catch(() => {});
       if (a.name === "pending-watch") consumePending().catch(() => {});
       // 排队中的订单导出：每分钟看一眼，生成好就自动下载回传。
       // 大店导出入队要几分钟，不能靠人守着。
@@ -4150,23 +4156,99 @@ async function calcNow(range, log, opts = {}) {
 }
 
 /** 真正执行一个任务：写运行标记、保活、跑、落结果。两条触发路径共用。 */
+// ---------------- 进度上报 ----------------
+// 跑一步报一步，界面上的店铺卡片靠它显示「卡在哪」。
+// 以前大店取数要 8 分钟，界面只有一句「取数中」，分不清是在动还是死了。
+
+let RUN_ID = "";
+
+function newRunId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+// 取数任务名 → 界面上的步骤名（两个地方叫法不一样，这里统一）
+const STEP_OF_TASK = {
+  sku: "sku", link: "sku", orders: "orders",
+  ads: "ads", manualAds: "ads", affiliate: "affiliate",
+};
+
+async function reportProgress(step, state, extra = {}) {
+  const sid = (CURRENT_SHOP && CURRENT_SHOP.shop_id) || "";
+  if (!sid) return;              // 还没认出是哪家店，报了也对不上号
+  try {
+    await fetch(`${BRIDGE}/progress`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        shop_id: sid, task: "all", run_id: RUN_ID, step, state, ...extra,
+      }),
+    });
+  } catch (e) { /* 桥没开就不报，不能因为上报失败把取数搞挂 */ }
+}
+
+function shortDetail(r) {
+  if (!r || typeof r !== "object") return "";
+  const p = r.saved || r.path || "";
+  if (p) return String(p).split(/[\\/]/).pop().slice(0, 40);
+  if (r.rows) return `${r.rows} 行`;
+  if (r.count) return `${r.count} 条`;
+  return "";
+}
+
+// 心跳：告诉桥「我是哪家店、还开着、在不在跑」。
+// 没有它，界面只能说「上次上传是 10/31」，点运行后一直排队，人以为卡死了。
+async function beatBridge(running) {
+  const sid = (CURRENT_SHOP && CURRENT_SHOP.shop_id) || "";
+  if (!sid) return;
+  let ver = "";
+  try { ver = chrome.runtime.getManifest().version; } catch (e) { /* 忽略 */ }
+  try {
+    await fetch(`${BRIDGE}/hello`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        shop_id: sid,
+        shop_name: CURRENT_SHOP.shop_name || "",
+        region: CURRENT_SHOP.region || "",
+        ver,
+        running: running || null,
+      }),
+    });
+  } catch (e) { /* 桥没开，忽略 */ }
+}
+
 async function executeTask(task, range, log, opts = {}) {
+  RUN_ID = newRunId();
   try {
     startKeepAlive();
     CURRENT_RANGE = range || null;
     await skSet({ running: { task, at: Date.now() } });
     log(`开始（${range?.startDate} ~ ${range?.to || range?.endDateExclusive}）`);
+    beatBridge({ task, at: Date.now() });
     const withCalc = opts.withCalc !== false && task !== "ads";
+    // all 的 4 步由 runTask 内部报；单跑某一个任务就在这儿包一层
+    const isAll = task === "all";
+    const stepName = STEP_OF_TASK[task] || "";
+    const t0 = Date.now();
+    if (!isAll && stepName) await reportProgress(stepName, "running");
     const result = withCalc
       ? await runTaskThenCalc(task, range || {}, log, opts)
       : await runTask(task, range || {}, log, opts);
+    if (!isAll && stepName) {
+      await reportProgress(stepName, "done", {
+        elapsed: (Date.now() - t0) / 1000,
+        detail: shortDetail(result && (result.fetch || result)),
+      });
+    }
     await skSet({ lastResult: { task, ok: true, at: Date.now(), result } });
     log("完成");
+    await reportProgress("__finish__", "done");
     return { ok: true, result };
   } catch (e) {
     const err = String((e && (e.message || e)) || e);
     log(`失败：${err}`);
     await skSet({ lastResult: { task, ok: false, at: Date.now(), error: err } });
+    await reportProgress("__finish__", "fail", { error: err });
     return { ok: false, error: err };
   } finally {
     stopKeepAlive();
@@ -4194,7 +4276,10 @@ async function consumePending() {
 
   let p = null;
   try {
-    const resp = await fetch(`${BRIDGE}/pending`);
+    // 带上自己的店铺身份：桥按店投递任务。
+    // 不带的话就是「谁先轮询谁拿走」——7 个浏览器同时开着会互相抢，跑出来串店。
+    const sid = (CURRENT_SHOP && CURRENT_SHOP.shop_id) || "";
+    const resp = await fetch(`${BRIDGE}/pending?shop=${encodeURIComponent(sid)}`);
     const j = await resp.json();
     if (j && j.job && j.job.task) {
       p = { ...j.job, at: j.job.at || Date.now() };
@@ -5314,15 +5399,25 @@ async function runTask(task, range, log, opts = {}) {
     // link（链接资料）不在这个列表里：它跟 sku 抓的是同一个接口，
     // 重复抓一遍纯属浪费。sku 跑完会自动带出链接资料。
     for (const t of ["orders", "sku", "affiliate", "ads"]) {
+      const t0 = Date.now();
+      await reportProgress(t, "running");
       try {
         log(`—— 开始：${t} ——`);
         // 广告以前用 quick 模式（只查已完成的导出任务，不主动导）省时间，
         // 但直取接口在部分站点（实测菲律宾 code=3）根本不通，quick 就等于放弃广告，
         // 算出来的净利里没有广告费、看着特别高。现在让它同样走「页面点导出」兜底。
         out[t] = await runTask(t, range, log, { force: !!opts.force });
+        await reportProgress(t, "done", {
+          elapsed: (Date.now() - t0) / 1000,
+          detail: shortDetail(out[t]),
+        });
       } catch (e) {
         log(`—— ${t} 失败：${e.message}`);
         out[t] = { error: String(e.message || e) };
+        await reportProgress(t, "fail", {
+          elapsed: (Date.now() - t0) / 1000,
+          error: String(e.message || e),
+        });
       }
     }
     return out;
@@ -5391,8 +5486,17 @@ async function runTaskThenCalc(task, range, log, opts = {}) {
     }
   }
   try {
-    return { fetch: r, calc: await calcNow(range, log, opts) };
+    await reportProgress("calc", "running");
+    const c0 = Date.now();
+    const c = await calcNow(range, log, opts);
+    await reportProgress("calc", "done", { elapsed: (Date.now() - c0) / 1000 });
+    await reportProgress("report", "done", {
+      elapsed: (Date.now() - c0) / 1000,
+      detail: (c && c.file) ? String(c.file).split(/[\\/]/).pop().slice(0, 40) : "",
+    });
+    return { fetch: r, calc: c };
   } catch (e) {
+    await reportProgress("calc", "fail", { error: String(e.message || e) });
     log(`核算失败：${e.message}（取数已成功，数据在 data/exports/_inbox）`);
     return { fetch: r, calcError: String(e.message || e) };
   }

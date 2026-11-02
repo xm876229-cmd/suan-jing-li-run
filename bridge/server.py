@@ -196,8 +196,94 @@ LOG_FILE = paths.CAPTURE / "task.log"
 PORT = int(os.environ.get("JINGLI_PORT") or 8765)
 
 TASK_LOG: list[str] = []
-_PENDING: list = []          # 待办队列：[{task, range, store, country, at}, ...]
+_PENDING: list = []          # 待办队列：[{id, task, range, store, country, at}, ...]
 _PENDING_LOCK = threading.Lock()
+
+# 任务多久没被领走就作废。
+# 店一直离线的话，任务不该明天一开浏览器突然跑起来——那会更让人困惑。
+_JOB_TTL_MS = 30 * 60 * 1000
+
+# 扩展心跳：shop_id → {at, shop_name, region, ver, running}
+# 用来回答界面上那句「这家店的浏览器开着没」。
+# 以前只能看 meta.json 的「上次上传时间」，那只说明以前传过，不代表现在还连着。
+_ONLINE: dict[str, dict] = {}
+_ONLINE_LOCK = threading.Lock()
+_ONLINE_TTL = 150.0          # 超过这个秒数没心跳就算离线（心跳 60 秒一次）
+
+# 进度：shop_id → {task, run_id, steps:{step: {...}}, current, started, updated}
+# 扩展每完成一步报一次，桥只做合并与保存（不落盘，重启就没了，够用）。
+_PROGRESS: dict[str, dict] = {}
+_PROGRESS_LOCK = threading.Lock()
+
+# 一次运行包含哪几步。扩展和界面都用这一份，别各写一遍。
+RUN_STEPS = ("sku", "orders", "ads", "affiliate", "calc", "report")
+STEP_LABELS = {
+    "sku": "商品 SKU 表",
+    "orders": "订单表",
+    "ads": "广告表",
+    "affiliate": "联盟佣金表",
+    "calc": "核算",
+    "report": "出报表",
+}
+
+
+def _online_now(shop_id: str) -> bool:
+    rec = _ONLINE.get((shop_id or "").strip())
+    return bool(rec) and (time.time() - float(rec.get("at") or 0)) < _ONLINE_TTL
+
+
+def _enqueue(store: str, rng: dict, *, task: str = "all", auto: bool = False,
+             manual: bool = False, with_formula=None, country: str = "") -> dict:
+    """往队列里放一个任务。store 必填——不写 store 就等于"谁都能领"，
+    多店同时在线时必然串店，这正是这次要修的东西。"""
+    import uuid
+
+    job = {
+        "id": uuid.uuid4().hex[:12],
+        "task": task,
+        "range": rng or {},
+        "store": (store or "").strip(),
+        "country": country or "",
+        "auto": bool(auto),
+        "manual": bool(manual),
+        "at": int(time.time() * 1000),
+    }
+    if with_formula is not None:
+        job["with_formula"] = bool(with_formula)
+    with _PENDING_LOCK:
+        _PENDING.append(job)
+    return job
+
+
+def _known_store_ids() -> list[str]:
+    """磁盘上已经认出过的店铺（有 meta.json 的那些）。"""
+    out: list[str] = []
+    try:
+        for d in (paths.DATA / "stores").iterdir():
+            if d.is_dir() and (d / "meta.json").is_file():
+                out.append(d.name)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _store_dir_names() -> dict[str, str]:
+    """shop_id → 目录名。派任务时前端可能传 id 也可能传店名，这里统一一下。"""
+    out: dict[str, str] = {}
+    try:
+        for d in (paths.DATA / "stores").iterdir():
+            meta = d / "meta.json"
+            if not (d.is_dir() and meta.is_file()):
+                continue
+            try:
+                sid = str(json.loads(meta.read_text(encoding="utf-8")).get("shop_id") or "")
+            except Exception:  # noqa: BLE001
+                sid = ""
+            if sid:
+                out[sid] = d.name
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 # 核算锁按店铺分开：两家店各开一个浏览器同时点运行是正常用法，
 # 用一把全局锁会让第二家直接报「已有核算任务在进行」——多店铺等于用不了。
@@ -653,6 +739,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        # 这个函数里几个分支各自写了自己的 import，
+        # 于是 parse_qs 被当成整个函数的局部名 —— 在前面用就 UnboundLocalError。
+        # 统一在入口导一次，谁都能用。
+        from urllib.parse import parse_qs, urlparse  # noqa: F401
+
         if self.path.startswith("/health"):
             # extVersion：磁盘上扩展目录的版本（程序自己读文件）。
             # 面板拿它跟内存里跑的版本对比，就能发现「文件更新了但扩展没重新加载」
@@ -673,11 +764,38 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/log"):
             _json(self, {"ok": True, "lines": TASK_LOG[-200:]})
         elif self.path.startswith("/pending"):
-            # 取队首一个（不是整队掏空）：自动任务在跑的时候，
-            # 手动点的那个要能在它后面排着，而不是被清掉。
+            # 按店铺领任务：扩展轮询时带上自己的 shop_id，只领属于自己的那个。
+            #
+            # 以前是一个全局队列、谁先来谁拿走。7 个浏览器各装一份扩展时，
+            # 给 A 店派的任务会被 B 店的扩展领走 —— 跑出来串店，
+            # 而且报表看起来完全正常。现在按 store 字段投递。
+            q = parse_qs(urlparse(self.path).query)
+            want = (q.get("shop") or [""])[0].strip()
+            job = None
+            dropped = 0
             with _PENDING_LOCK:
-                job = _PENDING.pop(0) if _PENDING else None
-            _json(self, {"ok": True, "job": job})
+                now_ms = int(time.time() * 1000)
+                alive = []
+                for j in _PENDING:
+                    if not isinstance(j, dict):
+                        continue
+                    if now_ms - int(j.get("at") or 0) > _JOB_TTL_MS:
+                        dropped += 1
+                        continue
+                    alive.append(j)
+                _PENDING[:] = alive
+                for i, j in enumerate(_PENDING):
+                    target = str(j.get("store") or "").strip()
+                    if target and target != want:
+                        continue          # 不是我的，留给它自己的扩展
+                    job = _PENDING.pop(i)
+                    break
+            if dropped:
+                _append_log(f"[pending] 清掉 {dropped} 个超过 30 分钟没人领的任务")
+            _json(self, {"ok": True, "job": job, "shop": want})
+        elif self.path.startswith("/api/live"):
+            # 界面轮询这一个口子就够了：谁在线、跑到哪一步、队列里还压着几个。
+            self._get_live()
         elif self.path.startswith("/store_profile"):
             # 读店铺档案：换电脑后扩展从这里直接拿到"学过的"账户/场景，
             # 不用再开页面学一遍。档案跟着数据目录走，拷过去就生效。
@@ -937,6 +1055,12 @@ class Handler(BaseHTTPRequestHandler):
                              "saved": saved, "failed": failed})
             except Exception as e:  # noqa: BLE001
                 _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
+        elif self.path.startswith("/hello"):
+            self._post_hello()
+        elif self.path.startswith("/progress"):
+            self._post_progress()
+        elif self.path.startswith("/api/run-stores"):
+            self._post_run_stores()
         elif self.path.startswith("/api/mapping"):
             self._post_mapping()
         elif self.path.startswith("/store_profile"):
@@ -1502,6 +1626,172 @@ class Handler(BaseHTTPRequestHandler):
             "store_dir": str(paths.store_dir(shop_id)),
         })
 
+    def _post_hello(self):
+        """扩展心跳：报上「我是哪家店、什么版本、在不在跑」。
+
+        为什么非要有它：界面上得能回答「这家店的浏览器开着没」。
+        以前只有 meta.json 里的「上次上传时间」，那只说明以前传过数据，
+        不代表现在还连着 —— 于是点了运行一直排队，人以为程序卡了。
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            p = json.loads(self.rfile.read(length) or b"{}")
+        except Exception:  # noqa: BLE001
+            _json(self, {"ok": False}, 400)
+            return
+        sid = str(p.get("shop_id") or "").strip()
+        if sid:
+            with _ONLINE_LOCK:
+                _ONLINE[sid] = {
+                    "at": time.time(),
+                    "shop_name": str(p.get("shop_name") or ""),
+                    "region": str(p.get("region") or ""),
+                    "ver": str(p.get("ver") or ""),
+                    "running": p.get("running") or None,
+                }
+        _json(self, {"ok": True, "steps": list(RUN_STEPS)})
+
+    def _post_progress(self):
+        """跑一步报一步。桥只做合并，不落盘（重启就没了，够界面看）。
+
+        请求体：
+          {shop_id, task, run_id, step, state, detail, elapsed, error}
+          state: running / done / fail / skip；step 传 "__finish__" 表示整轮结束
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            p = json.loads(self.rfile.read(length) or b"{}")
+        except Exception:  # noqa: BLE001
+            _json(self, {"ok": False}, 400)
+            return
+        sid = str(p.get("shop_id") or "").strip()
+        if not sid:
+            _json(self, {"ok": False, "error": "缺少 shop_id"}, 400)
+            return
+
+        step = str(p.get("step") or "").strip()
+        state = str(p.get("state") or "").strip()
+        run_id = str(p.get("run_id") or "").strip()
+        now = time.time()
+
+        with _PROGRESS_LOCK:
+            rec = _PROGRESS.get(sid) or {}
+            if run_id and rec.get("run_id") and rec.get("run_id") != run_id:
+                rec = {}                       # 新一轮，别把上一轮的进度混进来
+            if not rec:
+                rec = {"run_id": run_id, "steps": {}, "started": now,
+                       "task": str(p.get("task") or "")}
+            if run_id:
+                rec["run_id"] = run_id
+            rec["updated"] = now
+            if step == "__finish__":
+                rec["finished"] = now
+                rec["current"] = ""
+                rec["ok"] = state != "fail"
+            else:
+                one = rec["steps"].setdefault(step, {})
+                one["state"] = state or one.get("state") or "running"
+                for k in ("detail", "error"):
+                    if p.get(k):
+                        one[k] = str(p.get(k))
+                if p.get("elapsed") is not None:
+                    try:
+                        one["elapsed"] = round(float(p.get("elapsed")), 1)
+                    except (TypeError, ValueError):
+                        pass
+                one["at"] = now
+                if state == "running":
+                    rec["current"] = step
+                elif rec.get("current") == step:
+                    rec["current"] = ""
+            _PROGRESS[sid] = rec
+
+        if step and step != "__finish__":
+            _append_log(f"[进度] {sid} {STEP_LABELS.get(step, step)} → {state}"
+                        + (f"（{p.get('detail')}）" if p.get("detail") else ""))
+        _json(self, {"ok": True})
+
+    def _post_run_stores(self):
+        """界面点「运行」：给勾选的每家店各派一个任务。
+
+        按店派是关键：每家店一个 job，store 字段填死，
+        只有那家店的扩展能领走。以前是全局一个队列，谁先轮询谁跑。
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except Exception:  # noqa: BLE001
+            _json(self, {"ok": False, "error": "invalid json"}, 400)
+            return
+
+        raw = payload.get("stores") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        wanted = [str(x).strip() for x in raw if str(x).strip()]
+
+        # 支持传「店名」也支持传 shop_id —— 前端两个都可能给
+        id_by_name = {v: k for k, v in _store_dir_names().items()}
+        ids: list[str] = []
+        for x in wanted:
+            ids.append(id_by_name.get(x, x))
+        if not ids:
+            ids = list(id_by_name.keys())        # 空 = 全部已知店铺
+
+        rng = payload.get("range") or {}
+        if isinstance(rng, dict) and rng.get("kind"):
+            from src import auto_run
+            rng = auto_run.build_range(str(rng.get("kind")), datetime.now())
+
+        sent, offline, jobs = [], [], []
+        for sid in ids:
+            job = _enqueue(sid, rng, auto=bool(payload.get("auto")),
+                           manual=not bool(payload.get("auto")),
+                           with_formula=payload.get("with_formula"),
+                           country=str(payload.get("country") or ""))
+            jobs.append(job["id"])
+            is_on = _online_now(sid)
+            (sent if is_on else offline).append(sid)
+            _append_log(f"[运行] 派给 {_store_dir_names().get(sid, sid)}"
+                        f"{'（在线）' if is_on else '（浏览器没开，排队等 30 分钟）'}")
+
+        _json(self, {
+            "ok": True, "count": len(ids), "jobs": jobs,
+            "range": rng, "sent": sent, "offline": offline,
+            "note": ("已派发。在线的店几秒内开始；离线的店等浏览器打开后自动开跑。"
+                     if offline else "已派发，在线的店几秒内开始。"),
+        })
+
+    def _get_live(self):
+        """各店的在线状态 + 进度 + 队列。卡片墙每 3 秒拉一次。"""
+        now = time.time()
+        names = _store_dir_names()
+        with _PROGRESS_LOCK:
+            prog = json.loads(json.dumps(_PROGRESS))
+        with _ONLINE_LOCK:
+            online = json.loads(json.dumps(_ONLINE))
+        with _PENDING_LOCK:
+            queue = [{"store": j.get("store"), "at": j.get("at"),
+                      "store_name": names.get(str(j.get("store") or ""), "")}
+                     for j in _PENDING if isinstance(j, dict)]
+
+        out: dict[str, dict] = {}
+        for sid, nm in names.items():
+            rec = online.get(sid) or {}
+            age = now - float(rec.get("at") or 0) if rec else 1e9
+            out[sid] = {
+                "shop_id": sid,
+                "store_name": nm,
+                "online": bool(rec) and age < _ONLINE_TTL,
+                "last_beat": int(rec.get("at") or 0),
+                "ver": rec.get("ver") or "",
+                "running": rec.get("running") or None,
+                "progress": prog.get(sid) or None,
+                "queued": sum(1 for q in queue if q.get("store") == sid),
+            }
+        _json(self, {"ok": True, "now": int(now * 1000),
+                     "steps": list(RUN_STEPS), "labels": STEP_LABELS,
+                     "stores": out, "queue": queue, "order": list(names)})
+
     def _post_auto_now(self):
         """「现在跑一次」：立刻派一个取数+核算的任务。
 
@@ -1516,20 +1806,23 @@ class Handler(BaseHTTPRequestHandler):
         now = datetime.now()
         rng = auto_run.build_range(str(cfg.get("range") or "last_month"), now)
         stores = [str(s) for s in (cfg.get("stores") or []) if str(s).strip()]
-        job = {
-            "task": "all",
-            "range": rng,
-            "store": stores[0] if len(stores) == 1 else "",
-            "auto": True,
-            "manual": True,      # 手动点的：即使自动运行关着也照跑
-            "at": int(_time.time() * 1000),
-        }
-        with _PENDING_LOCK:
-            _PENDING.append(job)
-        _append_log(f"[自动] 手动触发一次：{auto_run.describe_range(str(cfg.get('range') or 'last_month'), now)}")
-        _json(self, {"ok": True, "range": rng,
-                     "note": "任务已派发。浏览器里的扩展会在下一次轮询时领走"
-                             "（一般几秒内），浏览器关着的话下次打开才会跑。"})
+        # 一家店一个任务、store 写死：以前只派一个、store 留空，
+        # 谁先轮询谁拿走 —— 多店同时在线必然串店。
+        ids = stores or list(_store_dir_names().keys())
+        jobs, offline = [], []
+        for sid in ids:
+            jobs.append(_enqueue(sid, rng, auto=True, manual=True))
+            if not _online_now(sid):
+                offline.append(_store_dir_names().get(sid, sid))
+        _append_log(f"[自动] 手动触发一次："
+                    f"{auto_run.describe_range(str(cfg.get('range') or 'last_month'), now)}"
+                    f"（{len(jobs)} 家店）")
+        _json(self, {"ok": True, "range": rng, "count": len(jobs),
+                     "offline": offline,
+                     "note": ("已给 %d 家店各派了一个任务。在线的几秒内开始"
+                              % len(jobs))
+                             + ("；这些店的浏览器没开，等打开后自动开跑："
+                                + "、".join(offline) if offline else "")})
 
     def _post_settings(self):
         from src import settings as cfg_settings
@@ -2221,19 +2514,15 @@ def _auto_runner() -> None:
             last_key = key
             rng = auto_run.build_range(str(cfg.get("range") or "last_month"), now)
             stores = [str(s) for s in (cfg.get("stores") or []) if str(s).strip()]
-            job = {
-                "task": "all",
-                "range": rng,
-                "store": stores[0] if len(stores) == 1 else "",
-                "auto": True,
-                "at": int(now.timestamp() * 1000),
-            }
-            with _PENDING_LOCK:
-                _PENDING.append(job)
+            ids = stores or list(_store_dir_names().keys())
+            for sid in ids:
+                _enqueue(sid, rng, auto=True)
             _append_log(f"[自动] {now:%H:%M} 派发任务："
                         f"{auto_run.describe_range(str(cfg.get('range') or 'last_month'), now)}"
-                        f"{'　店铺：' + '、'.join(stores) if stores else '　全部店铺'}")
-            print(f"[自动] 已派发任务 {rng}", flush=True)
+                        f"　{len(ids)} 家店"
+                        + ("（" + "、".join(_store_dir_names().get(i, i) for i in ids) + "）"
+                           if len(ids) <= 8 else ""))
+            print(f"[自动] 已派发任务 {rng} 给 {len(ids)} 家店", flush=True)
         except Exception as e:  # noqa: BLE001
             print(f"[自动] 检查出错（忽略）：{e}", flush=True)
 
