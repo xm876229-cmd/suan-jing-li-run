@@ -26,6 +26,17 @@
 - 传完再跑一次 `verify_release --remote` 作为独立复核
 - 三个版本号必须一致：`浏览器扩展/manifest.json`、`CHANGELOG.md` 首个 `## [vX]`、`do_release.py` 的 TAG
 
+## 健壮性硬约定（0.24.6 体检后确立）
+- **所有 POST 必须走 `Handler._read_payload()`**，不要再手写
+  `read(Content-Length)`：负数/超大/非 dict 会让线程卡住或断连接
+- `do_GET` / `do_POST` 各有外层兜底（`_do_get` / `_do_post`），
+  新增分支不需要自己 try；异常日志带 `_where(e)` 行号
+- 任何"按目录名判断"必须中英都认（用 `paths.store_inbox()` 这类封装）
+- 用户可反复点的接口要幂等：`_enqueue` 同店同 task 新顶旧
+- 配置写入走 `settings.save` 白名单，不要 `cur[k]=v` 硬塞
+- 压测脚本模式：沙箱 `JINGLI_HOME=.tmp_fuzz` + 独立端口，
+  30 端点 × 10 种畸形 body；改完必须再用打包版跑一遍
+
 ## 数据与目录（0.24.4 起子目录全中文）
 - 数据根 `数据\`：`抓包记录 / 导出 / 成本 / 链接映射 / 日志 / 店铺 / 回收站`
 - 每店 `数据\店铺\<店名>\收件箱\{订单表,广告表,联盟佣金表,商品映射}` + `商品SKU表`、`链接资料`、`快照`
