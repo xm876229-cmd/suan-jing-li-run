@@ -155,12 +155,30 @@ def _merge_into(src: Path, dst: Path) -> None:
         pass
 
 
-def _cn_sub(parent: Path, cn: str, en: str) -> Path:
-    """数据下面的子目录：用中文名，老版本是英文的就在启动时改名迁过来。
+# 数据根下面这些子目录，一律用中文名。
+# 老版本是英文的，升级时自动改名搬过来；改不了（文件被占用）就继续用英文名，
+# 下次启动再试——绝不为了好看去动数据。
+SUB_DIRS: dict[str, str] = {
+    "抓包记录": "capture",
+    "导出": "exports",
+    "成本": "costs",
+    "链接映射": "mapping",
+    "日志": "logs",
+    "店铺": "stores",
+}
 
-    为什么要改：用户打开 数据\\ 看到 capture / costs / exports / logs / mapping /
-    stores 六个英文目录，不知道哪个是干什么的，也不敢删。
-    改名只在**新名字不存在**时做，失败（目录被占用）就继续用老名字，绝不丢数据。
+# 这几层是「目录套目录」，也得跟着改：导出/_inbox、店铺/<店>/inbox
+NESTED_DIRS: dict[str, str] = {
+    "收件箱": "_inbox",
+}
+
+STORE_INBOX = ("收件箱", "inbox")          # 每家店自己的收件箱
+
+
+def _cn_sub(parent: Path, cn: str, en: str) -> Path:
+    """数据下面的子目录：用中文名，老版本是英文的就改名迁过来。
+
+    改名只在**新名字不存在**时做，失败就继续用老名字，绝不丢数据。
     """
     new = parent / cn
     old = parent / en
@@ -175,9 +193,87 @@ def _cn_sub(parent: Path, cn: str, en: str) -> Path:
             old.rename(new)
             print(f"[目录] 已改名为中文：{en} → {cn}")
             return new
-        except OSError:
+        except OSError as e:
+            print(f"[目录] 暂时改不了名（可能有程序占用）：{en} → {cn}（{e}）")
             return old
     return new
+
+
+def migrate_data_dirs(root: Path | str, *, verbose: bool = False) -> list[str]:
+    """把某个数据根下面的英文子目录全部改成中文名。
+
+    为什么要单独做成函数：目录改名原来只发生在「程序 import paths 的那一刻」，
+    而且只对**当前这个数据根**生效。于是出现过一个很迷惑的现象——
+    程序里已经是「数据\\店铺」，但 release 目录里躺着的那份还是 stores，
+    用户打开文件夹一看：「怎么还是英文？」
+
+    现在打包、同步、启动都调这一个函数，谁也不用等谁。
+    返回动过的目录（相对路径 + 改了什么），调用方可以打进日志。
+
+    注意：**只改名，不删除**。两边都有内容就合并，同名的留新的、旧的加 .old。
+    """
+    root = Path(root)
+    moved: list[str] = []
+    if not root.is_dir():
+        return moved
+
+    for cn, en in SUB_DIRS.items():
+        new, old = root / cn, root / en
+        if new.is_dir():
+            if old.is_dir():
+                _merge_into(old, new)
+                moved.append(f"{en} → {cn}（合并了剩余文件）")
+            continue
+        if old.is_dir():
+            try:
+                old.rename(new)
+                moved.append(f"{en} → {cn}")
+            except OSError as e:
+                if verbose:
+                    print(f"[目录] 改不了名（可能被占用）：{en} → {cn}（{e}）")
+                continue
+
+    # 导出/_inbox → 导出/收件箱
+    exports = root / "导出"
+    if exports.is_dir():
+        for cn, en in NESTED_DIRS.items():
+            new, old = exports / cn, exports / en
+            if new.is_dir():
+                if old.is_dir():
+                    _merge_into(old, new)
+                continue
+            if old.is_dir():
+                try:
+                    old.rename(new)
+                    moved.append(f"导出/{en} → 导出/{cn}")
+                except OSError:
+                    continue
+
+    # 店铺/<每家店>/inbox → 店铺/<店>/收件箱
+    stores = root / "店铺"
+    if stores.is_dir():
+        cn, en = STORE_INBOX
+        for shop in stores.iterdir():
+            try:
+                if not shop.is_dir():
+                    continue
+            except OSError:
+                continue
+            new, old = shop / cn, shop / en
+            if new.is_dir():
+                if old.is_dir():
+                    _merge_into(old, new)
+                continue
+            if old.is_dir():
+                try:
+                    old.rename(new)
+                    moved.append(f"店铺/{shop.name}/{en} → {cn}")
+                except OSError:
+                    continue
+
+    for m in moved:
+        print(f"[目录] {root.name}: {m}" if verbose else f"[目录] 已改名 {m}")
+    return moved
 
 
 DATA = Path(os.environ.get("JINGLI_DATA") or _pick_dir(DIR_DATA, "data")).resolve()

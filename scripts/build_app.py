@@ -143,7 +143,11 @@ def run(cmd: list[str], **kw) -> None:
 
 
 _IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".DS_Store",
-                                 "Thumbs.db", "*.log")
+                                 "Thumbs.db", "*.log",
+                                 # 备份 / 半截文件永远不该进发布包：
+                                 # .bak 会被程序当成「配置读坏了就回退」的来源，
+                                 # 恢复出来是打包那天的旧设置，比没有更糟。
+                                 "*.bak", "*.tmp", "*.part")
 
 
 def pyinstaller(args: list[str]) -> None:
@@ -272,21 +276,29 @@ def build_app() -> Path:
             dst = out / "_internal" / "默认配置"
             if dst.exists():
                 shutil.rmtree(dst, ignore_errors=True)
-            shutil.copytree(cfg_src, dst, dirs_exist_ok=True)
+            # 只带「正本」。.bak 是程序写配置时留的上一版，把它当默认值随包发出去，
+            # 用户配置坏掉时回退到 .bak，恢复出来的是打包那天的旧设置——比没有更糟。
+            shutil.copytree(cfg_src, dst, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns(
+                                "*.bak", "*.tmp", "*.part", "__pycache__", "_损坏文件"))
             print(f"[OK] 默认配置随包：{len(list(dst.iterdir()))} 个文件")
-        costs = _paths.DATA / "costs" / "master.csv"
+        # 数据子目录改中文名之后，这里写 "costs" 就是空跑——
+        # 每次打包都不报错，但包里那份默认成本表永远停在改名那天。
+        costs = _paths.DATA / "成本" / "master.csv"
         if costs.is_file():
             dst2 = out / "_internal" / "默认数据" / "costs" / "master.csv"
             dst2.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(costs, dst2)
             print(f"[OK] 默认成本表随包：{costs.stat().st_size / 1024:.0f} KB")
+        else:
+            print(f"[!] 没找到成本主表：{costs}（默认成本表不会随包）")
     except Exception as e:  # noqa: BLE001
         print(f"[!] 默认配置/成本随包失败：{e}")
 
     # 成本主表 / 映射主表也带进发布包：首次安装开箱就有最新成本。
     # 但数据根现在是程序目录，这两份在发布目录里就是用户的数据——
     # 已经存在就绝不能覆盖，否则他在程序里导的新成本会被开发机的旧版冲掉。
-    for sub in ("costs", "mapping"):
+    for sub in ("成本", "链接映射"):
         f = _paths.DATA / sub / "master.csv"
         dst = out / "数据" / sub / "master.csv"
         if f.is_file() and not dst.exists():
@@ -312,6 +324,27 @@ def build_app() -> Path:
     if not (out / EXE_NAME).exists():
         raise SystemExit(f"构建失败：缺少 {EXE_NAME}")
     print(f"\n[OK] 免安装版：{out}")
+    # 打包收尾：把这份目录里的备份/半截文件清掉。
+    # 上面的 copytree 是「只覆盖不删除」，所以老版本留下的 settings.json.bak
+    # 会一直跟着进 zip；而程序读坏配置时正好会回退到它。
+    swept = 0
+    for pat in ("*.bak", "*.tmp", "*.part"):
+        for f in out.rglob(pat):
+            try:
+                if not f.is_file():
+                    continue
+                # 只清「程序自己的东西」：_internal 里是运行库，数据/ 里是用户的数据。
+                # 用户数据里的 .bak 就算不进包，也不该由打包脚本来删——
+                # 那是他自己备份的一份，删了他去哪找。
+                if "_internal" in f.parts or "数据" in f.parts or "data" in f.parts:
+                    continue
+                f.unlink()
+                swept += 1
+            except OSError:
+                pass
+    if swept:
+        print(f"[OK] 清掉 {swept} 个备份/临时文件（不进发布包）")
+
     return out
 
 
@@ -341,6 +374,13 @@ def _write_readme(out: Path) -> None:
   浏览器扩展\\      在浏览器里加载的就是这个文件夹（只做一次）
   配置\\           费率、店铺清单、计算参数、预设（可以直接用记事本改）
   数据\\           自动抓下来的原始数据、店铺数据、快照（别删）
+     店铺\\          每家店一个文件夹：收件箱（原始表）/ 商品SKU表 / 快照
+     成本\\          成本主表 master.csv（「成本表」页导入后会更新）
+     链接映射\\      SKU 与商品链接的对应关系（程序自己攒的，别删）
+     抓包记录\\      扩展抓到的接口原文，纯排查用，可以定期清
+     导出\\         取数过程中的中转（收件箱）
+     日志\\         运行日志
+     回收站\\       在「导入数据」页删掉的文件会挪到这里，能找回来
   报表\\           算好的 Excel 报表（按店铺分文件夹）
   文档\\           详细说明文档
   使用说明.txt     这份文件
@@ -363,6 +403,11 @@ def _write_readme(out: Path) -> None:
     或直接看 报表\\ 目录（报表按店铺名分文件夹存放）
   · 成本怎么导入？程序里「成本表」页点「下载导入模板」，
     照着模板填好再导进去
+  · 想备份 / 换电脑怎么办？把整个程序文件夹拷走就行——
+    数据、配置、报表都在里面。只想备份账目的话，拷「数据」和「配置」两个文件夹。
+  · 数据到底存在哪？程序界面的「调试」页会显示完整路径。
+    正常情况就是这个程序文件夹；如果那里显示的是别的盘或别的目录，
+    说明同级或上级有一个「数据目录.txt」把它指走了（那是有意为之，别乱删）。
 """
     try:
         (out / "使用说明.txt").write_text(text, encoding="utf-8-sig")
@@ -435,28 +480,63 @@ def _write_stop_bat(out: Path) -> None:
             pass
 
 
+# 数据根下「每台机器各自」的目录，一律不进包。
+# 中英两套名字都要认：目录名改中文那次，只写英文的规则全部失效了，
+# 结果是 45 个店铺文件（订单/快照）差点被打进安装包——既几百 MB，
+# 又是这一台机器的私人物品。以后再加别名，往这个集合里放。
+_PRIVATE_DATA_DIRS = {
+    "店铺", "stores",          # 订单/广告/佣金/快照
+    "抓包记录", "capture",      # 接口原始响应
+    "导出", "exports",          # 中转
+    "日志", "logs",
+    "回收站",                   # 用户删掉的东西
+}
+
+# 允许进包的「通用种子」：成本主表、映射主表
+_SEED_FILES = {
+    ("成本", "master.csv"), ("costs", "master.csv"),
+    ("链接映射", "master.csv"), ("mapping", "master.csv"),
+}
+
+
 def _skip_in_pack(rel: Path) -> bool:
     """打包时哪些文件要跳过。
 
-    数据根现在就在程序目录里，于是「每台机器各自的数据」也躺在发布目录中：
-    抓到的订单/广告/佣金（stores）、抓包记录、生成的报表。
-    这些**不能进安装包和压缩包**——既体积大（几百 MB），
-    又是这一台机器的私人物品，拷给别人的电脑毫无意义。
+    数据根就在程序目录里，于是「每台机器各自的数据」也躺在发布目录中：
+    抓到的订单/广告/佣金、抓包记录、生成的报表。这些不能进安装包和压缩包。
 
-    只保留两种「通用」数据：
-      · 数据/costs/master.csv    成本主表（开箱即用的种子）
-      · 数据/mapping/master.csv  映射主表（同上）
+    只保留两种通用数据（开箱即用的种子）：
+      · 数据/成本/master.csv      成本主表
+      · 数据/链接映射/master.csv  映射主表
     """
     parts = rel.parts
     if not parts:
         return False
-    if parts[0] == "数据" and len(parts) >= 2 and parts[1] in (
-            "stores", "capture", "exports", "logs",
-    ):
+
+    # 数据目录.txt 里的路径是**相对**的（发布目录里写的是 ..\..）。
+    # 它一进包，用户解压到桌面，数据根就会解析到「桌面的上一级」——
+    # 数据和配置散落到程序目录外面，卸载清不掉、备份也找不到。
+    # 便携版本来就该自包含，这个文件只对开发机有意义。
+    if parts[0] == "数据目录.txt":
         return True
-    if parts[0] == "数据" and len(parts) == 2 and parts[1] in ("history.jsonl", "fx_cache.json"):
-        return True
+
     if parts[0] == "报表":
+        return True
+
+    if parts[0] != "数据" or len(parts) < 2:
+        return False
+
+    sub = parts[1]
+    if sub in _PRIVATE_DATA_DIRS:
+        return True
+    if len(parts) == 2 and sub in ("history.jsonl", "fx_cache.json",
+                                  "pending_runs.json", "schedule_state.json",
+                                  ".running"):
+        return True
+    # 数据/<种子目录>/xxx 只放行 master.csv，其它（比如 .bak、锁文件）不要
+    if len(parts) >= 3 and (sub, parts[2]) in _SEED_FILES:
+        return False
+    if sub in ("成本", "costs", "链接映射", "mapping"):
         return True
     return False
 

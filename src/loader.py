@@ -1726,7 +1726,7 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
     for kind, label in (("ads", "广告表"), ("affiliate", "联盟佣金表"), ("mapping", "商品映射表")):
         if buckets[kind]:
             continue
-        # 映射表现在是全局主表（数据/mapping/master.csv），不放在店目录里，
+        # 映射表现在是全局主表（数据/链接映射/master.csv），不放在店目录里，
         # 所以「店目录没有映射表」是正常的——只要已经有 SKU→商品 数据就不该报警。
         if kind == "mapping":
             if len(getattr(sku_index, "by_sku_id", {}) or {}):

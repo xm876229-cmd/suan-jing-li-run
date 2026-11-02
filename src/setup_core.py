@@ -152,32 +152,39 @@ def copy_app_files(dest: Path, source: Path, log=print) -> None:
 
     # 成本表 / 映射表随包带一份：全新安装时如果没有就补上；
     # 已有的话绝不动（用户可能已经导入了自己的成本）。
-    for rel in ("数据/costs/master.csv", "数据/mapping/master.csv"):
-        src = source / rel
-        dst = dest / rel
+    #
+    # 注意两边的目录名不一样：包里是 `数据/costs`（包内结构不对外，写死英文无所谓），
+    # 装到用户机器上是 `数据/成本`（中文，用户要能看懂）。
+    # 这里原来两边都用英文，目录改中文之后**静默失效**——装完成本表是空的，
+    # 第一次核算所有成本按 0 算，净利虚高而且看不出原因。
+    for src_rel, dst_rel in (("数据/costs/master.csv", "数据/成本/master.csv"),
+                             ("数据/mapping/master.csv", "数据/链接映射/master.csv")):
+        src = source / src_rel
+        dst = dest / dst_rel
         if src.is_file() and not dst.exists():
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
-                log(f"  {rel}（首次安装补充）")
+                log(f"  {dst_rel}（首次安装补充）")
             except OSError:
                 pass
 
 
 def ensure_layout(dest: Path) -> None:
     """建好所有数据目录，并放一份说明文件。"""
-    for rel in ("data/costs", "data/mapping", "data/exports/_inbox", "data/capture"):
+    for rel in ("数据/成本", "数据/链接映射", "数据/导出/收件箱", "数据/抓包记录",
+                "数据/日志", "数据/店铺"):
         (dest / rel).mkdir(parents=True, exist_ok=True)
     (dest / "报表").mkdir(parents=True, exist_ok=True)
 
     notes = {
-        "data/costs/放成本表.txt":
+        "数据/成本/放成本表.txt":
             "把成本表（xlsx / csv，两列：商品编码 + 成本）放进这个文件夹，"
             "然后在「净利助手」菜单里选『导入成本表』。\n",
-        "data/mapping/放映射表.txt":
+        "数据/链接映射/放映射表.txt":
             "把商品管理导出的 SKU 清单（product_sku_list.xlsx）放进这个文件夹，"
             "然后在菜单里选『导入映射表』。\n",
-        "data/exports/_inbox/导出文件放这里.txt":
+        "数据/导出/收件箱/导出文件放这里.txt":
             "扩展自动取数会把文件回传到这个目录。\n"
             "手工导出时也放这里（订单 / 广告 / 联盟 三类，按表头自动识别，文件名随意）。\n",
     }

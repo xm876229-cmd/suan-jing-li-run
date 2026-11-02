@@ -3127,7 +3127,7 @@ async function renameStore(shopId, btn){
   btn.disabled = false;
 }
 
-/* 移除店铺：只从列表拿掉，店目录挪进 数据/stores/_已删除（数据不丢）。
+/* 移除店铺：只从列表拿掉，店目录挪进 数据/店铺/_已删除（数据不丢）。
    不真删是因为里面的历史订单/快照平台不一定还能补回来。 */
 async function removeStore(shopId, name, btn){
   if(!confirm('从列表移除「' + name + '」？\n\n店里的数据不会删，会挪到 数据\\stores\\_已删除\\ 里；'

@@ -649,7 +649,7 @@ def rename_store(shop_id: str, alias: str) -> dict:
 
 
 def remove_store(shop_id: str) -> dict:
-    """把一家店从列表里移除——目录挪进 `数据/stores/_已删除/`，不真删。
+    """把一家店从列表里移除——目录挪进 `数据/店铺/_已删除/`，不真删。
 
     为什么不真删：里面是这家店的历史订单/SKU/快照，删了要重新取数，
     而有些数据平台只保留一段时间。挪走能恢复，代价只是占硬盘。
@@ -691,7 +691,7 @@ def remove_store(shop_id: str) -> dict:
     if not moved_to and not removed_cfg:
         return {"ok": False, "error": "没找到这家店（可能已经移除）"}
 
-    _append_log(f"[店铺] 已移除 {sid}（目录：{moved_to or '无'}），可在 数据/stores/_已删除 找回")
+    _append_log(f"[店铺] 已移除 {sid}（目录：{moved_to or '无'}），可在 数据/店铺/_已删除 找回")
     return {"ok": True, "moved_to": moved_to, "removed_config": removed_cfg}
 
 
@@ -1409,7 +1409,7 @@ class Handler(BaseHTTPRequestHandler):
         warning = ""
         if kind == "capture":
             # 诊断类文件（导出流程记录）不进 inbox、不参与核算，
-            # 单独放 数据/capture/，开发侧直接看
+            # 单独放 数据/抓包记录/，开发侧直接看
             target_dir = paths.CAPTURE
         elif kind == "mapping" or table_kind == "mapping":
             # 映射表（商品管理 SKU、链接资料）走全局累积主表：

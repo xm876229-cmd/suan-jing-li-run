@@ -189,7 +189,7 @@ CAPTURE_MAX_MB = 300
 def _trim_capture(actions: list[str]) -> None:
     """抓包文件瘦身。
 
-    `数据/capture/capture-YYYYMMDD.jsonl` 是把扩展抓到的接口响应原样存下来，
+    `数据/抓包记录/capture-YYYYMMDD.jsonl` 是把扩展抓到的接口响应原样存下来，
     纯粹给排查问题用的，程序运行本身不读它。但一天几十 MB，
     跑上一年就是十几 G —— C 盘一满，连配置都存不进去，
     表现就是「程序突然说什么都保存失败」。所以按两条规则清：

@@ -214,6 +214,27 @@ def check_portable(version: str) -> list[str]:
             if not find("源码/" + rel) and not find(rel):
                 bad.append(f"zip 里缺少 {rel}（老包没有这个文件）")
 
+        # ---- 包里不能夹带「这台机器的私货」----
+        # 数据根就在程序目录里，稍不留神就把订单/快照/报表打进去：
+        # 体积几百 MB，还是别人不该看到的经营数据。
+        # 更隐蔽的是 数据目录.txt：里面写的是相对路径，用户解压到桌面，
+        # 数据根会解析到「桌面的上一级」——数据和配置散在程序目录外面。
+        priv = [n for n in names
+                if n.replace("\\", "/").split("/")[1:2] == ["数据"]
+                and n.replace("\\", "/").split("/")[2:3]
+                and n.replace("\\", "/").split("/")[2] in
+                ("店铺", "stores", "抓包记录", "capture", "导出", "exports",
+                 "日志", "logs", "回收站")]
+        if priv:
+            bad.append(f"zip 里混入了店铺/抓包数据 {len(priv)} 个文件"
+                       f"（例：{priv[0]}）")
+        if any(n.replace("\\", "/").endswith("/数据目录.txt") for n in names):
+            bad.append("zip 里带了 数据目录.txt（相对路径，会让用户数据根跑到程序目录外）")
+        seeds = [n for n in names
+                 if n.replace("\\", "/").split("/")[1:2] == ["数据"]]
+        if len(seeds) > 6:
+            bad.append(f"zip 的 数据/ 下文件偏多（{len(seeds)} 个），只该有几个种子文件")
+
         inner = find("jingli.exe")
         if not inner:
             bad.append("zip 里找不到 jingli.exe")

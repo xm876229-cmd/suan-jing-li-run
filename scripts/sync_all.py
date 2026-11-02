@@ -35,7 +35,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EXT_SRC = ROOT / "浏览器扩展"
 CONFIG_SRC = ROOT / "配置"
-COST_SRC = ROOT / "数据" / "costs" / "master.csv"
+# 数据子目录 0.24.4 起改中文名；这里写死英文的话会**静默空跑**——
+# 每次同步都说成功，其实 `_internal\默认数据` 一直是老内容。
+COST_SRC = ROOT / "数据" / "成本" / "master.csv"
 DOCS = ("CHANGELOG.md", "README.md")
 
 # 各版本的落点。不存在就跳过（换台机器、只装了其中一种都正常）。
@@ -68,6 +70,10 @@ def _copy_tree_files(src: Path, dst: Path) -> list[str]:
     dst.mkdir(parents=True, exist_ok=True)
     for f in src.rglob("*"):
         if not f.is_file():
+            continue
+        # 备份/临时文件不进「默认配置」：程序读坏配置时会回退到 .bak，
+        # 而默认配置里的 .bak 是同步那一刻的旧值，恢复出来反而更错。
+        if f.name.endswith((".bak", ".part", ".tmp")) or f.name.startswith("."):
             continue
         rel = f.relative_to(src)
         t = dst / rel
@@ -128,6 +134,32 @@ def sync(build: bool) -> int:
             n = _copy_tree_files(src, dst)
             if n:
                 print(f"             {sub}：更新 {len(n)} 个")
+            # _copy_tree_files 只覆盖不删除，所以历史上混进「默认配置」的 .bak
+            # 会一直躺着。程序读坏配置时会回退到 .bak，那是打包当天的旧值，
+            # 比没有更糟——这里主动清掉。
+            if sub.endswith("默认配置") and dst.is_dir():
+                stale = 0
+                for b in list(dst.glob("*.bak")) + list(dst.glob("*.tmp")):
+                    try:
+                        b.unlink()
+                        stale += 1
+                    except OSError:
+                        pass
+                if stale:
+                    print(f"             {sub}：清掉 {stale} 个过期的 .bak")
+
+        # 数据子目录改名（英文 → 中文）
+        # 为什么在这里做：改名原本只在「程序启动」时发生，而 release / 安装版
+        # 可能一直没被新版打开过，于是用户打开文件夹一看还是 stores / capture。
+        # 同步时顺手迁一遍，谁也不用等谁。
+        try:
+            from src import paths as _paths
+            for sub in ("数据", "data"):
+                moved = _paths.migrate_data_dirs(d / sub)
+                if moved:
+                    print(f"             数据目录改中文：{len(moved)} 处")
+        except Exception as e:  # noqa: BLE001
+            print(f"             数据目录改名跳过：{e}")
 
         # 文档
         for name in DOCS:
