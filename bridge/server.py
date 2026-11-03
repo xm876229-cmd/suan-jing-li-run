@@ -379,7 +379,7 @@ _STOP_TTL = 600.0
 # Crochet Studio，14:20 换成 Chroma Home，纯属谁抢输了谁失败。
 # 平台那边同一账户并发导出也吃不消（一上午堆几十个任务后全部卡在"生成中"）。
 # 限制并发比继续加超时有效：一次跑 2 家，其余排队等下一分钟领。
-_MAX_ACTIVE_FETCH = 2
+_MAX_ACTIVE_FETCH = 4
 _ONLINE_TTL = 150.0          # 超过这个秒数没心跳就算离线（心跳 60 秒一次）
 
 # 进度：shop_id → {task, run_id, steps:{step: {...}}, current, started, updated}
