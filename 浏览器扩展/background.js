@@ -1158,6 +1158,36 @@ async function clickSkuTab(tabId) {
  * 扩展刚重载、后台脚本刚被唤醒、或标签页刚被浏览器冻结时，
  * 第一次请求会以 Failed to fetch 收场——这不是平台拒绝，重试就好。
  */
+
+// ---------------- 自动化标签页：开了就必须收 ----------------
+//
+// 实测（2026-11-02）任务卡住时，整条标签栏被同一家店的后台页塞满：
+// 每重试一次就新开一个，从来不关。占内存是小事，更要命的是下次
+// 复用会挑到最旧的那个——它的参数早就过期，于是又失败、又开新页。
+const AUTO_TABS = new Set();
+const AUTO_TAB_MAX = 4;        // 同一时刻最多留 4 个自动化页，超了先关最老的
+
+async function closeAutoTab(tid) {
+  AUTO_TABS.delete(tid);
+  try { await chrome.tabs.remove(tid); } catch (e) { /* 已经被关掉了 */ }
+}
+
+async function newAutoTab(url, opts = {}) {
+  while (AUTO_TABS.size >= AUTO_TAB_MAX) {
+    await closeAutoTab(AUTO_TABS.values().next().value);
+  }
+  const t = await chrome.tabs.create({ url, active: !!opts.active });
+  if (t && t.id) AUTO_TABS.add(t.id);
+  return t;
+}
+
+/** 关掉本轮开的所有自动化页；返回关掉的个数。 */
+async function closeAllAutoTabs() {
+  const ids = Array.from(AUTO_TABS);
+  for (const id of ids) await closeAutoTab(id);
+  return ids.length;
+}
+
 async function runInPage(host, func, args, preferPath) {
   const exclude = new Set();
   let last = "";
@@ -1181,7 +1211,7 @@ async function runInPage(host, func, args, preferPath) {
   // 所有现成标签都不能用：开一个干净的后台标签再试一次。
   // （用户点插件时可能正停在 chrome://extensions，那种页永远注入不了）
   try {
-    const nt = await chrome.tabs.create({ url: `https://${host}/`, active: false });
+    const nt = await newAutoTab(`https://${host}/`);
     await waitTabReady(nt.id);
     await sleep(800);
     const r = await _runInPageOnce(host, func, args, preferPath, exclude);
@@ -1211,9 +1241,7 @@ async function _runInPageOnce(host, func, args, preferPath, exclude) {
     if (!tab) {
       // 没有就开一个：后台标签页，不打断用户
       try {
-        await chrome.tabs.create({
-          url: `https://${host}/${preferPath}`, active: false,
-        });
+        await newAutoTab(`https://${host}/${preferPath}`);
         openedByUs = true;
       } catch (e) { /* 忽略 */ }
       for (let i = 0; i < 12 && !tab; i++) {
@@ -1240,7 +1268,7 @@ async function _runInPageOnce(host, func, args, preferPath, exclude) {
   }
   if (!tab) {
     // 参数是新鲜的，ensureHost 不会开页，但页面上下文取数必须有 tab
-    try { await chrome.tabs.create({ url: `https://${host}/`, active: false }); } catch (e) { /* 忽略 */ }
+    try { await newAutoTab(`https://${host}/`); } catch (e) { /* 忽略 */ }
     for (let i = 0; i < 10 && !tab; i++) {
       await sleep(2000);
       tab = await findTabFor(host);
@@ -2064,7 +2092,7 @@ async function ensureAffiliatePage(host, ctxUrl, log) {
     return tab.id;
   }
   try {
-    const nt = await chrome.tabs.create({ url: ctxUrl, active: false });
+    const nt = await newAutoTab(ctxUrl);
     await waitTabReady(nt.id);
     if (log) log("   已打开带店铺身份的联盟页");
     return nt.id;
@@ -2830,6 +2858,18 @@ async function openBackoffice(kind, capture, log) {
     MANUAL_CAPTURE.seen = new Set();
     log("开始盯着下载（15 分钟内有效）");
   }
+  // 已经开过同一个页面就切过去，不再开新的：
+  // 手动模式连点几次，原来会开出一排一模一样的主页。
+  try {
+    const tabs = (await chrome.tabs.query({ url: [page.url + "*"] })) || [];
+    const hit = tabs.find((t) => t && t.id);
+    if (hit) {
+      await chrome.tabs.update(hit.id, { active: true });
+      try { await chrome.windows.update(hit.windowId, { focused: true }); } catch (e) { /* 忽略 */ }
+      return { url: page.url, label: page.label, capture: !!capture, reused: true };
+    }
+  } catch (e) { /* 查不到就照常开新的 */ }
+  // 这是给人点按钮的页面，不进自动清理池（跑完不能把它关掉）
   await chrome.tabs.create({ url: page.url, active: true });
   return { url: page.url, label: page.label, capture: !!capture };
 }
@@ -4378,6 +4418,12 @@ async function beatBridge(running) {
 
 async function executeTask(task, range, log, opts = {}) {
   RUN_ID = newRunId();
+  // 上一轮要是被回收/卡死，后台页可能还留着几个 —— 开跑前先收干净，
+  // 不然复用时会挑到旧页面（参数过期 → 又失败 → 又开新页）。
+  try {
+    const left = await closeAllAutoTabs();
+    if (left) log(`先关掉上次留下的 ${left} 个后台页`);
+  } catch (e) { /* 忽略 */ }
   try {
     startKeepAlive();
     CURRENT_RANGE = range || null;
@@ -4411,6 +4457,11 @@ async function executeTask(task, range, log, opts = {}) {
     return { ok: false, error: err };
   } finally {
     stopKeepAlive();
+    // 本轮开的后台页全部关掉：任务卡住时最容易堆，一晚上能开出几十个。
+    try {
+      const n = await closeAllAutoTabs();
+      if (n) log(`已关掉本轮开的 ${n} 个后台页`);
+    } catch (e) { /* 忽略 */ }
     // 立即清掉运行标记，同时告诉桥「我跑完了」。
     //
     // 原来这里是 setTimeout(…, 1500)：延迟 1.5 秒再清。
