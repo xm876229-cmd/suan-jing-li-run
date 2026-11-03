@@ -1109,8 +1109,25 @@ async function runOrders({ startMs, endMs }, log) {
 
   // —— 工具：建任务 / 等记录 / 下载落盘 ——
   const isRealFileKey = (k) => !!k && !/^\d+$/.test(String(k));
+  // 订单这两个接口偶尔会抛 `Failed to fetch`：MV3 的后台在长任务里会被浏览器
+  // 挂起，正在飞的请求就断了。它不是平台拒绝，重试一两次基本都能过
+  // （实测 7 家里有 2 家栽在这一下，害得整轮没订单）。
+  const postRetry = async (url, body) => {
+    let last = null;
+    for (let i = 0; i < 3; i++) {
+      try {
+        return await apiPost(url, body);
+      } catch (e) {
+        last = e;
+        const msg = String((e && e.message) || e);
+        if (!/Failed to fetch|NetworkError|ERR_/i.test(msg)) throw e;
+        await sleep(1200 * (i + 1));
+      }
+    }
+    throw last;
+  };
   const exportRecords = async () => {
-    const rec = await apiPost(await buildUrl(host, "/api/fulfillment/order/export_record/get"), {});
+    const rec = await postRetry(await buildUrl(host, "/api/fulfillment/order/export_record/get"), {});
     return (rec && rec.data && rec.data.export_records) || [];
   };
 
@@ -1132,7 +1149,7 @@ async function runOrders({ startMs, endMs }, log) {
   }
 
   const createTask = async (sMs, eMs, name) => {
-    const created = await apiPost(
+    const created = await postRetry(
       await buildUrl(host, "/api/fulfillment/order/export"),
       {
         search_condition: {
@@ -1183,7 +1200,7 @@ async function runOrders({ startMs, endMs }, log) {
         await sleep(wait);
       }
       try {
-        const dl = await apiPost(
+        const dl = await postRetry(
           await buildUrl(host, "/api/fulfillment/order/download"),
           { file_key: rec.file_key, export_task_id: tid }
         );

@@ -10,11 +10,11 @@
   },
   "schedules": [
     {
-      "id": "r1793675112_1",
-      "name": "每天 11:06",
+      "id": "r1793685877_1",
+      "name": "每天 14:06",
       "enabled": true,
       "freq": "daily",
-      "time": "11:06",
+      "time": "14:06",
       "day": 1,
       "weekday": 0,
       "period": "month",
