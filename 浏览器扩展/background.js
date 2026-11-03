@@ -408,11 +408,31 @@ async function buildUrl(host, path, extra = {}, drop = []) {
   return `https://${host}${path}?${qs.toString()}`;
 }
 
+/** 这家店在哪个站点（MY / PH / TH …）。没认出来时给空串。 */
+function shopRegion() {
+  return String((CURRENT_SHOP && CURRENT_SHOP.region) || "").toUpperCase();
+}
+
 function pickHost(params, hint) {
   // 只看 host 级键（不含 "|" 的），路径级的键带 "|" 后缀
-  return Object.keys(params)
-    .filter((k) => !k.includes("|"))
-    .find((h) => h.includes(hint));
+  const hosts = Object.keys(params).filter((k) => !k.includes("|"));
+  const reg = shopRegion().toLowerCase();
+  if (reg) {
+    // 优先挑跟这家店同站点的：PH 的店拿 seller-my 的页面去发请求，
+    // 页面会被踢回首页（没登录态），导出按钮一个都找不到。
+    const mine = hosts.find((h) => h.includes(hint) && h.includes(`-${reg}.`));
+    if (mine) return mine;
+  }
+  return hosts.find((h) => h.includes(hint));
+}
+
+/** 该去哪个页面学参数：卖家后台要按店铺站点拼，不能写死 seller-my。 */
+function pageHintUrl(hint) {
+  if (hint === "seller") {
+    const reg = (shopRegion() || "MY").toLowerCase();
+    return `https://seller-${reg}.tiktok.com/`;
+  }
+  return PAGE_HINTS[hint];
 }
 
 const PAGE_HINTS = {
@@ -432,12 +452,17 @@ async function findTab(hint) {
     const tabs = await chrome.tabs.query({
       url: ["*://*.tiktok.com/*", "*://*.tiktokglobalshop.com/*"],
     });
+    const reg = shopRegion().toLowerCase();
+    let fallback = null;
     for (const tb of tabs) {
       try {
         const h = new URL(tb.url).hostname;
-        if (h.includes(hint)) return { host: h, tabId: tb.id };
+        if (!h.includes(hint)) continue;
+        if (reg && h.includes(`-${reg}.`)) return { host: h, tabId: tb.id };
+        fallback = fallback || { host: h, tabId: tb.id };
       } catch (e) { /* 忽略坏 URL */ }
     }
+    if (fallback) return fallback;
   } catch (e) { /* 无权限或查询失败 */ }
   return null;
 }
@@ -469,7 +494,7 @@ async function ensureHost(hint, log, force = false) {
     if (host) return host;
   }
 
-  const url = PAGE_HINTS[hint];
+  const url = pageHintUrl(hint);
   if (url) {
     log(`后台打开页面获取参数：${url}`);
     // 记下这个自开的标签页，学到参数后关掉——
@@ -3504,12 +3529,17 @@ async function exportViaApi(kind, host, log, opts = {}) {
     if (log) log(`   联盟页带店铺身份：${reg} / ${sid || "（没认出店铺）"}`);
   }
   if (kind === "sku" && opts.range && opts.range.start) {
-    let region = "MY";
-    try {
-      const st = (await skGet({ settings: {} })).settings || {};
-      const map = { "马来西亚": "MY", "菲律宾": "PH", "泰国": "TH", "印尼": "ID" };
-      if (map[st.country]) region = map[st.country];
-    } catch (e) { /* 忽略 */ }
+    // 区域必须跟着**这家店**走：一台机器上同时开 MY 和 PH 的店，
+    // 只按「设置里那个国家」拼地址的话，PH 店会被拼成 seller-my，
+    // 页面直接被踢回首页（实测：导出按钮一个都没有）。
+    let region = String((CURRENT_SHOP && CURRENT_SHOP.region) || "").toUpperCase();
+    if (!region) {
+      try {
+        const st = (await skGet({ settings: {} })).settings || {};
+        const map = { "马来西亚": "MY", "菲律宾": "PH", "泰国": "TH", "印尼": "ID" };
+        region = map[st.country] || "MY";
+      } catch (e) { region = "MY"; }
+    }
     pagePath += `?lng=zh-CN&shop_region=${region}`
       + `&timeRange=${opts.range.start}%7C${opts.range.end}`;
     if (log) log(`   导出区间：${opts.range.start} ~ ${opts.range.end}`);
@@ -4424,12 +4454,6 @@ async function beatBridge(running) {
 
 async function executeTask(task, range, log, opts = {}) {
   RUN_ID = newRunId();
-  // 上一轮要是被回收/卡死，后台页可能还留着几个 —— 开跑前先收干净，
-  // 不然复用时会挑到旧页面（参数过期 → 又失败 → 又开新页）。
-  try {
-    const left = await closeAllAutoTabs();
-    if (left) log(`先关掉上次留下的 ${left} 个后台页`);
-  } catch (e) { /* 忽略 */ }
   try {
     startKeepAlive();
     CURRENT_RANGE = range || null;
