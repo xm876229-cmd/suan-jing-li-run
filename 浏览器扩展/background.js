@@ -1029,8 +1029,12 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
         const hit = list.find((x) => String(x.export_task_id) === String(taskId)
                                    && x.file_key && !/^\d+$/.test(String(x.file_key)));
         if (!hit) {
+          const mine = list.find((x) => String(x.export_task_id) === String(taskId)) || {};
           return { state: "waiting",
                    have: list.map((x) => String(x.export_task_id)).filter(Boolean).slice(0, 4),
+                   keys: Object.keys(mine).slice(0, 10),
+                   fileKey: String(mine.file_key || ""),
+                   status: String(mine.status || mine.task_status || mine.state || ""),
                    code: rec.json && rec.json.code, raw: rec.raw };
         }
         const dl = await post(dlU, { file_key: hit.file_key, export_task_id: taskId });
@@ -1052,7 +1056,9 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
       }
       if (st.state === "waiting") {
         appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 还没生成好`
-          + `（等任务 ${it.taskId}；记录里现有：${(st.have || []).join(",") || "空"}` +
+          + `（等任务 ${it.taskId}；记录里现有：${(st.have || []).join(",") || "空"}`
+          + `；本任务字段：${(st.keys || []).join("/") || "无"}`
+          + `；status=${st.status || "空"}；file_key=${st.fileKey || "空"}` +
           (st.code ? `；code=${st.code}` : "") + `）`);
         keep.push(it); continue;
       }
@@ -1106,6 +1112,23 @@ async function runOrders({ startMs, endMs }, log) {
     const rec = await apiPost(await buildUrl(host, "/api/fulfillment/order/export_record/get"), {});
     return (rec && rec.data && rec.data.export_records) || [];
   };
+
+  // 同一家店、同一区间已经有待补任务在排队时，别再建一个新的：
+  // 一遍遍重派会把平台那边同一个账号的导出队列堵死（实测一上午堆了几十个任务，
+  // 之后所有导出都卡在"生成中"）。
+  try {
+    const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
+    const dup = pendingOrders.find((x) =>
+      String(x.shop_id || "") === String(CURRENT_SHOP.shop_id || "")
+      && sameRange(x.range, CURRENT_RANGE)
+      && Date.now() - Number(x.at || 0) < 20 * 60 * 1000);
+    if (dup) {
+      throw new Error("订单导出已排队：这份区间今天已经排过一次，平台还在生成。"
+        + "已记着这次核算，文件一到就自动算——不用再点运行。");
+    }
+  } catch (e) {
+    if (/已排队/.test(String(e && e.message))) throw e;
+  }
 
   const createTask = async (sMs, eMs, name) => {
     const created = await apiPost(

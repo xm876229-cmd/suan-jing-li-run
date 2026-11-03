@@ -196,7 +196,7 @@ def _shop_id_by_name(name: str) -> str:
 
 
 _RETRY_FETCH_AFTER = 12 * 60      # 订单 12 分钟还没落地，就重跑一轮取数
-_RETRY_FETCH_GAP = 20 * 60        # 两次重跑至少隔 20 分钟
+_RETRY_FETCH_GAP = 30 * 60        # 两次重跑至少隔 30 分钟（别把平台队列堵死）
 
 
 def _orders_fresh(shop_id: str, since: float) -> bool:
