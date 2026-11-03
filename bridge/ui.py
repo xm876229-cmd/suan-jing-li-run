@@ -4903,8 +4903,12 @@ async function loadBridgeStatus(){
     : '';
   box.innerHTML =
     `<div><span class="muted">状态</span>　<b style="color:var(--accent)">运行中</b>　端口 ${esc(s.port || 8765)}</div>` +
-    `<div><span class="muted">数据根</span>　<span class="mono" style="font-size:12px">${esc(s.root || '')}</span></div>` +
-    `<div><span class="muted">桥程序</span>　<span class="mono" style="font-size:12px">${esc(s.exe_dir || '')}</span> ${tag}</div>`;
+    // 程序和数据分两处放：不写清楚，用户会以为"我打开的是 release 里的程序，
+    // 数据怎么跑到项目目录去了"（实测就有人这么问）。
+    `<div><span class="muted">数据目录</span>　<span class="mono" style="font-size:12px">${esc(s.root || '')}</span>` +
+      `　<span class="tag">店铺数据、报表、配置都在这</span></div>` +
+    `<div><span class="muted">程序目录</span>　<span class="mono" style="font-size:12px">${esc(s.exe_dir || '')}</span> ${tag}` +
+      `　<span class="muted" style="font-size:12px">（exe 所在目录，不含数据）</span></div>`;
   syncBridgeButtons(true);
 }
 

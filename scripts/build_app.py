@@ -284,6 +284,8 @@ def build_app() -> Path:
     # 程序启动会自动从这里补回（只补缺失的，不覆盖用户改过的）。
     try:
         cfg_src = _real.get("config") or (ROOT / "配置")
+        if not cfg_src.is_dir():
+            cfg_src = out / "配置"
         if cfg_src.is_dir():
             dst = out / "_internal" / "默认配置"
             if dst.exists():
@@ -296,7 +298,11 @@ def build_app() -> Path:
             print(f"[OK] 默认配置随包：{len(list(dst.iterdir()))} 个文件")
         # 数据子目录改中文名之后，这里写 "costs" 就是空跑——
         # 每次打包都不报错，但包里那份默认成本表永远停在改名那天。
+        # 数据已经跟着程序目录走（release/净利助手/数据），项目根不再有 数据/。
+        # 这时用运行目录里那份（用户自己维护的成本表）当随包默认值。
         costs = _paths.DATA / "成本" / "master.csv"
+        if not costs.is_file():
+            costs = out / "数据" / "成本" / "master.csv"
         if costs.is_file():
             dst2 = out / "_internal" / "默认数据" / "costs" / "master.csv"
             dst2.parent.mkdir(parents=True, exist_ok=True)
