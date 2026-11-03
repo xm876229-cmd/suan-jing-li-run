@@ -858,31 +858,30 @@ async function rememberPendingOrder(item) {
  * 文件可能几十 MB，所以先在页面里整份读进内存，再按 6MB 一块搬回来，
  * 避免一次塞一个几十 MB 的 base64 进 executeScript。
  */
-async function fetchBytesInPage(host, url) {
-  const CHUNK = 4 * 1024 * 1024;
-  // **固定一个标签页**：文件是缓存在那个页面的 window 上的，
-  // 中途换一个标签（runInPage 会自己挑）就变成"页面里的文件缓存没了"。
-  let tab = await findTabFor(host).catch(() => null);
-  // 被浏览器休眠（discarded）的标签页注入不了脚本，重开一个干净的
-  if (tab && tab.discarded) tab = null;
-  if (!tab) {
-    try {
-      tab = await newAutoTab(`https://${host}/`);
-      await waitTabReady(tab.id);
-      await sleep(1500);
-    } catch (e) {
-      throw new Error(`没有开着的 ${host} 页面`);
-    }
-  }
-  const tabId = tab.id;
-  const call = async (func, args) => {
+/** 在指定标签页里跑一段函数，出错也返回而不是抛（便于把原因写进日志）。 */
+async function runInTab(tabId, func, args) {
+  try {
     const [r] = await chrome.scripting.executeScript({
       target: { tabId }, world: "MAIN", func, args: args || [],
     });
-    return (r && r.result) || {};
-  };
+    return { result: r && r.result };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+}
 
-  const grab = () => call(async (u) => {
+/** 在**指定**标签页里把文件取下来，分块搬回后台。
+
+ * 为什么非要这么绕：订单的下载地址长这样
+ *   https://seller-my.tiktok.com/easesafe/oec_trade_order_export/object/xxxx
+ * ——它跟接口一样在卖家后台的域名下，后台脚本直接 fetch 会被按跨域挡掉
+ * （`Failed to fetch`）。只有页面里（同源、带 Cookie）才能取。
+ * 文件可能几十 MB，所以先在页面里整份读进内存，再按 4MB 一块搬回来。
+ * 全程固定同一个标签页：换一个标签，页面里缓存的那份就没了。
+ */
+async function fetchBytesInTab(tabId, url) {
+  const CHUNK = 4 * 1024 * 1024;
+  const grab = () => runInTab(tabId, async (u) => {
     try {
       const resp = await fetch(u, { credentials: "include" });
       if (!resp.ok) return { error: `HTTP ${resp.status}` };
@@ -898,7 +897,7 @@ async function fetchBytesInPage(host, url) {
   for (let i = 0; i < 2; i++) {
     const st = await grab();
     if (st.error) throw new Error(st.error);
-    size = Number(st.size) || 0;
+    size = Number((st.result || {}).size) || 0;
     if (size) break;
     await sleep(1500);
   }
@@ -907,7 +906,7 @@ async function fetchBytesInPage(host, url) {
   const out = new Uint8Array(size);
   let off = 0;
   while (off < size) {
-    const g = await call(async (o, n) => {
+    const g = await runInTab(tabId, async (o, n) => {
       try {
         const a = window.__jlFile;
         if (!a) return { error: "页面里的文件缓存没了" };
@@ -922,21 +921,38 @@ async function fetchBytesInPage(host, url) {
         return { error: String((e && e.message) || e) };
       }
     }, [off, CHUNK]);
-    if (g.error) {
-      // 页面自己刷新/跳走过一次：重新取一遍，从头再来（最多一次）
-      if (off === 0) throw new Error(g.error);
+    const res = g.result || {};
+    if (g.error || res.error) {
+      if (off === 0) throw new Error(g.error || res.error);
+      // 页面自己刷新过：重取一遍再从头上搬（最多一次）
       const st = await grab();
-      if (st.error) throw new Error(`${g.error}；重取也失败：${st.error}`);
+      if (st.error) throw new Error(`${g.error || res.error}；重取也失败：${st.error}`);
       off = 0;
       continue;
     }
-    const bin = atob(g.b64 || "");
+    const bin = atob(res.b64 || "");
     for (let i = 0; i < bin.length; i++) out[off + i] = bin.charCodeAt(i);
-    off += bin.length;
     if (!bin.length) throw new Error("分块取到 0 字节");
+    off += bin.length;
   }
-  try { await call(async () => { window.__jlFile = null; return 1; }); } catch (e) { /* 清不掉无所谓 */ }
+  try { await runInTab(tabId, async () => { window.__jlFile = null; return 1; }); } catch (e) { /* 忽略 */ }
   return out.buffer;
+}
+
+/** 找一个这家店的标签页（没有就开一个），在里面取文件。 */
+async function fetchBytesInPage(host, url) {
+  let tab = await findTabFor(host).catch(() => null);
+  if (tab && tab.discarded) tab = null;      // 被浏览器休眠的注入不了
+  if (!tab) {
+    try {
+      tab = await newAutoTab(`https://${host}/`);
+      await waitTabReady(tab.id);
+      await sleep(2000);
+    } catch (e) {
+      throw new Error(`没有开着的 ${host} 页面`);
+    }
+  }
+  return fetchBytesInTab(tab.id, url);
 }
 
 async function harvestPendingOrders(log, shopId, onlyRange) {
@@ -968,21 +984,31 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
         appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 记的域名不对（${host || "空"}），丢掉`);
         continue;
       }
-      // 页面没开着就这分钟先跳过：现开一个的话，页面还在加载，
-      // fetch 必然 Failed to fetch（实测就是这样，白白刷屏）。
-      // 上面"有待补就不关页面"会保证下次有页面可用。
-      const liveTab = await findTabFor(host).catch(() => null);
-      if (!liveTab) {
-        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 页面没开着，这一分钟先跳过`);
-        keep.push(it); continue;
-      }
       const recUrl = await buildUrl(host, "/api/fulfillment/order/export_record/get");
       const dlUrl = await buildUrl(host, "/api/fulfillment/order/download");
+      // 自己开一个干净的标签页，别去挤用户正在用的那些（它们可能在导航、
+      // 可能被冻结，注入会失败并报"这个标签页不能注入脚本"）。
+      // 有现成能用的就先复用（多半是上一轮跑完特意留着的），没有再开一个。
+      // 每分钟都新开一个的话，标签页会一直翻腾。
+      let tab = await findTabFor(host).catch(() => null);
+      if (tab && tab.discarded) tab = null;
+      let tabId = tab && tab.id;
+      if (!tabId) {
+        try {
+          const nt = await newAutoTab(`https://${host}/`);
+          await waitTabReady(nt.id);
+          await sleep(2500);
+          tabId = nt.id;
+        } catch (e) {
+          appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 打不开 ${host} 页面，先跳过`);
+          keep.push(it); continue;
+        }
+      }
       // **必须在页面主世界里发**：后台脚本直接 fetch 卖家后台会被浏览器按跨域挡掉，
       // 报 `Failed to fetch`——实测 4 家大店每分钟都栽在这一步，
       // 而日志里之前一个字都没有，所以一直以为"平台还没生成好"。
       // 文件本身（CDN 直链）可以留在后台下，那条路是通的。
-      const r = await runInPage(host, async (recU, dlU, taskId) => {
+      const r = await runInTab(tabId, async (recU, dlU, taskId) => {
         // 出错也**返回**而不是抛出：抛出会被 runInPage 当成"这个页面不行"，
         // 连换三个页面再报一句没有上下文的 Failed to fetch，什么也查不到。
         try {
@@ -1017,10 +1043,6 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
                    url: String(recU).slice(0, 180) };
         }
       }, [recUrl, dlUrl, it.taskId]);
-      if (r.missingTab) {
-        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 没有开着的 ${host} 页面，先跳过`);
-        keep.push(it); continue;
-      }
       if (r.error) throw new Error(r.error);
       const st = (r.result || {});
       if (st.state === "error") {
@@ -1043,7 +1065,7 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
       // 文件也必须在页面里取：地址就在卖家后台域名下，后台直接 fetch 会被跨域挡。
       let buf = null;
       try {
-        buf = await fetchBytesInPage(host, url);
+        buf = await fetchBytesInTab(tabId, url);
       } catch (e) {
         appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 取文件失败：`
           + `${(e && e.message) || e}`);
@@ -1187,7 +1209,10 @@ async function runOrders({ startMs, endMs }, log) {
   log("提交订单导出任务（每次重新生成，不复用旧文件）…");
   const fullTask = await createTask(startMs, endMs, wantName);
   log(`任务已创建：${fullTask}`);
-  const rec = await waitRecord(fullTask, 12, "订单导出");
+  // 等 3 分钟（45×4s）。原来只等 48 秒：中小店的导出通常要 1~2 分钟，
+  // 等到 48 秒就判"排队中"，然后去走待补那条更绕的路。
+  // 文件一好就立刻返回，不会白等满。
+  const rec = await waitRecord(fullTask, 45, "订单导出");
   if (rec) {
     log("文件已生成，开始下载…");
     const one = await saveOne(fullTask, rec, wantName);
