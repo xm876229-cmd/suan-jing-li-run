@@ -599,6 +599,10 @@ try {
   chrome.storage.local.get({ currentShop: null }).then(({ currentShop }) => {
     if (currentShop && currentShop.shop_id && !CURRENT_SHOP.shop_id) {
       CURRENT_SHOP = currentShop;
+      // 认出来了就立刻报一声，别等下一分钟的闹钟。
+      // 以前只有「打开面板/跑任务」才会把店铺身份填上，界面于是一直显示
+      // 「浏览器没开」，点开面板才变「待命」——其实浏览器一直开着。
+      beatBridge().catch(() => {});
     }
   }).catch(() => {});
 } catch (e) { /* 忽略 */ }
@@ -2136,7 +2140,17 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
 
   const startSec = Math.floor(new Date(startDate + "T00:00:00").getTime() / 1000);
   const endSec = Math.floor(new Date(endDateExclusive + "T00:00:00").getTime() / 1000) - 1;
-  const tz = tzOffset ?? -new Date().getTimezoneOffset() * 60;
+  // 平台只认「东为正」的秒数（东八区 = 28800），抓包里平台自己发的就是 28800。
+  // 桥下发的区间可能带反号的 tzOffset（Python 的 time.timezone 是「西为正」），
+  // 原样照抄会被回 `16048002 invalid timezone offset`，整张联盟佣金表取不到。
+  // 所以：给的偏移跟浏览器本地同号才信它，否则用本地。
+  const localTz = -new Date().getTimezoneOffset() * 60;
+  const givenTz = Number(tzOffset);
+  const tz = (Number.isFinite(givenTz) && givenTz !== 0
+              && Math.sign(givenTz) === Math.sign(localTz)) ? givenTz : localTz;
+  if (Number.isFinite(givenTz) && givenTz !== 0 && givenTz !== tz) {
+    log(`   时区偏移修正：${givenTz} → ${tz}（平台只认东为正）`);
+  }
 
   log("取联盟商品维度明细…");
   let rows = [];

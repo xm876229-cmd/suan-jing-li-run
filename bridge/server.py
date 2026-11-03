@@ -2497,6 +2497,11 @@ class Handler(BaseHTTPRequestHandler):
                 "shop_name": rec.get("shop_name") or "",
                 "region": rec.get("region") or "",
                 "online": bool(rec) and age < _ONLINE_TTL,
+                # 这个进程里到底**收到过**它的心跳没有。
+                # 程序刚启动时内存表是空的，这时「没在线」和「浏览器关了」
+                # 是两件事：前者过一分钟自己就变了，后者得人去开浏览器。
+                # 混在一起说「浏览器没开」，用户会白折腾一圈。
+                "heard": bool(rec),
                 "last_beat": int(rec.get("at") or 0),
                 "ver": rec.get("ver") or "",
                 "running": rec.get("running") or None,

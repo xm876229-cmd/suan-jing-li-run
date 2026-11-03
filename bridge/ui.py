@@ -41,16 +41,43 @@ STATE: dict = {"running": False, "last_run": None}
 # ---------------- 数据 ----------------
 
 def _ext_heartbeat() -> str:
-    log = paths.DATA / "capture" / "task.log"
+    """扩展最后一次跟桥说话的时间（「浏览器扩展」那张卡片）。
+
+    两个来源取较新的那个：
+      1. `数据/抓包记录/task.log` 的最后一行；
+      2. 内存里的心跳表（`server._ONLINE`，桥一重启就空，所以不能只看它）。
+
+    以前这里写的是 `数据/capture/task.log` —— 目录中文化之后这个路径根本不存在，
+    于是卡片永远显示「无记录」，人以为扩展压根没连上。名字也一并改对：
+    「浏览器扩展」这张卡说的是**最近一次收到消息**，不是「现在有没有连」。
+    """
+    newest = 0.0
+    stamp = ""
     try:
-        with log.open("r", encoding="utf-8", errors="replace") as fh:
+        with (paths.CAPTURE / "task.log").open("r", encoding="utf-8",
+                                               errors="replace") as fh:
             lines = [ln for ln in fh.read().splitlines() if ln.strip()]
     except OSError:
-        return ""
+        lines = []
     for ln in reversed(lines[-100:]):
         if len(ln) >= 19 and ln[4] == "-" and ln[13] == ":":
-            return ln[:19]
-    return ""
+            stamp = ln[:19]
+            break
+    if stamp:
+        try:
+            newest = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            newest = 0.0
+    try:
+        from bridge import server as _srv
+        with _srv._ONLINE_LOCK:
+            for rec in _srv._ONLINE.values():
+                newest = max(newest, float(rec.get("at") or 0))
+    except Exception:  # noqa: BLE001
+        pass
+    if newest <= 0:
+        return ""
+    return datetime.fromtimestamp(newest).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _ago(stamp: str) -> str:
@@ -1206,7 +1233,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
     <section class="page" id="view-stores" hidden>
       <div class="head"><h1>店铺</h1>
-        <p>在战斧里登录过的店铺会自动出现在这里。名字可以自己改，只有你自己看得到——底下那串 ID 才是唯一标识。</p></div>
+        <p>在浏览器里登录过的店铺会自动出现在这里。名字可以自己改，只有你自己看得到——底下那串 ID 才是唯一标识。</p></div>
       <div class="card"><h2>所有店铺<span class="hint" id="store-hint"></span></h2>
         <div class="body tight" id="store-list"><div class="empty">加载中…</div></div></div>
       <div class="card"><h2>链接资料（款式编码）<span class="hint">现在不用导了，留作手动补漏</span></h2>
@@ -1673,7 +1700,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
       <div class="card"><h2>第一次用（只做一次）</h2>
         <div class="body tight"><div class="kv">
-          <div>第 1 步</div><div>打开<b>战斧浏览器</b></div>
+          <div>第 1 步</div><div>打开<b>浏览器</b>（Chrome / Edge / QQ 浏览器都行）</div>
           <div>第 2 步</div><div>地址栏输入 <span class="mono">chrome://extensions</span></div>
           <div>第 3 步</div><div>打开右上角<b>「开发者模式」</b></div>
           <div>第 4 步</div><div>点<b>「加载已解压的扩展程序」</b></div>
@@ -2125,7 +2152,9 @@ function lastLine(s){
   if(p.finished) return (p.ok === false ? '上次失败' : '上次成功') + ' · ' +
     new Date(p.finished * 1000).toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
   if(p.current) return '正在跑…';
-  if(!s.online) return '浏览器没开';
+  // 「还没收到过心跳」和「收到过、现在断了」要分开说：
+  // 前者多半是程序刚启动/扩展刚刷新，等一分钟自己就好；后者才要人去开浏览器。
+  if(!s.online) return s.heard ? '浏览器没开' : '等扩展上报（约 1 分钟）';
   return '还没跑过';
 }
 
@@ -2140,7 +2169,7 @@ function cardHtml(id, s, labels){
   const dot = cur ? 'run' : (s.online ? (anyFail ? 'warn' : (stale ? 'warn' : 'on')) : 'off');
   const stateTxt = cur ? '运行中'
     : (s.online ? (anyFail ? '有失败' : (stale ? ('扩展 ' + s.ver + ' 待刷新') : '待命'))
-                : '浏览器没开');
+                : (s.heard ? '浏览器没开' : '等扩展上报'));
   const realName = s.shop_name && s.shop_name !== s.store_name ? s.shop_name : '';
   // 今天已经取到过数据就别让人白等：卡片上直接写「今日已取 09:12」，
   // 四个都齐 = 这次点运行会秒过（直接复用），缺的才会上平台导。
@@ -2547,8 +2576,8 @@ async function loadStatus(){
       <div class="stat"><div class="k"><span class="dot on"></span>取数服务</div>
         <div class="v small">运行中 · ${j.uptime}</div><div class="s">本地端口 8765</div></div>
       <div class="stat"><div class="k"><span class="dot ${j.ext_last?'on':'off'}"></span>浏览器扩展</div>
-        <div class="v small">${j.ext_last ? j.ext_ago : '无记录'}</div>
-        <div class="s">${j.ext_last ? j.ext_last.slice(11) : '在战斧里打开扩展面板'}</div></div>
+        <div class="v small">${j.ext_last ? j.ext_ago : '还没收到'}</div>
+        <div class="s">${j.ext_last ? ('最近一次 ' + j.ext_last.slice(11)) : '开一次扩展面板就会上报'}</div></div>
       <div class="stat"><div class="k">店铺</div>
         <div class="v">${j.store_count} <span style="font-size:13px;font-weight:400;color:var(--text-2)">家</span></div>
         <div class="s">待核算 ${j.inbox_count} 个文件</div></div>
@@ -3203,7 +3232,7 @@ async function loadStores(){
     storesCache = j.stores || [];
     $('#store-hint').textContent = storesCache.length ? storesCache.length + ' 家' : '';
     if(!storesCache.length){
-      $('#store-list').innerHTML = '<div class="empty"><b>还没识别到店铺</b>在战斧里打开店铺页面，点扩展面板的「立即运行」，它会自动认出来</div>';
+      $('#store-list').innerHTML = '<div class="empty"><b>还没识别到店铺</b>在浏览器里打开店铺页面，点扩展面板的「立即运行」，它会自动认出来</div>';
       return;
     }
     let html = '<table><thead><tr><th style="width:200px">名字（可改）</th>'

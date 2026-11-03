@@ -583,7 +583,7 @@ def _menu_import_mapping() -> None:
 
 
 def _menu_extension_help() -> None:
-    print("\n在战斧浏览器里加载扩展（只需做一次）：")
+    print("\n在浏览器里加载扩展（只需做一次）：")
     print("  1. 打开 chrome://extensions")
     print("  2. 打开右上角「开发者模式」")
     print("  3. 点「加载已解压的扩展程序」，选择这个目录：")

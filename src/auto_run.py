@@ -296,7 +296,11 @@ def normalize_range(rng: dict | None) -> dict:
     if not out.get("tzOffset"):
         try:
             off = datetime.now().astimezone().utcoffset()
-            out["tzOffset"] = -int(off.total_seconds()) if off else 0
+            # 口径：**东为正**（东八区 = +28800）。扩展把它原样塞进平台的
+            # timezone_offset，抓包里平台自己发的就是 28800；写成负的会被
+            # 回 `16048002 invalid timezone offset`，整张联盟佣金表取不到，
+            # 报表里这部分按 0 计 → 净利偏高。
+            out["tzOffset"] = int(off.total_seconds()) if off else 0
         except Exception:  # noqa: BLE001
             out["tzOffset"] = 0
     return out
