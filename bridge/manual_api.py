@@ -412,6 +412,31 @@ def _report_target(key: str, label: str) -> tuple[Path, str]:
     return out_dir, base
 
 
+# 正在算的手动核算子进程：界面点「停止」时按店去掐。
+# 手动核算是桥自己起的子进程（不像自动那条走浏览器），所以停它得在桥这边做。
+_RUNNING: dict[str, subprocess.Popen] = {}
+_RUNNING_LOCK = threading.Lock()
+
+
+def running_keys() -> list[str]:
+    with _RUNNING_LOCK:
+        return list(_RUNNING)
+
+
+def cancel(key: str) -> bool:
+    """掐掉这家店正在跑的手动核算。返回是否真的找到了进程。"""
+    k = str(key or "").strip()
+    with _RUNNING_LOCK:
+        proc = _RUNNING.get(k)
+    if proc is None or proc.poll() is not None:
+        return False
+    try:
+        proc.kill()
+    except OSError:
+        return False
+    return True
+
+
 def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
         with_formula: bool = False) -> dict:
     """算这家店的手动数据。只读 `手动导入`，不碰收件箱。"""
@@ -465,15 +490,28 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     try:
-        proc = subprocess.run(
-            cmd, cwd=str(paths.ROOT), capture_output=True, env=env, timeout=300,
+        proc = subprocess.Popen(
+            cmd, cwd=str(paths.ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env,
             creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
                            if sys.platform == "nt" else 0),
         )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "算超过 5 分钟没跑完，已中断（多半是文件太大或格式有问题）"}
     except OSError as e:
         return {"ok": False, "error": f"启动核算失败：{e}"}
+    with _RUNNING_LOCK:
+        _RUNNING[k] = proc
+    try:
+        _out, _err = proc.communicate(timeout=300)
+        proc.stdout_b, proc.stderr_b = _out, _err          # 保持下面取用方式不变
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        return {"ok": False, "error": "算超过 5 分钟没跑完，已中断（多半是文件太大或格式有问题）"}
+    finally:
+        with _RUNNING_LOCK:
+            _RUNNING.pop(k, None)
 
     def _dec(raw: bytes) -> str:
         for enc in ("utf-8", "gbk"):
@@ -483,8 +521,10 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
                 continue
         return raw.decode("utf-8", "replace")
 
-    stdout = _dec(proc.stdout or b"")
-    stderr = _dec(proc.stderr or b"")
+    stdout = _dec(getattr(proc, "stdout_b", b"") or b"")
+    stderr = _dec(getattr(proc, "stderr_b", b"") or b"")
+    if proc.returncode not in (0, None) and not stdout:
+        return {"ok": False, "error": "已手动停止"}
     summary = None
     for line in reversed(stdout.strip().splitlines()):
         line = line.strip()

@@ -357,6 +357,13 @@ _AUTO_JOB_TTL_MS = 12 * 60 * 60 * 1000
 # 以前只能看 meta.json 的「上次上传时间」，那只说明以前传过，不代表现在还连着。
 _ONLINE: dict[str, dict] = {}
 _ONLINE_LOCK = threading.Lock()
+
+# 手动「停止」：界面点一下，把这家店（或全部）标成要停；
+# 扩展在跑的过程中每隔几秒问一次，看到就收手。
+# 存时间戳而不是 True：十分钟后自动过期，免得一次误点把下一次也停了。
+_STOP: dict[str, float] = {}
+_STOP_LOCK = threading.Lock()
+_STOP_TTL = 600.0
 _ONLINE_TTL = 150.0          # 超过这个秒数没心跳就算离线（心跳 60 秒一次）
 
 # 进度：shop_id → {task, run_id, steps:{step: {...}}, current, started, updated}
@@ -1286,6 +1293,21 @@ class Handler(BaseHTTPRequestHandler):
                 _append_log(f"[pending] 清掉 {dropped} 个超时没人领的任务"
                             f"（计划任务 12 小时有效，手动任务 30 分钟）")
             _json(self, {"ok": True, "job": job, "shop": want})
+        elif self.path.startswith("/api/run/stop"):
+            # 扩展在跑的时候轮询这里：有没有人要求停。
+            # 读一次就清掉——只停当前这一轮，不能把下一轮也停了。
+            q = parse_qs(urlparse(self.path).query)
+            sid = (q.get("shop") or [""])[0].strip()
+            hit = False
+            with _STOP_LOCK:
+                now = time.time()
+                for k in list(_STOP):
+                    if now - _STOP[k] > _STOP_TTL:
+                        _STOP.pop(k, None)
+                if sid and (sid in _STOP or "*" in _STOP):
+                    _STOP.pop(sid, None)
+                    hit = True
+            _json(self, {"ok": True, "stop": hit})
         elif self.path.startswith("/api/live"):
             # 界面轮询这一个口子就够了：谁在线、跑到哪一步、队列里还压着几个。
             self._get_live()
@@ -1469,7 +1491,10 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/manual"):
             # 手动核算：按店铺（+临时）分抽屉，跟店铺收件箱完全隔开
             from bridge import manual_api
-            _json(self, {"ok": True, "spaces": manual_api.list_spaces()})
+            # running：哪几家正在算。界面刷新后也要能显示「计算中…」和停止按钮，
+            # 不能只靠前端那次点击留下的内存状态。
+            _json(self, {"ok": True, "spaces": manual_api.list_spaces(),
+                         "running": manual_api.running_keys()})
         elif self.path.startswith("/api/capture"):
             # 「今天这个区间取过没有」——扩展跑之前问一句，取过的就不再导。
             # 参数：shop / from / to，缺区间就直说判断不了（照常全部重取）。
@@ -1633,6 +1658,26 @@ class Handler(BaseHTTPRequestHandler):
             self._post_hello()
         elif self.path.startswith("/progress"):
             self._post_progress()
+        elif self.path.startswith("/api/run/stop"):
+            try:
+                p = self._read_payload() or {}
+            except Exception:  # noqa: BLE001
+                p = {}
+            mkey = str(p.get("manual_key") or "").strip()
+            if mkey:
+                from bridge import manual_api
+                okc = manual_api.cancel(mkey)
+                _append_log(f"[stop] 手动核算停止：{mkey}（{'已掐掉' if okc else '没在跑'}）")
+                _json(self, {"ok": True, "cancelled": okc})
+                return
+            sid = str(p.get("shop_id") or "").strip()
+            keys = ["*"] if (not sid or p.get("all")) else [sid]
+            with _STOP_LOCK:
+                for k in keys:
+                    _STOP[k] = time.time()
+            who = "全部店铺" if keys == ["*"] else (p.get("store_name") or sid)
+            _append_log(f"[stop] 收到停止请求：{who}")
+            _json(self, {"ok": True, "stopping": keys})
         elif self.path.startswith("/api/run-stores"):
             self._post_run_stores()
         elif self.path.startswith("/api/mapping"):
@@ -2583,6 +2628,8 @@ class Handler(BaseHTTPRequestHandler):
                 "running": rec.get("running") or None,
                 "progress": prog.get(sid) or None,
                 "queued": sum(1 for q in queue if q.get("store") == sid),
+                # 已经点了「停止」、扩展还没收手的这段：界面显示「正在停…」
+                "stopping": (sid in _STOP or "*" in _STOP),
                 # 今天这家店已经取到过什么（卡片上那行「今日 09:12 已取数」）。
                 # 有了它，用户点运行前就知道这次会不会真去平台导。
                 "captured": _captured_brief(sid),

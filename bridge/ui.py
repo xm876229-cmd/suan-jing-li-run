@@ -758,6 +758,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .bar .sep{width:1px;height:22px;background:var(--line)}
   .bar .grow{flex:1}
   .bar #btn-run-picked{margin-left:auto}
+  .bar button.danger{background:#fff4f3;border-color:#f0c2bc;color:#b42318}
+  .bar button.danger:hover{background:#ffe9e6;border-color:#e6a79f}
   .bar label.chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;
     color:var(--text-2);cursor:pointer;user-select:none}
   .bar label.chk input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
@@ -827,11 +829,18 @@ _TEMPLATE = r"""<!DOCTYPE html>
     color:var(--text-2);padding:6px 11px}
   .sc-foot button.ghost:hover{border-color:var(--accent);color:var(--accent);background:#fff}
   .sc-foot button:disabled{opacity:.5;cursor:default}
+  /* 「停止」跟「运行」并排出现，用红色系才分得清，别跟主按钮抢颜色 */
+  .sc-foot button.stop{background:#fff4f3;border-color:#f0c2bc;color:#b42318}
+  .sc-foot button.stop:hover{background:#ffe9e6;border-color:#e6a79f}
+  .sc-foot button.stop:disabled{background:#f7f8fa;border-color:var(--line);
+    color:var(--text-3)}
   .sc-date{display:flex;gap:4px;align-items:center}
   .sc-date input{font:inherit;font-size:11.5px;padding:4px 6px;width:104px;
     border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--text)}
 
   .mn-rep{color:var(--accent);cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}
+  .manual-grid .sc-foot button.stop{background:#fff4f3;border-color:#f0c2bc;color:#b42318}
+  .manual-grid .sc-foot button.stop:hover{background:#ffe9e6;border-color:#e6a79f}
   .mn-link{margin-top:6px;font-size:12.5px;color:var(--accent);cursor:pointer;user-select:none}
   .mn-link:hover{text-decoration:underline}
   .sc-empty{padding:50px 20px;text-align:center;color:var(--text-3);font-size:13px;
@@ -1081,6 +1090,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <button id="btn-recalc-picked" class="ghost"
                 title="用已经在本机的数据重算勾选的店，不重新取数。
 改了佣金费率 / 成本表 / 汇率之后点这个">重算</button>
+        <button class="danger" id="btn-stop-all" hidden
+                title="把所有正在跑的店停下来（每一步之间都会退出）">停止全部</button>
         <button class="primary" id="btn-run-picked">运行勾选的</button>
       </div>
 
@@ -2167,9 +2178,9 @@ function cardHtml(id, s, labels){
   const appVer = ($('#app-ver') || {}).textContent || '';
   const stale = s.ver && appVer && s.ver !== appVer;
   const dot = cur ? 'run' : (s.online ? (anyFail ? 'warn' : (stale ? 'warn' : 'on')) : 'off');
-  const stateTxt = cur ? '运行中'
+  const stateTxt = s.stopping ? '正在停止…' : (cur ? '运行中'
     : (s.online ? (anyFail ? '有失败' : (stale ? ('扩展 ' + s.ver + ' 待刷新') : '待命'))
-                : (s.heard ? '浏览器没开' : '等扩展上报'));
+                : (s.heard ? '浏览器没开' : '等扩展上报')));
   const realName = s.shop_name && s.shop_name !== s.store_name ? s.shop_name : '';
   // 今天已经取到过数据就别让人白等：卡片上直接写「今日已取 09:12」，
   // 四个都齐 = 这次点运行会秒过（直接复用），缺的才会上平台导。
@@ -2200,9 +2211,12 @@ function cardHtml(id, s, labels){
           </svg><span>${esc(fmtRange(CARD_RANGE[id]))}</span>
         </button>
       </div>
-      <button class="ghost" data-recalc="${esc(id)}"
+      <button class="ghost" data-recalc="${esc(id)}" ${cur ? 'disabled' : ''}
               title="用已经在本机的数据重算，不重新取数。改了佣金费率、成本表之后点这个">重算</button>
-      <button data-run="${esc(id)}" class="primary">运行</button>
+      ${cur || s.stopping
+        ? `<button class="stop" data-stop="${esc(id)}" ${s.stopping ? 'disabled' : ''}>
+             ${s.stopping ? '正在停…' : '停止'}</button>`
+        : `<button data-run="${esc(id)}" class="primary">运行</button>`}
     </div>
   </div>`;
 }
@@ -2240,6 +2254,14 @@ function renderCards(){
   grid.dataset.ready = '1';
   grid.innerHTML = ids.map(id => cardHtml(id, j.stores[id] || {}, labels)).join('');
 
+  // 「停止全部」只在有店在跑时出现，顺便报数量
+  const stopAllBtn = $('#btn-stop-all');
+  if(stopAllBtn){
+    const busy = Object.values(j.stores || {}).filter(s => (s.progress || {}).current).length;
+    stopAllBtn.hidden = !busy;
+    stopAllBtn.textContent = busy ? ('停止全部（' + busy + '）') : '停止全部';
+  }
+
   grid.querySelectorAll('[data-pick]').forEach(cb => {
     cb.onchange = () => {
       const id = cb.dataset.pick;
@@ -2257,6 +2279,19 @@ function renderCards(){
         const sp = b.querySelector('span');
         if(sp) sp.textContent = fmtRange(r);
       });
+    };
+  });
+  grid.querySelectorAll('[data-stop]').forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.stop;
+      b.disabled = true;
+      b.textContent = '正在停…';
+      const r = await fetch('/api/run/stop', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({shop_id: id, store_name: ((LIVE.stores || {})[id] || {}).store_name || ''}),
+      }).then(x => x.json()).catch(() => null);
+      toast(r && r.ok ? '已发送停止，最多 5 秒收手' : '停止请求没发出去');
+      setTimeout(loadLive, 800);
     };
   });
   grid.querySelectorAll('[data-run]').forEach(b => {
@@ -2343,8 +2378,19 @@ function initHome(){
       PICKED = e.target.checked ? new Set(ids) : new Set();
       renderCards();
     };
-    const runBtn = $('#btn-run-picked');
+  const runBtn = $('#btn-run-picked');
     if(runBtn) runBtn.onclick = (e) => runStores([...PICKED], e.currentTarget, homeRange());
+    const stopAllBtn = $('#btn-stop-all');
+    if(stopAllBtn) stopAllBtn.onclick = async () => {
+      stopAllBtn.disabled = true;
+      const r = await fetch('/api/run/stop', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({all: true}),
+      }).then(x => x.json()).catch(() => null);
+      stopAllBtn.disabled = false;
+      toast(r && r.ok ? '已发送停止，正在收手的店会在几步内退出' : '停止请求没发出去');
+      setTimeout(loadLive, 800);
+    };
     // 工具条上的「重算」：勾了哪几家就重算哪几家，用的是已经在本机的数据
     const rcBtn = $('#btn-recalc-picked');
     if(rcBtn) rcBtn.onclick = (e) => recalcPicked(e.currentTarget);
@@ -3420,9 +3466,12 @@ function mnCardHtml(s){
     </div>
     <div class="sc-foot">
       <div class="last">${esc(s.count ? ('最后导入 ' + (s.last_file || '')) : '也可以把表直接拖到卡片上')}</div>
-      <button class="ghost" data-mn-imp="${esc(s.key)}">导入</button>
-      <button class="primary" data-mn-run="${esc(s.key)}"
-              title="用这家店的手动数据算。改了佣金费率就再点一次">计算</button>
+      <button class="ghost" data-mn-imp="${esc(s.key)}" ${busy ? 'disabled' : ''}>导入</button>
+      ${busy
+        ? `<button class="stop" data-mn-stop="${esc(s.key)}"
+             title="掐掉这次的核算。算到一半的临时文件会被清掉，报表不受影响">停止</button>`
+        : `<button class="primary" data-mn-run="${esc(s.key)}"
+             title="用这家店的手动数据算。改了佣金费率就再点一次">计算</button>`}
     </div>
   </div>`;
 }
@@ -3434,6 +3483,9 @@ async function loadManual(){
   try{
     const j = await (await fetch('/api/manual')).json();
     MN.spaces = j.spaces || [];
+    // 服务端说哪家在算就按哪家显示「计算中…」——刷新页面也能看到，
+    // 不会因为前端内存清空就变成「还没算过」。
+    (j.running || []).forEach(k => { MN.busy[k] = 1; });
   }catch(e){ MN.spaces = []; down = true; }
   if(!MN.spaces.length){
     // 「服务没连上」和「真没有店铺」要分开说：
@@ -3465,6 +3517,20 @@ function bindMnCards(grid){
   });
   grid.querySelectorAll('[data-mn-run]').forEach(b => {
     b.onclick = () => mnRun(b.dataset.mnRun);
+  });
+  grid.querySelectorAll('[data-mn-stop]').forEach(b => {
+    b.onclick = async () => {
+      const k = b.dataset.mnStop;
+      b.disabled = true;
+      b.textContent = '停止中…';
+      const r = await fetch('/api/run/stop', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({manual_key: k}),
+      }).then(x => x.json()).catch(() => null);
+      toast(r && r.cancelled ? '已停止' : '它已经跑完了，没掐到');
+      delete MN.busy[k];
+      loadManual();
+    };
   });
   // 报表名点一下 → 报表页「手动报表」房间、只看这家店
   grid.querySelectorAll('[data-mn-rep]').forEach(el => {

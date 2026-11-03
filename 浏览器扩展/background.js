@@ -906,6 +906,7 @@ async function fetchBytesInTab(tabId, url) {
   const out = new Uint8Array(size);
   let off = 0;
   while (off < size) {
+    throwIfStopped();
     const g = await runInTab(tabId, async (o, n) => {
       try {
         const a = window.__jlFile;
@@ -1153,6 +1154,7 @@ async function runOrders({ startMs, endMs }, log) {
     let queued = false;
     for (let i = 0; i < rounds; i++) {
       await sleep(4000);
+      throwIfStopped();
       const list = await exportRecords().catch(() => []);
       const mine = list.find((x) => String(x.export_task_id) === String(tid));
       if (mine && isRealFileKey(mine.file_key)) return mine;
@@ -2524,6 +2526,7 @@ async function runSpecTask(task, range, log) {
 
   const results = [];
   for (const step of steps) {
+    throwIfStopped();
     const label = step.name || step.path;
     log(`  · ${label}`);
     const r = await callApi(realHost, step.path, step.method || "POST", step.body);
@@ -4707,10 +4710,49 @@ async function beatBridge(running) {
   } catch (e) { /* 桥没开，忽略 */ }
 }
 
+// ---------------- 手动停止 ----------------
+// 界面点「停止」→ 桥记一个标记 → 这里每 4 秒问一次 → 到下一个检查点收手。
+// 为什么不做成"直接掐断"：浏览器里没有能中断 fetch 的开关，
+// 但每一步、每次等文件、每个分块之间都能安全退出，够用了。
+let RUN_ABORT = false;
+let STOP_TIMER = null;
+
+function throwIfStopped() {
+  if (RUN_ABORT) {
+    const e = new Error("已手动停止");
+    e.__aborted = true;
+    throw e;
+  }
+}
+
+function startStopWatch(shopId) {
+  RUN_ABORT = false;
+  if (STOP_TIMER) clearInterval(STOP_TIMER);
+  STOP_TIMER = setInterval(async () => {
+    if (RUN_ABORT) return;
+    try {
+      const r = await fetch(
+        `${BRIDGE}/api/run/stop?shop=${encodeURIComponent(shopId || "")}`,
+        { cache: "no-store" });
+      const j = await r.json();
+      if (j && j.stop) {
+        RUN_ABORT = true;
+        appendTaskLog("[stop] 收到停止指令，正在收手…");
+      }
+    } catch (e) { /* 桥不在就继续跑 */ }
+  }, 4000);
+}
+
+function stopStopWatch() {
+  if (STOP_TIMER) { clearInterval(STOP_TIMER); STOP_TIMER = null; }
+  RUN_ABORT = false;
+}
+
 async function executeTask(task, range, log, opts = {}) {
   RUN_ID = newRunId();
   try {
     startKeepAlive();
+    startStopWatch(CURRENT_SHOP.shop_id);
     CURRENT_RANGE = range || null;
     await skSet({ running: { task, at: Date.now() } });
     log(`开始（${range?.startDate} ~ ${range?.to || range?.endDateExclusive}）`);
@@ -4736,11 +4778,19 @@ async function executeTask(task, range, log, opts = {}) {
     return { ok: true, result };
   } catch (e) {
     const err = String((e && (e.message || e)) || e);
+    if (RUN_ABORT || (e && e.__aborted)) {
+      // 手动停止不是失败：界面上要能一眼区分「我停的」和「它崩了」
+      log("已手动停止");
+      await skSet({ lastResult: { task, ok: false, at: Date.now(), error: "已手动停止" } });
+      await reportProgress("__finish__", "skip", { detail: "已手动停止" });
+      return { ok: false, aborted: true, error: "已手动停止" };
+    }
     log(`失败：${err}`);
     await skSet({ lastResult: { task, ok: false, at: Date.now(), error: err } });
     await reportProgress("__finish__", "fail", { error: err });
     return { ok: false, error: err };
   } finally {
+    stopStopWatch();
     stopKeepAlive();
     // 本轮开的后台页全部关掉：任务卡住时最容易堆，一晚上能开出几十个。
     // 例外：还有「订单没生成好」的待补时，那个域名的页面要留着——
@@ -5947,6 +5997,7 @@ async function runTask(task, range, log, opts = {}) {
     // link（链接资料）不在这个列表里：它跟 sku 抓的是同一个接口，
     // 重复抓一遍纯属浪费。sku 跑完会自动带出链接资料。
     for (const t of ["orders", "sku", "affiliate", "ads"]) {
+      throwIfStopped();      // 每一步之间都是安全的退出点
       const t0 = Date.now();
       const hit = reuse[t];
       if (hit) {
