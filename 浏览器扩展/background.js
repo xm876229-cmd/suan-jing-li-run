@@ -4895,7 +4895,11 @@ async function consumePending() {
 
   if (!p || !p.task) return null;
 
-  const log = (m) => appendTaskLog(`[${p.task}] ${m}`);
+  // 日志带店名：7 家同时跑时，日志全挤在一起，光看 [all] 分不清是谁在报错
+  // （实测排查"哪家订单失败"要靠猜，白花半小时）。
+  const who = CURRENT_SHOP.shop_name || CURRENT_SHOP.shop_id || "";
+  const tag = who ? `[${p.task}/${who}]` : `[${p.task}]`;
+  const log = (m) => appendTaskLog(`${tag} ${m}`);
   log("从待办队列领取任务");
   return executeTask(p.task, p.range || {}, log, {
     force: !!p.force, withCalc: p.withCalc, store: p.store, country: p.country,
@@ -6044,8 +6048,27 @@ async function runTask(task, range, log, opts = {}) {
           detail: shortDetail(out[t]),
         });
       } catch (e) {
-        log(`—— ${t} 失败：${e.message}`);
-        out[t] = { error: String(e.message || e) };
+        const msg0 = String((e && e.message) || e);
+        // 订单这一步的 `Failed to fetch` 几乎都是"请求被浏览器/网络掐断"，
+        // 不是平台拒绝。整步重来一次比原地重试更有效：重来时页面和参数
+        // 都重新准备一遍（实测原地重试 4 次仍失败的那种，整步重来能过）。
+        if (t === "orders" && /Failed to fetch|NetworkError/i.test(msg0)) {
+          log(`—— ${t} 请求被打断，8 秒后整步重来一次 ——`);
+          await sleep(8000);
+          try {
+            throwIfStopped();
+            out[t] = await runTask(t, range, log, { force: !!opts.force });
+            await reportProgress(t, "done", {
+              elapsed: (Date.now() - t0) / 1000,
+              detail: shortDetail(out[t]) + "（重来一次成功）",
+            });
+            continue;
+          } catch (e2) {
+            log(`—— ${t} 重来仍失败：${String((e2 && e2.message) || e2)} ——`);
+          }
+        }
+        log(`—— ${t} 失败：${msg0}`);
+        out[t] = { error: msg0 };
         await reportProgress(t, "fail", {
           elapsed: (Date.now() - t0) / 1000,
           error: String(e.message || e),

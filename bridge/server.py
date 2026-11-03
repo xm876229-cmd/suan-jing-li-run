@@ -364,6 +364,16 @@ _ONLINE_LOCK = threading.Lock()
 _STOP: dict[str, float] = {}
 _STOP_LOCK = threading.Lock()
 _STOP_TTL = 600.0
+
+# 同一时刻最多几家在取数。
+#
+# 为什么要有这道闸：7 家店是 7 个浏览器，但同一台机器、同一条网。
+# 实测 7 家一起开跑时，订单接口会抛 `Failed to fetch`（抓包里是"发出去了、
+# 没有任何响应"，status=None），而且**每轮失败的店不固定**——14:06 是
+# Crochet Studio，14:20 换成 Chroma Home，纯属谁抢输了谁失败。
+# 平台那边同一账户并发导出也吃不消（一上午堆几十个任务后全部卡在"生成中"）。
+# 限制并发比继续加超时有效：一次跑 2 家，其余排队等下一分钟领。
+_MAX_ACTIVE_FETCH = 2
 _ONLINE_TTL = 150.0          # 超过这个秒数没心跳就算离线（心跳 60 秒一次）
 
 # 进度：shop_id → {task, run_id, steps:{step: {...}}, current, started, updated}
@@ -1269,6 +1279,23 @@ class Handler(BaseHTTPRequestHandler):
             # 而且报表看起来完全正常。现在按 store 字段投递。
             q = parse_qs(urlparse(self.path).query)
             want = (q.get("shop") or [""])[0].strip()
+
+            # 并发闸门：已经有权在跑就别再放新的进来。
+            # 只算「十分钟内还有动静」的，避免某家卡死后把整队堵住。
+            with _PROGRESS_LOCK:
+                _now = time.time()
+                _active = [
+                    sid_ for sid_, st_ in _PROGRESS.items()
+                    if sid_ != want
+                    and str((st_ or {}).get("current") or "").strip()
+                    and _now - float((st_ or {}).get("updated") or 0) < 600
+                ]
+            if len(_active) >= _MAX_ACTIVE_FETCH:
+                _json(self, {"ok": True, "job": None, "busy": True,
+                             "running": len(_active),
+                             "queued": len(_PENDING)})
+                return
+
             job = None
             dropped = 0
             with _PENDING_LOCK:
