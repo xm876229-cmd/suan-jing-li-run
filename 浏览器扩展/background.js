@@ -859,28 +859,55 @@ async function rememberPendingOrder(item) {
  * 避免一次塞一个几十 MB 的 base64 进 executeScript。
  */
 async function fetchBytesInPage(host, url) {
-  const CHUNK = 6 * 1024 * 1024;
-  const begin = await runInPage(host, async (u) => {
+  const CHUNK = 4 * 1024 * 1024;
+  // **固定一个标签页**：文件是缓存在那个页面的 window 上的，
+  // 中途换一个标签（runInPage 会自己挑）就变成"页面里的文件缓存没了"。
+  let tab = await findTabFor(host).catch(() => null);
+  // 被浏览器休眠（discarded）的标签页注入不了脚本，重开一个干净的
+  if (tab && tab.discarded) tab = null;
+  if (!tab) {
     try {
-      const r = await fetch(u, { credentials: "include" });
-      if (!r.ok) return { error: `HTTP ${r.status}` };
-      const b = await r.arrayBuffer();
+      tab = await newAutoTab(`https://${host}/`);
+      await waitTabReady(tab.id);
+      await sleep(1500);
+    } catch (e) {
+      throw new Error(`没有开着的 ${host} 页面`);
+    }
+  }
+  const tabId = tab.id;
+  const call = async (func, args) => {
+    const [r] = await chrome.scripting.executeScript({
+      target: { tabId }, world: "MAIN", func, args: args || [],
+    });
+    return (r && r.result) || {};
+  };
+
+  const grab = () => call(async (u) => {
+    try {
+      const resp = await fetch(u, { credentials: "include" });
+      if (!resp.ok) return { error: `HTTP ${resp.status}` };
+      const b = await resp.arrayBuffer();
       window.__jlFile = new Uint8Array(b);
       return { size: window.__jlFile.length };
     } catch (e) {
       return { error: String((e && e.message) || e) };
     }
   }, [url]);
-  if (begin.missingTab) throw new Error(`没有开着的 ${host} 页面`);
-  if (begin.error) throw new Error(begin.error);
-  const st = begin.result || {};
-  if (st.error) throw new Error(st.error);
-  const size = Number(st.size) || 0;
+
+  let size = 0;
+  for (let i = 0; i < 2; i++) {
+    const st = await grab();
+    if (st.error) throw new Error(st.error);
+    size = Number(st.size) || 0;
+    if (size) break;
+    await sleep(1500);
+  }
   if (!size) throw new Error("取到 0 字节，不像订单表");
 
   const out = new Uint8Array(size);
-  for (let off = 0; off < size; off += CHUNK) {
-    const part = await runInPage(host, async (o, n) => {
+  let off = 0;
+  while (off < size) {
+    const g = await call(async (o, n) => {
       try {
         const a = window.__jlFile;
         if (!a) return { error: "页面里的文件缓存没了" };
@@ -895,12 +922,20 @@ async function fetchBytesInPage(host, url) {
         return { error: String((e && e.message) || e) };
       }
     }, [off, CHUNK]);
-    const g = (part && part.result) || {};
-    if (g.error) throw new Error(g.error);
+    if (g.error) {
+      // 页面自己刷新/跳走过一次：重新取一遍，从头再来（最多一次）
+      if (off === 0) throw new Error(g.error);
+      const st = await grab();
+      if (st.error) throw new Error(`${g.error}；重取也失败：${st.error}`);
+      off = 0;
+      continue;
+    }
     const bin = atob(g.b64 || "");
     for (let i = 0; i < bin.length; i++) out[off + i] = bin.charCodeAt(i);
+    off += bin.length;
+    if (!bin.length) throw new Error("分块取到 0 字节");
   }
-  try { await runInPage(host, async () => { window.__jlFile = null; return 1; }, []); } catch (e) { /* 清不掉也无所谓 */ }
+  try { await call(async () => { window.__jlFile = null; return 1; }); } catch (e) { /* 清不掉无所谓 */ }
   return out.buffer;
 }
 
