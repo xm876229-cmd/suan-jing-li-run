@@ -2390,17 +2390,21 @@ class Handler(BaseHTTPRequestHandler):
         wanted = [str(x).strip() for x in raw if str(x).strip()]
 
         # 支持传「店名」也支持传 shop_id —— 前端两个都可能给
-        id_by_name = {v: k for k, v in _store_dir_names().items()}
+        _names = _store_dir_names()                 # shop_id → 目录名
+        id_by_name = {v: k for k, v in _names.items()}   # 目录名 → shop_id
         ids: list[str] = []
         ignored: list[str] = []
         # 只认真正存在的店：磁盘上有目录的，或者 stores.json 里登记过的
         # （新店第一次运行前目录可能还没建）。不认的一律丢掉——
         # 否则一个写错的店名会变成一条谁也领不走的任务，在队列里躺 30 分钟，
         # 界面上却显示「已派发」。
+        # 认的是 shop_id（不是目录名）：以前这里写成 set(id_by_name)，
+        # 那是**店名**的集合，于是每个 shop_id 都对不上、全被当成「不认识的店」，
+        # 界面上点「运行」只回一句「已派发」，实际一家都没派 —— 0.24.16 起的回归。
         try:
-            _known = set(id_by_name) | set(paths._load_store_names())
+            _known = set(_names) | set(paths._load_store_names())
         except Exception:  # noqa: BLE001
-            _known = set(id_by_name)
+            _known = set(_names)
         for x in wanted:
             sid = id_by_name.get(x, x)
             if sid in _known:
@@ -2408,9 +2412,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 ignored.append(x)
         if not ids and not ignored:
-            ids = list(id_by_name.keys())        # 空 = 全部已知店铺
+            ids = list(_names.keys())            # 空 = 全部已知店铺
         if ignored:
             _append_log("[运行] 跳过不认识的店铺：" + "、".join(ignored[:6]))
+        if wanted and not ids:
+            # 点了名却一个都没认出来：别回「已派发」，那是骗人
+            _json(self, {"ok": False, "ignored": ignored,
+                         "error": "这些店铺没认出来：" + "、".join(ignored[:6])}, 400)
+            return
 
         rng = payload.get("range") or {}
         if not isinstance(rng, dict):
