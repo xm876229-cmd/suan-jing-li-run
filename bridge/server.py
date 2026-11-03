@@ -1277,6 +1277,10 @@ class Handler(BaseHTTPRequestHandler):
                 for j in _PENDING:
                     if not isinstance(j, dict):
                         continue
+                    # 还没到它上场的时刻（错峰派单）：先留着，别家先跑
+                    if float(j.get("hold_until") or 0) > time.time():
+                        alive.append(j)
+                        continue
                     ttl = _AUTO_JOB_TTL_MS if j.get("auto") else _JOB_TTL_MS
                     if now_ms - int(j.get("at") or 0) > ttl:
                         dropped += 1
@@ -2561,6 +2565,16 @@ class Handler(BaseHTTPRequestHandler):
                            with_formula=payload.get("with_formula"),
                            country=str(payload.get("country") or ""),
                            force=bool(payload.get("force")))
+            # 错峰：7 家同时开跑会互相挤（抓包里能看到请求发出去、没有任何响应）。
+            # 第 i 家延后 i*12 秒才允许被领走，前面几家先跑起来。
+            try:
+                with _PENDING_LOCK:
+                    for _j in _PENDING:
+                        if isinstance(_j, dict) and _j.get("id") == job.get("id"):
+                            _j["hold_until"] = time.time() + len(jobs) * 12
+                            break
+            except Exception:  # noqa: BLE001
+                pass
             jobs.append(job["id"])
             is_on = _online_now(sid)
             (sent if is_on else offline).append(sid)

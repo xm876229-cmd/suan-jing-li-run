@@ -1114,14 +1114,18 @@ async function runOrders({ startMs, endMs }, log) {
   // （实测 7 家里有 2 家栽在这一下，害得整轮没订单）。
   const postRetry = async (url, body) => {
     let last = null;
-    for (let i = 0; i < 3; i++) {
+    const gaps = [2000, 5000, 10000, 15000];      // 共约 32 秒
+    for (let i = 0; i <= gaps.length; i++) {
       try {
         return await apiPost(url, body);
       } catch (e) {
         last = e;
         const msg = String((e && e.message) || e);
         if (!/Failed to fetch|NetworkError|ERR_/i.test(msg)) throw e;
-        await sleep(1200 * (i + 1));
+        if (i === gaps.length) break;
+        // 7 家店同时开跑时，请求会互相挤：抓包里能看到"发出去了但没响应"
+        // （status None）。等一等再试，前面几家跑完就通了。
+        await sleep(gaps[i]);
       }
     }
     throw last;
