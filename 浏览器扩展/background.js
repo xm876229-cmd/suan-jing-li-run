@@ -867,7 +867,14 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
       const list = (rec && rec.data && rec.data.export_records) || [];
       const hit = list.find((x) => String(x.export_task_id) === String(it.taskId)
                                 && x.file_key && !/^\d+$/.test(String(x.file_key)));
-      if (!hit) { keep.push(it); continue; }
+      // 以前这里失败是**完全静默**的：一直不出报表，日志里一个字都没有，
+      // 只能靠猜。下面每一处失败都留一行，下次一眼看出卡在哪一步。
+      if (!hit) {
+        const have = list.map((x) => String(x.export_task_id)).filter(Boolean).slice(0, 4);
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 还没生成好`
+          + `（等任务 ${it.taskId}；记录里现有：${have.join(",") || "空"}）`);
+        keep.push(it); continue;
+      }
       let url = "";
       try {
         const dl = await apiPost(
@@ -876,18 +883,30 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
         url = (dl && dl.data && (dl.data.download_url || dl.data.url)) || findUrl(dl) || "";
       } catch (e) { /* 记录里通常还有直链，下面兜住 */ }
       if (!url) url = findUrl(hit) || "";
-      if (!url) { keep.push(it); continue; }
+      if (!url) {
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 记录里有 file_key 但拿不到下载地址`);
+        keep.push(it); continue;
+      }
       const resp = await fetch(url, { credentials: "include" });
-      if (!resp.ok) { keep.push(it); continue; }
+      if (!resp.ok) {
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 下载失败 HTTP ${resp.status}`);
+        keep.push(it); continue;
+      }
       const buf = await resp.arrayBuffer();
-      if (!buf || buf.byteLength < 200) { keep.push(it); continue; }
+      if (!buf || buf.byteLength < 200) {
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 下载内容只有 `
+          + `${buf ? buf.byteLength : 0} 字节，不像订单表`);
+        keep.push(it); continue;
+      }
       const saved = await uploadToBridge(it.name || `全部 笔订单-${stamp()}.csv`, buf, "",
         { shop_id: it.shop_id, shop_name: it.shop_name,
           // 用这份订单自己的区间记账，别用后台当下的 CURRENT_RANGE
           range: it.range || {} });
       if (log) log(`   订单已自动补回：${saved.path}`);
+      appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 已补回：${saved.path}`);
       got++;
     } catch (e) {
+      appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 出错：${(e && e.message) || e}`);
       keep.push(it);
     }
   }

@@ -8,5 +8,22 @@
   "fx": {
     "mode": "auto"
   },
-  "schedules": []
+  "schedules": [
+    {
+      "id": "r1793675112_1",
+      "name": "每天 11:06",
+      "enabled": true,
+      "freq": "daily",
+      "time": "11:06",
+      "day": 1,
+      "weekday": 0,
+      "period": "month",
+      "offset": 1,
+      "cut": "end",
+      "cut_day": 1,
+      "stores": [],
+      "download_dir": "",
+      "with_formula": null
+    }
+  ]
 }
