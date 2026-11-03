@@ -267,6 +267,8 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="导出「带公式」版：明细页多出订单类别/是否样品两组辅助列，"
                          "汇总页的净利用 SUMIFS 引用明细，改「口径」页的开关即切换口径")
     ap.add_argument("--json", action="store_true", help="只输出一行 JSON 摘要（供本地桥调用）")
+    ap.add_argument("--final-name", default="",
+                    help="报表的最终文件名（核算先写临时文件再改名，缓存公式版要用最终名）")
     ap.add_argument("--allow-partial", action="store_true",
                     help="数据不全也照算（默认拒绝：缺表的报表数字必然不对）")
     ap.add_argument("--merge-all", action="store_true",
@@ -562,7 +564,10 @@ def main(argv: list[str] | None = None) -> int:
     # 缓存放在 报表\_公式缓存\<房间>\<店>\ 下（下划线开头，报表列表不显示）。
     if not _want_formula:
         try:
-            _cache = paths.OUTPUT / "_公式缓存" / path.parent.parent.name / path.parent.name / path.name
+            # 名字要用**最终**报表名：桥那边是先算到 `.<pid>.calc.xlsx` 再原子改名，
+            # 照临时名缓存，下载时就找不到（缓存全叫 `.12345.calc.xlsx`）。
+            _leaf = str(getattr(args, "final_name", "") or "").strip() or path.name
+            _cache = paths.OUTPUT / "_公式缓存" / path.parent.parent.name / path.parent.name / _leaf
             _cache.parent.mkdir(parents=True, exist_ok=True)
             build_report(res, res.lines, _cache, switches, subtitle, extra,
                          with_formula=True,

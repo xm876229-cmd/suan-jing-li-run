@@ -477,6 +477,8 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
     else:
         cmd = [sys.executable, "-m", "src.cli"]
     cmd += ["--dir", str(d), "--out", str(out), "--json", "--merge-all"]
+    # 公式版缓存用最终报表名（out 可能是 .<pid>.calc.xlsx 这种临时名）
+    cmd += ["--final-name", final_out.name]
     if country:
         cmd += ["--country", country]
     if a:

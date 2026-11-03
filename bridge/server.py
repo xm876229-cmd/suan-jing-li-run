@@ -92,7 +92,8 @@ def _pending_drop(key: str) -> None:
 
 
 def _calc_cmd(shop_id: str, country: str, dfrom: str, dto: str,
-              out: Path, with_formula: bool, data_dir: Path | None = None) -> list[str]:
+              out: Path, with_formula: bool, data_dir: Path | None = None,
+              final_name: str = "") -> list[str]:
     """拼出核算子进程的命令（和界面点「核算」走的是同一条路）。
 
     data_dir 只给手动核算用：数据在「店铺/手动导入」，但费率口径还按这家店来，
@@ -112,6 +113,9 @@ def _calc_cmd(shop_id: str, country: str, dfrom: str, dto: str,
         cmd += ["--from", dfrom]
     if dto:
         cmd += ["--to", dto]
+    if final_name:
+        # 公式版缓存要用最终报表名（out 可能是个临时名）
+        cmd += ["--final-name", final_name]
     return cmd
 
 
@@ -349,7 +353,8 @@ def _pending_tick() -> None:
             try:
                 ok, msg = _run_calc_cmd(_calc_cmd(shop_id, str(info.get("country") or ""),
                                                   dfrom, dto, out,
-                                                  bool(info.get("with_formula"))))
+                                                  bool(info.get("with_formula")),
+                                                  final_name=final_out.name))
             except Exception as e:  # noqa: BLE001
                 ok, msg = False, str(e)
             if ok and out.exists():
@@ -3468,6 +3473,10 @@ class Handler(BaseHTTPRequestHandler):
                 cmd += ["--from", str(dfrom)]
             if dto:
                 cmd += ["--to", str(dto)]
+            # 公式版缓存要用**最终**报表名：out 现在是 `.<pid>.calc.xlsx`，
+            # 照它缓存的话下载时按正式名找不到（缓存会叫 .12345.calc.xlsx）。
+            if final_out is not None:
+                cmd += ["--final-name", final_out.name]
 
             _append_log(f"[run] 开始核算 {country} {dfrom or '全量'}~{dto or '全量'}")
             env = dict(os.environ)
