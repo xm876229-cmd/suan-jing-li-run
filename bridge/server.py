@@ -199,6 +199,31 @@ _RETRY_FETCH_AFTER = 12 * 60      # 订单 12 分钟还没落地，就重跑一�
 _RETRY_FETCH_GAP = 20 * 60        # 两次重跑至少隔 20 分钟
 
 
+def _orders_fresh(shop_id: str, since: float) -> bool:
+    """店里有没有「这次才落地」的订单表。
+
+    为什么不能只看"有没有订单表"：店里往往还留着上一次导的**别的月份**，
+    拿它去核算会得到 GMV 0、净利为负的废报表，而且一声不响。
+    实测就踩过：9 月的待补，桥看见 10 月那份表就开算，报表 GMV 0、净利 -93212，
+    6 秒后 9 月的表才落地——那份废报表当时已经生成了。
+    """
+    try:
+        from src import loader as _ld
+        b, _jm, _sk = _ld._scan_folder(paths.store_dir(shop_id))
+    except Exception:  # noqa: BLE001
+        return True                      # 判不出来就别拦
+    files = [p for p, _rows in (b.get("order") or [])]
+    if not files:
+        return False
+    newest = 0.0
+    for f in files:
+        try:
+            newest = max(newest, float(Path(f).stat().st_mtime))
+        except OSError:
+            continue
+    return newest >= since - 60      # 给文件系统时间戳留一分钟余量
+
+
 def _retry_fetch_if_stuck(key: str, info: dict, now: float) -> None:
     """订单迟迟不落地 → 让扩展重新跑一轮取数。
 
@@ -244,14 +269,12 @@ def _pending_tick() -> None:
             _pending_drop(key)
             continue
         shop_id = str(info.get("shop_id") or "")
-        try:
-            from src import loader as _ld
-            if not _ld.has_orders_table(paths.store_dir(shop_id)):
-                # 没订单表：要么平台还在生成，要么那条回收路已经废了。
-                # 等太久就重新派一轮，别让这份待补无限期躺着。
-                _retry_fetch_if_stuck(key, info, now)
-                continue
-        except Exception:  # noqa: BLE001
+        # 只认「这次才落地」的订单表：店里留着别的月份不算数，
+        # 拿它去算会得到 GMV 0、净利为负的废报表。
+        if not _orders_fresh(shop_id, float(info.get("at") or 0)):
+            # 订单还没到：要么平台还在生成，要么那条回收路已经废了。
+            # 等太久就重新派一轮，别让这份待补无限期躺着。
+            _retry_fetch_if_stuck(key, info, now)
             continue
         store_name = str(info.get("store_name") or shop_id)
         dfrom = str(info.get("from") or "")
