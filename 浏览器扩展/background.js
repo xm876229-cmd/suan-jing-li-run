@@ -867,6 +867,14 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
         appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 记的域名不对（${host || "空"}），丢掉`);
         continue;
       }
+      // 页面没开着就这分钟先跳过：现开一个的话，页面还在加载，
+      // fetch 必然 Failed to fetch（实测就是这样，白白刷屏）。
+      // 上面"有待补就不关页面"会保证下次有页面可用。
+      const liveTab = await findTabFor(host).catch(() => null);
+      if (!liveTab) {
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 页面没开着，这一分钟先跳过`);
+        keep.push(it); continue;
+      }
       const recUrl = await buildUrl(host, "/api/fulfillment/order/export_record/get");
       const dlUrl = await buildUrl(host, "/api/fulfillment/order/download");
       // **必须在页面主世界里发**：后台脚本直接 fetch 卖家后台会被浏览器按跨域挡掉，
@@ -874,6 +882,9 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
       // 而日志里之前一个字都没有，所以一直以为"平台还没生成好"。
       // 文件本身（CDN 直链）可以留在后台下，那条路是通的。
       const r = await runInPage(host, async (recU, dlU, taskId) => {
+        // 出错也**返回**而不是抛出：抛出会被 runInPage 当成"这个页面不行"，
+        // 连换三个页面再报一句没有上下文的 Failed to fetch，什么也查不到。
+        try {
         const post = async (u, body) => {
           const resp = await fetch(u, {
             method: "POST",
@@ -900,6 +911,10 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
         const url = d.download_url || d.url || d.file_url || "";
         return { state: url ? "url" : "nourl", url: url || "",
                  code: dl.json && dl.json.code, raw: dl.raw };
+        } catch (e) {
+          return { state: "error", msg: String((e && e.message) || e),
+                   url: String(recU).slice(0, 180) };
+        }
       }, [recUrl, dlUrl, it.taskId]);
       if (r.missingTab) {
         appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 没有开着的 ${host} 页面，先跳过`);
@@ -907,6 +922,11 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
       }
       if (r.error) throw new Error(r.error);
       const st = (r.result || {});
+      if (st.state === "error") {
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 页面里发请求失败：`
+          + `${st.msg}（${st.url}）`);
+        keep.push(it); continue;
+      }
       if (st.state === "waiting") {
         appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 还没生成好`
           + `（等任务 ${it.taskId}；记录里现有：${(st.have || []).join(",") || "空"}` +
@@ -1262,10 +1282,24 @@ async function newAutoTab(url, opts = {}) {
 }
 
 /** 关掉本轮开的所有自动化页；返回关掉的个数。 */
-async function closeAllAutoTabs() {
+async function closeAllAutoTabs(keepHosts) {
+  // keepHosts：这些域名的后台页先留着。待补订单要在这个页面里发请求，
+  // 关掉之后再开一个新的是**来不及**的（页面还在加载，fetch 直接 Failed to fetch）。
+  const keep = (keepHosts || []).filter(Boolean);
   const ids = Array.from(AUTO_TABS);
-  for (const id of ids) await closeAutoTab(id);
-  return ids.length;
+  let closed = 0;
+  for (const id of ids) {
+    if (keep.length) {
+      try {
+        const t = await chrome.tabs.get(id);
+        const u = String((t && t.url) || "");
+        if (keep.some((h) => u.includes(h))) continue;
+      } catch (e) { /* 拿不到这个标签就照常关 */ }
+    }
+    await closeAutoTab(id);
+    closed++;
+  }
+  return closed;
 }
 
 async function runInPage(host, func, args, preferPath) {
@@ -4553,8 +4587,15 @@ async function executeTask(task, range, log, opts = {}) {
   } finally {
     stopKeepAlive();
     // 本轮开的后台页全部关掉：任务卡住时最容易堆，一晚上能开出几十个。
+    // 例外：还有「订单没生成好」的待补时，那个域名的页面要留着——
+    // 每分钟的补订单得在页面里发请求，关掉后新开的页面来不及用。
     try {
-      const n = await closeAllAutoTabs();
+      let keepHosts = [];
+      try {
+        const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
+        keepHosts = pendingOrders.map((x) => String(x.host || "")).filter(Boolean);
+      } catch (e) { /* 读不到就不留 */ }
+      const n = await closeAllAutoTabs(keepHosts);
       if (n) log(`已关掉本轮开的 ${n} 个后台页`);
     } catch (e) { /* 忽略 */ }
     // 立即清掉运行标记，同时告诉桥「我跑完了」。

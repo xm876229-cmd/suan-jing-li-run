@@ -195,6 +195,44 @@ def _shop_id_by_name(name: str) -> str:
     return ""
 
 
+_RETRY_FETCH_AFTER = 12 * 60      # 订单 12 分钟还没落地，就重跑一轮取数
+_RETRY_FETCH_GAP = 20 * 60        # 两次重跑至少隔 20 分钟
+
+
+def _retry_fetch_if_stuck(key: str, info: dict, now: float) -> None:
+    """订单迟迟不落地 → 让扩展重新跑一轮取数。
+
+    为什么要有这一层：这份「待补」是扩展那边记的，正常由它的每分钟闹钟把
+    导好的订单收回来。但那条路实测会失灵（后台 fetch 被浏览器按跨域挡掉，
+    报 Failed to fetch），一停就是一小时，界面上却一直是「在等订单」。
+    这里兜底：等太久就重新派一轮，扩展跑任务时是在**页面里**导的，那条路是通的。
+    """
+    at = float(info.get("at") or 0)
+    if now - at < _RETRY_FETCH_AFTER:
+        return
+    last = float(info.get("retried_at") or 0)
+    if last and now - last < _RETRY_FETCH_GAP:
+        return
+    shop_id = str(info.get("shop_id") or "")
+    dfrom = str(info.get("from") or "")
+    dto = str(info.get("to") or "")
+    if not (shop_id and dfrom and dto):
+        return
+    with _PENDING_LOCK:
+        d = _pending_load()
+        if key not in d:
+            return
+        d[key]["retried_at"] = now
+        _pending_save(d)
+    try:
+        _enqueue(shop_id, {"startDate": dfrom, "to": dto}, task="all", auto=True,
+                 country=str(info.get("country") or ""), force=True)
+    except Exception:  # noqa: BLE001
+        return
+    _append_log(f"[auto] {info.get('store_name') or shop_id} 的订单等太久了"
+                f"（{int((now - at) // 60)} 分钟），重新派一轮取数")
+
+
 def _pending_tick() -> None:
     """后台每分钟看一眼：之前因为「订单没到」没算成的，现在能算了吗。"""
     d = _pending_load()
@@ -209,6 +247,9 @@ def _pending_tick() -> None:
         try:
             from src import loader as _ld
             if not _ld.has_orders_table(paths.store_dir(shop_id)):
+                # 没订单表：要么平台还在生成，要么那条回收路已经废了。
+                # 等太久就重新派一轮，别让这份待补无限期躺着。
+                _retry_fetch_if_stuck(key, info, now)
                 continue
         except Exception:  # noqa: BLE001
             continue
