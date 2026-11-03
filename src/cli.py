@@ -267,6 +267,8 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="导出「带公式」版：明细页多出订单类别/是否样品两组辅助列，"
                          "汇总页的净利用 SUMIFS 引用明细，改「口径」页的开关即切换口径")
     ap.add_argument("--json", action="store_true", help="只输出一行 JSON 摘要（供本地桥调用）")
+    ap.add_argument("--allow-partial", action="store_true",
+                    help="数据不全也照算（默认拒绝：缺表的报表数字必然不对）")
     ap.add_argument("--merge-all", action="store_true",
                     help="同一目录里累计的多份表全部参与合并（手动核算用）。"
                          "默认只取最新导出的那一份——那是自动取数的规矩，"
@@ -274,6 +276,26 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--rates", type=Path, default=paths.RATES_FILE)
     ap.add_argument("--stores", type=Path, default=paths.STORES_FILE)
     return ap
+
+
+def _missing_kinds(data) -> list[str]:
+    """这一轮缺了哪几类数据。
+
+    为什么默认就不让算：缺一块的报表**不会报错**，只会悄悄把那一块按 0 计——
+    联盟佣金缺席 → 净利虚高；广告缺席 → 净利虚高；SKU 缺席 → 广告费摊不到链接上。
+    数字看着正常，拿去对账就是错的。宁可不出表。
+    """
+    have = getattr(data, "sources", None) or {}
+    miss: list[str] = []
+    if "订单" not in have:
+        miss.append("订单表")
+    if "映射" not in have:
+        miss.append("商品SKU表")
+    if "广告" not in have:
+        miss.append("广告表")
+    if "联盟佣金" not in have:
+        miss.append("联盟佣金表")
+    return miss
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -486,6 +508,14 @@ def main(argv: list[str] | None = None) -> int:
     if not data.orders:
         print("没有解析出任何订单行，请检查订单文件的表头（需要 Order ID / Seller SKU / Quantity 等列）")
         return 1
+
+    # 数据不全就不出报表。缺一块的报表不会报错，只会把那一块按 0 计，
+    # 数字看着正常，拿去对账是错的——这比没有报表更坏。
+    miss = _missing_kinds(data)
+    if miss and not getattr(args, "allow_partial", False):
+        print("数据不全，不出报表：缺 " + "、".join(miss))
+        print("（缺任一类都会让数字偏掉。补齐后再算；确实要凑合看，加 --allow-partial）")
+        return 3
 
     res = compute(data, params, switches, args.dfrom, args.dto, args.date_field, fcfg=fcfg)
     if not res.products:

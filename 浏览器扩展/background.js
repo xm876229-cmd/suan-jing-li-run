@@ -6086,6 +6086,21 @@ async function runTaskThenCalc(task, range, log, opts = {}) {
     await reportProgress("calc", "skip", { detail: "等订单：到了自动算" });
     return { fetch: r, pendingCalc: true };
   }
+
+  // 数据不全就不出报表：缺任何一类（订单/SKU/广告/联盟），算出来的数字必然偏，
+  // 但报表本身**不会报错**——看着"算完了"，拿去对账才发现是错的。
+  // 宁可这一轮不出表，也不给一张假表。
+  const lack = ["orders", "sku", "ads", "affiliate"]
+    .filter((k) => r && r[k] && r[k].error)
+    .map((k) => TASK_CN[k] || k);
+  if (lack.length) {
+    const why = "缺 " + lack.join("、") + "，不出报表";
+    log(why + "（数据不全的报表没参考价值）");
+    await reportProgress("calc", "skip", { detail: why });
+    await reportProgress("report", "skip", { detail: why });
+    return { fetch: r, incomplete: lack };
+  }
+
   try {
     await reportProgress("calc", "running");
     const c0 = Date.now();
