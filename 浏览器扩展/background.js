@@ -862,29 +862,61 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
     // 留着它，下一分钟的闹钟会按它自己的区间正常补回。
     if (onlyRange && !sameRange(it.range, onlyRange)) { keep.push(it); continue; }
     try {
-      const rec = await apiPost(
-        await buildUrl(it.host, "/api/fulfillment/order/export_record/get"), {});
-      const list = (rec && rec.data && rec.data.export_records) || [];
-      const hit = list.find((x) => String(x.export_task_id) === String(it.taskId)
-                                && x.file_key && !/^\d+$/.test(String(x.file_key)));
-      // 以前这里失败是**完全静默**的：一直不出报表，日志里一个字都没有，
-      // 只能靠猜。下面每一处失败都留一行，下次一眼看出卡在哪一步。
-      if (!hit) {
-        const have = list.map((x) => String(x.export_task_id)).filter(Boolean).slice(0, 4);
-        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 还没生成好`
-          + `（等任务 ${it.taskId}；记录里现有：${have.join(",") || "空"}）`);
+      const host = String(it.host || "").trim();
+      if (!/tiktok\.com$/i.test(host)) {
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 记的域名不对（${host || "空"}），丢掉`);
+        continue;
+      }
+      const recUrl = await buildUrl(host, "/api/fulfillment/order/export_record/get");
+      const dlUrl = await buildUrl(host, "/api/fulfillment/order/download");
+      // **必须在页面主世界里发**：后台脚本直接 fetch 卖家后台会被浏览器按跨域挡掉，
+      // 报 `Failed to fetch`——实测 4 家大店每分钟都栽在这一步，
+      // 而日志里之前一个字都没有，所以一直以为"平台还没生成好"。
+      // 文件本身（CDN 直链）可以留在后台下，那条路是通的。
+      const r = await runInPage(host, async (recU, dlU, taskId) => {
+        const post = async (u, body) => {
+          const resp = await fetch(u, {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body || {}),
+          });
+          const text = await resp.text();
+          let json = null;
+          try { json = JSON.parse(text); } catch (e) { /* 非 JSON */ }
+          return { json, raw: json ? "" : text.slice(0, 160), status: resp.status };
+        };
+        const rec = await post(recU, {});
+        const list = (rec.json && rec.json.data && rec.json.data.export_records) || [];
+        const hit = list.find((x) => String(x.export_task_id) === String(taskId)
+                                   && x.file_key && !/^\d+$/.test(String(x.file_key)));
+        if (!hit) {
+          return { state: "waiting",
+                   have: list.map((x) => String(x.export_task_id)).filter(Boolean).slice(0, 4),
+                   code: rec.json && rec.json.code, raw: rec.raw };
+        }
+        const dl = await post(dlU, { file_key: hit.file_key, export_task_id: taskId });
+        const d = (dl.json && dl.json.data) || {};
+        const url = d.download_url || d.url || d.file_url || "";
+        return { state: url ? "url" : "nourl", url: url || "",
+                 code: dl.json && dl.json.code, raw: dl.raw };
+      }, [recUrl, dlUrl, it.taskId]);
+      if (r.missingTab) {
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 没有开着的 ${host} 页面，先跳过`);
         keep.push(it); continue;
       }
-      let url = "";
-      try {
-        const dl = await apiPost(
-          await buildUrl(it.host, "/api/fulfillment/order/download"),
-          { file_key: hit.file_key, export_task_id: it.taskId });
-        url = (dl && dl.data && (dl.data.download_url || dl.data.url)) || findUrl(dl) || "";
-      } catch (e) { /* 记录里通常还有直链，下面兜住 */ }
-      if (!url) url = findUrl(hit) || "";
+      if (r.error) throw new Error(r.error);
+      const st = (r.result || {});
+      if (st.state === "waiting") {
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 还没生成好`
+          + `（等任务 ${it.taskId}；记录里现有：${(st.have || []).join(",") || "空"}` +
+          (st.code ? `；code=${st.code}` : "") + `）`);
+        keep.push(it); continue;
+      }
+      let url = st.url || "";
       if (!url) {
-        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 记录里有 file_key 但拿不到下载地址`);
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 有 file_key 但拿不到下载地址`
+          + (st.code ? `（code=${st.code}）` : ""));
         keep.push(it); continue;
       }
       const resp = await fetch(url, { credentials: "include" });
