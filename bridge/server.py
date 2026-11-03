@@ -1118,6 +1118,13 @@ def _mark_capture(shop_id: str, table_kind: str, payload: dict, path: Path) -> d
 # 请求体上限。普通接口都是几 KB 的 JSON，8MB 已经非常宽松；
 # 上传接口单独放宽（用户在「导入数据」里传整月订单，几十 MB 正常）。
 MAX_BODY = 8 * 1024 * 1024
+
+# 二进制上传的上限（订单导出文件，大店 40~80MB 都有）。
+# JSON 那条路走不了这么大的：base64 会膨胀 33%，8MB 上限一撞就 413，
+# 而 413 之后服务端不读 body，连接被重置 —— 浏览器只看到 `Failed to fetch`，
+# 分不清是"网线断了"还是"文件太大"。实测 Chroma Home（5.7 万单 / 40MB）
+# 就卡在这里，而 Crochet lover 的 5.5MB 恰好在上限内，所以它一直成功。
+MAX_RAW_UPLOAD = 256 * 1024 * 1024
 # 上传接口单独放宽。不放到 512MB 是因为整个 body 是一次读进内存的：
 # 200MB 的 base64 解码后 150MB，峰值约 350MB，还撑得住；
 # 再大就有被系统 OOM 杀掉的风险，而 OOM 表现出来就是「程序突然没了」。
@@ -1833,6 +1840,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_costs(save=False)
         elif self.path.startswith("/capture"):
             self._post_capture()
+        elif self.path.startswith("/upload-raw"):
+            self._post_upload_raw()
         elif self.path.startswith("/upload"):
             self._post_upload()
         elif self.path.startswith("/log"):
@@ -1931,17 +1940,13 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"ok": False, "error": f"保存失败：{e}"}, 500)
 
     def _post_upload(self):
-        """扩展把下载到的导出文件回传到这里。
+        """扩展把下载到的导出文件回传到这里（base64 + JSON 的老通道）。
 
-        落盘位置：data/stores/<店铺ID>/inbox/<类型>/，
-        类型靠**表头**判断（订单/广告/联盟/映射），不靠文件名——
-        文件名会变，认表头才靠谱。
-
-        认不出店铺时不再静默丢进公共目录（旧行为会把多家店的数据混在一起，
-        而且不报错），改落 data/stores/_unknown/<时间戳>/ 并回报一条警告。
+        大文件请走 `/upload-raw`（见那里的说明）。这条留着是因为
+        "本地导入"等老调用方还在用，而且它是纯 JSON，好调试。
         """
         try:
-            payload = self._read_payload()
+            payload = self._read_payload(MAX_UPLOAD_BODY)
             if payload is None:
                 return
             name = str(payload.get("name") or "").strip()
@@ -1952,7 +1957,61 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             _json(self, {"ok": False, "error": f"invalid payload: {e}"}, 400)
             return
+        self._finish_upload(payload, data, name)
 
+    def _post_upload_raw(self):
+        """二进制直传：body 就是文件本身，其余参数在 query 上。
+
+        为什么要有这条：大店订单 40~80MB，base64 后还要再涨 33%。
+        老通道上限 8MB，一撞就回 413——而 413 之后服务端不会读走 body，
+        连接被直接重置，浏览器那边只看得到 `Failed to fetch`，
+        跟"网线断了"一模一样，查一天也查不出是"文件太大"。
+
+        实测对照：Crochet lover 订单 5.5MB（base64 后 7.3MB，压线过）一直成功，
+        Chroma Home 5.7 万单 40MB 从来没成功过。
+        """
+        q = parse_qs(urlparse(self.path).query)
+        name = (q.get("name") or [""])[0].strip()
+        if not name:
+            _json(self, {"ok": False, "error": "missing name"}, 400)
+            return
+        payload = {
+            "name": name,
+            "dir": (q.get("dir") or [""])[0],
+            "shop_id": (q.get("shop_id") or [""])[0],
+            "shop_name": (q.get("shop_name") or [""])[0],
+        }
+        raw_range = (q.get("range") or [""])[0]
+        if raw_range:
+            try:
+                payload["range"] = json.loads(raw_range)
+            except (ValueError, json.JSONDecodeError):
+                payload["range"] = None
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n <= 0:
+            _json(self, {"ok": False, "error": "空请求（没有 Content-Length）"}, 400)
+            return
+        if n > MAX_RAW_UPLOAD:
+            _json(self, {"ok": False,
+                         "error": f"文件太大（{n / 1048576:.0f} MB，"
+                                  f"上限 {MAX_RAW_UPLOAD / 1048576:.0f} MB）"}, 413)
+            return
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self.rfile.read(min(1 << 20, n - len(buf)))
+            if not chunk:
+                break
+            buf += chunk
+        if len(buf) != n:
+            _json(self, {"ok": False, "error": f"上传中断（收到 {len(buf)}/{n} 字节）"}, 400)
+            return
+        self._finish_upload(payload, bytes(buf), name)
+
+    def _finish_upload(self, payload: dict, data: bytes, name: str):
+        """认出这是哪类表，落到对应目录，并记账（两个上传入口共用）。"""
         kind = str(payload.get("dir") or "").lower()
         shop_id = str(payload.get("shop_id") or "").strip()
 

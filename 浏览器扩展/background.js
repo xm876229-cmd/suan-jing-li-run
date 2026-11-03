@@ -784,6 +784,45 @@ async function identifyShop(host, log, opts = {}) {
 }
 
 async function uploadToBridge(name, arrayBuffer, dir, shopOverride) {
+  // 这些参数拼一次，两条通道共用。
+  const meta = {
+    name,
+    dir: dir || "",
+    // 映射类文件是店铺无关的（dir=mapping），带上也无害；
+    // 其余文件按 shop_id 落到这家店自己的目录。
+    // shopOverride：闹钟/待办补回时后台没有"当前店铺"，要把归属显式带过来，
+    // 否则补回的订单会落进公共目录，核算时又变成"未识别店铺"。
+    shop_id: (shopOverride && shopOverride.shop_id) || CURRENT_SHOP.shop_id || "",
+    shop_name: (shopOverride && shopOverride.shop_name) || CURRENT_SHOP.shop_name || "",
+    // 本次取数的区间：服务端拿它给快照打标签。
+    // 必须能被覆盖：后台补回「上次还没生成好」的订单时，手里那份文件属于
+    // **当初那个区间**，而 CURRENT_RANGE 可能已经是另一轮的了。
+    range: (shopOverride && shopOverride.range) || CURRENT_RANGE || null,
+  };
+
+  // 先走二进制直传。base64 会让体积涨 33%，而桥的 JSON 上限只有 8MB——
+  // 大店订单 40MB 直接 413，服务端还不读走 body，连接被重置，
+  // 浏览器这边只看到 `Failed to fetch`（今天绕了三小时才查到这儿）。
+  try {
+    const qs = new URLSearchParams({
+      name: meta.name, dir: meta.dir,
+      shop_id: meta.shop_id, shop_name: meta.shop_name,
+    });
+    if (meta.range) qs.set("range", JSON.stringify(meta.range));
+    const resp = await fetch(`${BRIDGE}/upload-raw?${qs.toString()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: arrayBuffer,
+    });
+    const j = await resp.json();
+    if (!j.ok) throw new Error(j.error || `HTTP ${resp.status}`);
+    if (j.warning) appendTaskLog(`[上传] ${j.warning}`);
+    return j;
+  } catch (e) {
+    // 老版本桥没有 /upload-raw（404 也走这儿）→ 退回 base64 再试一次
+    appendTaskLog(`[上传] 直传没成（${(e && e.message) || e}），改用 base64 重试`);
+  }
+
   // 分块 base64，避免一次拼串把内存打爆
   const bytes = new Uint8Array(arrayBuffer);
   let bin = "";
@@ -795,25 +834,7 @@ async function uploadToBridge(name, arrayBuffer, dir, shopOverride) {
   const resp = await fetch(`${BRIDGE}/upload`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name, b64,
-      dir: dir || "",
-      // 映射类文件是店铺无关的（dir=mapping），带上也无害；
-      // 其余文件按 shop_id 落到这家店自己的目录。
-      // shopOverride：闹钟/待办补回时后台没有"当前店铺"，要把归属显式带过来，
-      // 否则补回的订单会落进公共目录，核算时又变成"未识别店铺"。
-      shop_id: (shopOverride && shopOverride.shop_id) || CURRENT_SHOP.shop_id || "",
-      shop_name: (shopOverride && shopOverride.shop_name) || CURRENT_SHOP.shop_name || "",
-      // 本次取数的区间：服务端拿它给快照打标签，
-      // 界面上「用哪次数据」列表就能显示每份快照是哪个区间的。
-      //
-      // 必须能被覆盖：后台闹钟补回「上次还没生成好」的订单时，
-      // 手里那份文件属于**当初那个区间**，而 CURRENT_RANGE 可能已经是
-      // 另一轮（另一个区间）的了。照 CURRENT_RANGE 记账，就会把这份订单
-      // 记到错的区间名下——同一天再算那个区间时，会拿这份别的月份的数据
-      // 去复用，数字偏了还查不出来。
-      range: (shopOverride && shopOverride.range) || CURRENT_RANGE || null,
-    }),
+    body: JSON.stringify({ ...meta, b64 }),
   });
   const j = await resp.json();
   if (!j.ok) throw new Error(j.error || "上传失败");
