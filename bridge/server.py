@@ -1176,7 +1176,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/endpoints"):
             _json(self, rebuild_endpoints())
         elif self.path.startswith("/log"):
-            _json(self, {"ok": True, "lines": TASK_LOG[-200:]})
+            # 500 行：7 个浏览器时，200 行只够 3-4 分钟，一查问题就被冲掉了
+            _json(self, {"ok": True, "lines": TASK_LOG[-500:]})
         elif self.path.startswith("/pending"):
             # 按店铺领任务：扩展轮询时带上自己的 shop_id，只领属于自己的那个。
             #

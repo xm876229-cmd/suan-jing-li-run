@@ -4271,9 +4271,15 @@ let taskKeepAlive = null;
 
 function startKeepAlive() {
   if (taskKeepAlive) return;
-  taskKeepAlive = setInterval(() => {
+  const beat = () => {
+    // 调一次扩展 API 续命（MV3 会把 30 秒没动静的后台回收）
     try { chrome.runtime.getPlatformInfo().catch(() => {}); } catch (e) { /* 忽略 */ }
-  }, 20000);
+    // 同时把「我还活着」写进 storage：后台要是真被回收了，这个时间就停了，
+    // 下一轮就能据此判断「上次是中断，不是还在跑」，不用干等 30 分钟。
+    try { chrome.storage.local.set({ runBeat: Date.now() }); } catch (e) { /* 忽略 */ }
+  };
+  beat();
+  taskKeepAlive = setInterval(beat, 20000);
 }
 
 function stopKeepAlive() {
@@ -4471,7 +4477,7 @@ async function executeTask(task, range, log, opts = {}) {
     // 兜底清理虽然能救（见 consumePending），但要等 30 分钟，
     // 用户看到的就是「点了没反应，过半小时自己好了」。
     try {
-      await skSet({ running: null });
+      await skSet({ running: null, runBeat: 0 });
     } catch (e) { /* storage 出错也不能挡后面 */ }
     beatBridge(null);
   }
@@ -4492,17 +4498,21 @@ async function consumePending() {
   // 比如自动任务正在跑（要几分钟），你又点了手动取另一个区间。
   // 单槽位下后一个会把前一个冲掉，表现是「自动任务今天没跑」，
   // 而且不报错，极难发现。改成 FIFO 后两个都会依次执行。
-  const { running } = await skGet({ running: null });
+  const { running, runBeat = 0 } = await skGet({ running: null, runBeat: 0 });
   if (running) {
     // 上次跑到一半断电/关浏览器/后台被回收，running 标记会留在 storage 里。
     // 以前只要它有值就 return，结果**重启之后扩展再也不领任务**，
     // 界面上看着「在线」，就是不动——这种状态最难查。
     // 单次任务最长也就十几分钟（大店订单导出约 5 分钟），
     // 超过 30 分钟一定是残留，清掉继续领。
-    const age = Date.now() - Number(running.at || 0);
-    if (age < 30 * 60 * 1000) return null;   // 真在跑，等它跑完再领下一个
-    await skSet({ running: null });
-    appendTaskLog("上次任务没跑完（断电或中途关了浏览器），已清掉运行标记，继续领任务");
+    // 心跳每 20 秒一次：3 分钟没心跳 = 后台被回收/崩了，不是还在跑。
+    // 以前只看任务开始时间，要干等 30 分钟，界面一直是「运行中」。
+    const last = Math.max(Number(running.at || 0), Number(runBeat || 0));
+    const age = Date.now() - last;
+    if (age < 3 * 60 * 1000) return null;    // 真在跑，等它跑完再领下一个
+    await skSet({ running: null, runBeat: 0 });
+    appendTaskLog(`上次任务没跑完（${Math.round(age / 60000)} 分钟没心跳，`
+      + "多半是浏览器回收了后台），已清掉运行标记，继续领任务");
   }
 
   let p = null;
@@ -6041,13 +6051,25 @@ setInterval(flush, 3000);
 // 后台每次被唤醒都先看看有没有待办任务
 setTimeout(() => { consumePending().catch(() => {}); }, 1200);
 
-// 启动心跳：用来确认后台脚本已经换到新版本
+// 启动心跳：用来确认后台脚本已经换到新版本。
+//
+// 只在「版本变了」或「今天第一次启动」时写一条。
+// 以前每次唤醒（MV3 每分钟的闹钟都会唤醒一次）都写，7 个浏览器就是
+// 每分钟 7 条，十几分钟就把桥的 200 行日志缓冲冲干净了 ——
+// 真出问题时，日志里只剩一片「后台启动」，什么都查不到。
 (function announce() {
   try {
-    fetch(`${BRIDGE}/log`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ msg: `[扩展] 后台启动 v${chrome.runtime.getManifest().version}，webRequest=${!!(chrome.webRequest && chrome.webRequest.onBeforeRequest)}，alarms=${!!chrome.alarms}` }),
+    const ver = chrome.runtime.getManifest().version;
+    const today = new Date().toISOString().slice(0, 10);
+    chrome.storage.local.get({ _announce: "" }).then(({ _announce }) => {
+      const key = `${ver}@${today}`;
+      if (_announce === key) return;             // 这个版本今天已经报过了
+      chrome.storage.local.set({ _announce: key });
+      fetch(`${BRIDGE}/log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ msg: `[扩展] 后台启动 v${ver}，webRequest=${!!(chrome.webRequest && chrome.webRequest.onBeforeRequest)}，alarms=${!!chrome.alarms}` }),
+      }).catch(() => {});
     }).catch(() => {});
   } catch (e) { /* 忽略 */ }
 })();
