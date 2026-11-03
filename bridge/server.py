@@ -276,6 +276,43 @@ def _retry_fetch_if_stuck(key: str, info: dict, now: float) -> None:
                 f"（{int((now - at) // 60)} 分钟），重新派一轮取数")
 
 
+def _mark_done_after_autocalc(shop_id: str, report_path) -> None:
+    """补算成功后，把界面上那张卡也改成「本轮到齐」。
+
+    为什么需要：补算是桥这边起的子进程，绕过了扩展的进度上报。
+    以前算完只写一条日志，卡片还停在扩展最后报的状态——
+    「订单导出已排队」「核算 等订单」「出报表 —」，右上角标着「有失败」，
+    明明报表已经躺在 报表/自动/<店>/ 里了。用户看到的就是「它没完成」。
+    """
+    if not shop_id:
+        return
+    now = time.time()
+    name = os.path.basename(str(report_path or ""))
+    with _PROGRESS_LOCK:
+        rec = _PROGRESS.get(shop_id) or {}
+        if not isinstance(rec, dict):
+            rec = {}
+        steps = rec.get("steps")
+        if not isinstance(steps, dict):
+            steps = {}
+        # 订单：之前是 fail 或 skip（"等订单：到了自动算"），文件已经补回来了
+        o = steps.setdefault("orders", {})
+        o["state"] = "done"
+        o["detail"] = "订单已补回"
+        steps.setdefault("calc", {})["state"] = "done"
+        steps["calc"]["detail"] = "已自动补算"
+        rp = steps.setdefault("report", {})
+        rp["state"] = "done"
+        if name:
+            rp["detail"] = name
+        rec["steps"] = steps
+        rec["current"] = ""
+        rec["finished"] = now
+        rec["updated"] = now
+        rec["ok"] = True
+        _PROGRESS[shop_id] = rec
+
+
 def _pending_tick() -> None:
     """后台每分钟看一眼：之前因为「订单没到」没算成的，现在能算了吗。"""
     d = _pending_load()
@@ -329,18 +366,22 @@ def _pending_tick() -> None:
         _pending_drop(key)
         if ok:
             _append_log(f"[auto] 补算完成：{out}")
+            _mark_done_after_autocalc(shop_id, out)
         else:
             _append_log(f"[auto] 补算失败：{str(msg)[-300:]}")
 
 
 def _pending_runner() -> None:
-    time.sleep(20)
+    time.sleep(15)
     while True:
         try:
             _pending_tick()
         except Exception:  # noqa: BLE001
             pass
-        time.sleep(60)
+        # 20 秒一轮（原来 60 秒）。
+        # 订单文件落地后，这里就是"多久能开始算"的唯一瓶颈：
+        # 60 秒一轮意味着平均白等 30 秒，大店三家叠起来就是一两分钟。
+        time.sleep(20)
 INBOX_DIR = paths.INBOX
 MAPPING_DIR = paths.MAPPING
 LOG_FILE = paths.CAPTURE / "task.log"
@@ -1640,6 +1681,24 @@ class Handler(BaseHTTPRequestHandler):
                         failed.append(f"{rel}（找不到文件）")
                         continue
                     if payload.get("with_formula"):
+                        # ① 先用核算时顺手缓存好的那份（src/cli.py 会生成）。
+                        #    直接拷贝，不再重算——大店重算要一两分钟，
+                        #    用户会以为"导出这么慢"，其实是重新算了一遍。
+                        _cache = paths.OUTPUT / "_公式缓存"
+                        for _seg in str(rel).replace("\\", "/").split("/"):
+                            _cache = _cache / _seg
+                        if _cache.is_file() and _cache.resolve() != src.resolve():
+                            src = _cache
+                            dst = target / _cache.name
+                            try:
+                                if src.resolve() != dst.resolve():
+                                    shutil.copy2(src, dst)
+                                saved.append(str(dst))
+                            except OSError as e:
+                                failed.append(f"{rel}（{e}）")
+                            continue
+
+                        # ② 没有缓存（老报表、或核算时缓存失败）→ 退回重算。
                         # 带公式版要按原区间重算一次：文件名里一般带着区间。
                         # 手动核算的「全部」报表没有区间（名字里是 _全部_），
                         # 那就按全量算——但其它认不出区间的（自定义命名模板）

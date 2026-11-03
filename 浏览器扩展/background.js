@@ -1275,10 +1275,14 @@ async function runOrders({ startMs, endMs }, log, opts = {}) {
   log("提交订单导出任务（每次重新生成，不复用旧文件）…");
   const fullTask = await createTask(startMs, endMs, wantName);
   log(`任务已创建：${fullTask}`);
-  // 等 3 分钟（45×4s）。原来只等 48 秒：中小店的导出通常要 1~2 分钟，
-  // 等到 48 秒就判"排队中"，然后去走待补那条更绕的路。
-  // 文件一好就立刻返回，不会白等满。
-  const rec = await waitRecord(fullTask, 45, "订单导出");
+  // 等 100 秒（25×4s）。
+  //
+  // 为什么不是等更久：实测订单这一步最耗时（小店 40~90 秒，大店 3~5 分钟），
+  // 而它等的这段时间里 SKU/联盟/广告**一步都没动**。等满 3 分钟才去跑别的，
+  // 7 家店累计就是十几分钟。
+  // 现在等 100 秒等不到就记待补、先把后面几步跑掉，全部跑完再回头收订单
+  // （见 runTask 的收尾，那时平台多半已经生成好了，而且**不会再建新任务**）。
+  const rec = await waitRecord(fullTask, 25, "订单导出");
   if (rec) {
     log("文件已生成，开始下载…");
     const one = await saveOne(fullTask, rec, wantName);
@@ -6094,6 +6098,22 @@ async function runTask(task, range, log, opts = {}) {
           error: String(e.message || e),
         });
       }
+    }
+
+    // ── 收尾：订单超时进了待补，其它步骤都跑完了，回头再看一眼 ──
+    //
+    // 只收「平台已经生成好的」文件（harvestPendingOrders 只查记录、不建新任务），
+    // 所以这一步很快。实测这时候多半已经好了——省掉桥那边一整分钟的轮询。
+    const _ordErr = String((out.orders && out.orders.error) || "");
+    if (/排队/.test(_ordErr)) {
+      try {
+        const got = await harvestPendingOrders(log, CURRENT_SHOP.shop_id, range);
+        if (got > 0) {
+          out.orders = { saved: "已补回", collected: true };
+          log("订单已生成，已补回（不用再等下一轮）");
+          await reportProgress("orders", "done", { detail: "已补回" });
+        }
+      } catch (e) { /* 收不回来就交给桥的待补线程，不挡后面的核算 */ }
     }
     return out;
   }

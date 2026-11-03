@@ -546,11 +546,32 @@ def main(argv: list[str] | None = None) -> int:
     if len(snap_dirs) > 1:
         extra["合并说明"] = (f"合并 {len(snap_dirs)} 份快照；"
                              f"同一订单的同一 SKU 只算一次，重叠部分以取数时间最新的为准")
+    _want_formula = bool(getattr(args, "with_formula", False))
     path = build_report(res, res.lines, out, switches, subtitle, extra,
-                        with_formula=bool(getattr(args, "with_formula", False)),
+                        with_formula=_want_formula,
                         report_columns=cc.get("report_columns"),
                         total_position=cc.get("report_total_position", "bottom"),
                         report_titles=cc.get("report_titles"))
+
+    # ── 顺手把「带公式版」也生成好，缓存起来 ──
+    #
+    # 为什么：以前点「导出带公式」是**重新跑一遍完整核算**（大店要等一两分钟），
+    # 用户以为是"导出慢"，其实是重算。这里算一次、多写一个 xlsx，
+    # 下载时直接拷缓存，秒出。
+    #
+    # 缓存放在 报表\_公式缓存\<房间>\<店>\ 下（下划线开头，报表列表不显示）。
+    if not _want_formula:
+        try:
+            _cache = paths.OUTPUT / "_公式缓存" / path.parent.parent.name / path.parent.name / path.name
+            _cache.parent.mkdir(parents=True, exist_ok=True)
+            build_report(res, res.lines, _cache, switches, subtitle, extra,
+                         with_formula=True,
+                         report_columns=cc.get("report_columns"),
+                         total_position=cc.get("report_total_position", "bottom"),
+                         report_titles=cc.get("report_titles"))
+        except Exception as e:  # noqa: BLE001
+            # 缓存失败绝不能影响主报表：主报表已经写好了
+            print(f"[warn] 带公式版缓存失败（不影响主报表）：{e}", file=sys.stderr)
 
     t = res.total
 

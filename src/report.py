@@ -288,7 +288,9 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
         headers.append(h)
 
     span_used = max(8, len(headers))
-    _title(ws, "净利润汇总（每条链接一行）", subtitle, span=span_used)
+    # 第 1 行留给「合计」，表头放第 2 行。
+    # 打开文件第一眼就是总数，而且冻结窗格钉住前两行，往下翻也一直看得见。
+    # 原来第 1 行是一句绿色标题「净利润汇总（每条链接一行）」——占位置、没信息量。
     _head(ws, headers)
 
     # ── 汇总口径开关：含 / 不含 0 元样品单 ──
@@ -300,13 +302,13 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
     # 开关必须排在它们右边，否则标签会被写进隐藏列，用户根本看不到。
     ctl_col = max(span_used, len(headers) + (2 if with_formula else 0)) + 2
     sw_col = ctl_col + 1
-    SW = f"${get_column_letter(sw_col)}$1"
+    SW = f"${get_column_letter(sw_col)}$2"
     cur_label = "不含样品" if res.exclude_zero_amount else "含样品"
-    _lbl = ws.cell(row=1, column=ctl_col,
+    _lbl = ws.cell(row=2, column=ctl_col,
                    value="汇总口径" if with_formula else "汇总口径（导出带公式才能切）")
     _lbl.font = Font(size=9, color="8A8A8A")
     _lbl.alignment = Alignment(horizontal="right", vertical="center")
-    _sw = ws.cell(row=1, column=sw_col, value=cur_label)
+    _sw = ws.cell(row=2, column=sw_col, value=cur_label)
     _sw.font = Font(size=11, bold=True, color="8A5A00" if with_formula else "9A9A9A")
     _sw.fill = PatternFill("solid", fgColor="FFE9A8" if with_formula else "F0F0F0")
     _sw.alignment = Alignment(horizontal="center", vertical="center")
@@ -335,11 +337,15 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
     total_vals = [s["gett"]() for s in specs]
     data_vals = [[s["getp"](p, i) for s in specs]
                  for i, p in enumerate(res.products, 1)]
+    total_row = None
     if total_position == "none":
         # 不显示合计行：只出每条链接，合计自己用 Excel 求和或者看别处
         rows = data_vals
     elif total_position == "top":
-        rows = [total_vals] + data_vals
+        # 合计放**第 1 行**（表头上面）：打开第一眼就是总数。
+        # 数据从第 3 行开始，表头在第 2 行。
+        rows = data_vals
+        total_row = 1
     else:
         rows = data_vals + [total_vals]
 
@@ -524,7 +530,8 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
         if is_total:
             pid = ""
         else:
-            idx = ri - 1 if total_position == "top" else ri
+            # 合计已单独写在第 1 行，这里 rows 全是数据行
+            idx = ri if total_position == "top" else ri
             pid = str(getattr(res.products[idx], "product_id", "")) if idx < len(res.products) else ""
         pid_ok = bool(pid) and pid in det_pids
         prod = None if is_total else (res.products[idx] if idx < len(res.products) else None)
@@ -597,6 +604,60 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
             ws.cell(row=row, column=1).border = TOP_BORDER
         row += 1
     last = row - 1
+
+    # ── 合计行写在第 1 行（表头上面）──
+    if total_row:
+        for ci, sp in enumerate(specs, 1):
+            v = total_vals[ci - 1] if ci - 1 < len(total_vals) else None
+            cell = _w(ws, total_row, ci, v)
+            cell.fill = TOTAL_FILL
+            cell.border = BORDER
+            cell.font = (Font(bold=True, color="C0392B")
+                         if (sp["neg"] and isinstance(v, (int, float)) and v < 0)
+                         else Font(bold=True))
+            cell.number_format = {"money": MONEY, "pct": PCT, "int": INT}.get(
+                sp["kind"], MONEY)
+        ws.cell(row=total_row, column=1).border = TOP_BORDER
+
+        # 带公式时合计也写成公式：能加的直接 SUM，派生列用合计之间的比值。
+        # 区间是 3..last（数据从第 3 行开始，合计在它上面，不参与求和）。
+        if with_formula and last >= 3:
+            def _cl2(k):
+                ci = col_of.get(k)
+                return get_column_letter(ci) if ci else None
+
+            def _s2(k):
+                L = _cl2(k)
+                return f"SUM({L}3:{L}{last})" if L else None
+
+            _SUMMABLE2 = {"gmv", "orders", "items", "cost", "net", "net_cny",
+                          "fee_total", "buyer_paid"}
+            for ci2, sp in enumerate(specs, 1):
+                key = sp["key"]
+                f = None
+                if key in _SUMMABLE2 or key.startswith("fee:"):
+                    e = _s2(key)
+                    f = f"={e}" if e else None
+                elif key == "aov" and _cl2("gmv") and _cl2("orders"):
+                    f = f"=IFERROR({_s2('gmv')}/{_s2('orders')},0)"
+                elif key == "gross_profit" and _cl2("gmv") and _cl2("cost"):
+                    f = f"={_s2('gmv')}-{_s2('cost')}"
+                elif key == "gross_margin" and _cl2("gmv") and _cl2("cost"):
+                    f = f"=IFERROR(({_s2('gmv')}-{_s2('cost')})/{_s2('gmv')},0)"
+                elif key == "net_rate" and _cl2("gmv") and _cl2("net"):
+                    f = f"=IFERROR({_s2('net')}/{_s2('gmv')},0)"
+                elif key.startswith("ratio:"):
+                    fid = key.split(":", 1)[1]
+                    if _cl2("fee:" + fid) and _cl2("gmv"):
+                        f = f"=IFERROR({_s2('fee:' + fid)}/{_s2('gmv')},0)"
+                if not f:
+                    continue
+                tc = ws.cell(row=total_row, column=ci2, value=f)
+                tc.number_format = {"money": MONEY, "pct": PCT, "int": INT}.get(
+                    sp["kind"], MONEY)
+                tc.font = Font(bold=True)
+                tc.fill = TOTAL_FILL
+                tc.border = BORDER
 
     # 净利率色阶：亏损越深越红，盈利越强越绿
     if net_rate_ci:
