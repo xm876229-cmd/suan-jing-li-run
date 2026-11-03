@@ -1091,7 +1091,10 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
       appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 已补回：${saved.path}`);
       got++;
     } catch (e) {
-      appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 出错：${(e && e.message) || e}`);
+      // 带上堆栈第一行：只写 "Failed to fetch" 时分不清是接口、取文件还是上传
+      const st = String((e && e.stack) || "").split("\n").slice(0, 2).join(" | ");
+      appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 出错：`
+        + `${(e && e.message) || e}${st ? `（${st.slice(0, 120)}）` : ""}`);
       keep.push(it);
     }
   }
@@ -1099,7 +1102,7 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
   return got;
 }
 
-async function runOrders({ startMs, endMs }, log) {
+async function runOrders({ startMs, endMs }, log, opts = {}) {
   const host = await ensureHost("seller", log);
 
   // 这里**不再**先试着补订单。
@@ -1139,6 +1142,7 @@ async function runOrders({ startMs, endMs }, log) {
   // 一遍遍重派会把平台那边同一个账号的导出队列堵死（实测一上午堆了几十个任务，
   // 之后所有导出都卡在"生成中"）。
   try {
+    if (opts.force) throw { __skipDup: true };   // 重派/主动重来：不再被去重挡住
     const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
     const dup = pendingOrders.find((x) =>
       String(x.shop_id || "") === String(CURRENT_SHOP.shop_id || "")
@@ -1149,7 +1153,9 @@ async function runOrders({ startMs, endMs }, log) {
         + "已记着这次核算，文件一到就自动算——不用再点运行。");
     }
   } catch (e) {
-    if (/已排队/.test(String(e && e.message))) throw e;
+    // 只有"真去重"那一条要抛；force 的跳过标记不能当错误传上去
+    if (e && e.__skipDup) { /* 继续建任务 */ }
+    else if (/已排队/.test(String(e && e.message))) throw e;
   }
 
   const createTask = async (sMs, eMs, name) => {

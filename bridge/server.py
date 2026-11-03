@@ -195,8 +195,14 @@ def _shop_id_by_name(name: str) -> str:
     return ""
 
 
-_RETRY_FETCH_AFTER = 12 * 60      # 订单 12 分钟还没落地，就重跑一轮取数
-_RETRY_FETCH_GAP = 30 * 60        # 两次重跑至少隔 30 分钟（别把平台队列堵死）
+# 订单迟迟不落地就重跑一轮取数。
+#
+# 6 分钟：正常店 90 秒就出文件，大店 3~5 分钟。超过 6 分钟基本是这一轮废了
+# （请求被掐断 / 平台把任务吞了），重跑比干等有效。
+# 间隔 8 分钟：重跑要真去平台导（扩展侧 force），太密会把同一账户的导出队列
+# 堆满——上午就是这么把 4 家店堵了半小时。
+_RETRY_FETCH_AFTER = 6 * 60
+_RETRY_FETCH_GAP = 8 * 60
 
 
 def _orders_fresh(shop_id: str, since: float) -> bool:
