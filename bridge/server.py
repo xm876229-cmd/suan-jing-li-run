@@ -243,6 +243,18 @@ def _retry_fetch_if_stuck(key: str, info: dict, now: float) -> None:
     dto = str(info.get("to") or "")
     if not (shop_id and dfrom and dto):
         return
+    # 已经在队列里、或者正在跑，就别再派一个：不然同一家店会堆出好几轮，
+    # 浏览器那边几个任务抢同一个标签页，反而谁也跑不完。
+    try:
+        with _PENDING_LOCK:
+            queued = any(str(j.get("store") or "") == shop_id
+                         for j in _PENDING if isinstance(j, dict))
+    except Exception:  # noqa: BLE001
+        queued = False
+    with _PROGRESS_LOCK:
+        cur = str(((_PROGRESS.get(shop_id) or {}).get("current")) or "")
+    if queued or cur:
+        return
     with _PENDING_LOCK:
         d = _pending_load()
         if key not in d:

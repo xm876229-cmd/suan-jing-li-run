@@ -940,6 +940,17 @@ async function fetchBytesInPage(host, url) {
 }
 
 async function harvestPendingOrders(log, shopId, onlyRange) {
+  // 有任务正在跑就先让路：它自己的标签页在不停导航，这时候注入只会互相打架
+  // （日志里就是"这个标签页不能注入脚本"）。跑完再来收。
+  if (!log) {
+    try {
+      const { running, runBeat = 0 } = await skGet({ running: null, runBeat: 0 });
+      if (running) {
+        const last = Math.max(Number(running.at || 0), Number(runBeat || 0));
+        if (Date.now() - last < 3 * 60 * 1000) return 0;
+      }
+    } catch (e) { /* 读不到就照常 */ }
+  }
   const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
   if (!pendingOrders.length) return 0;
   const keep = [];
@@ -1062,16 +1073,10 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
 async function runOrders({ startMs, endMs }, log) {
   const host = await ensureHost("seller", log);
 
-  // 先看上次有没有在排队的导出已经生成好了：能补回就不用再排一个。
-  // 只认「同一区间」的那份——补回一份别的月份的订单，最后会算成
-  // 「本区间没有订单」或者数字偏小，还不如老老实实重新导一次。
-  try {
-    const recovered = await harvestPendingOrders(log, CURRENT_SHOP.shop_id, CURRENT_RANGE);
-    if (recovered > 0) {
-      log("上次排队的订单已补回，本轮不再重复导出");
-      return { via: "排队补回" };
-    }
-  } catch (e) { /* 补不回来就正常走 */ }
+  // 这里**不再**先试着补订单。
+  // 补订单要往标签页里注入脚本，而这时页面正在导航，注入会失败并重试三次，
+  // 实测把整个订单步骤卡死好几分钟（连"提交导出任务"都打不出来）。
+  // 补订单交给每分钟的闹钟：它只在没有任务跑的时候动手（见 harvestPendingOrders）。
 
   // —— 工具：建任务 / 等记录 / 下载落盘 ——
   const isRealFileKey = (k) => !!k && !/^\d+$/.test(String(k));
