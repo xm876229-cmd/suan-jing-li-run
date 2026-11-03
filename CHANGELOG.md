@@ -4,6 +4,31 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.24.27] - 2026-11-03
+
+订单文件本身也取不回来：下载地址同样在卖家后台域名下。
+
+### 一、`/easesafe/...` 的下载地址，后台 fetch 也被跨域挡
+
+平台给的 `download_url` 是这样的（不是 CDN）：
+
+```
+https://seller-my.tiktok.com/easesafe/oec_trade_order_export/object/xxxx?timeStamp=…&sign=…
+```
+
+后台脚本 `fetch` 它同样报 `Failed to fetch`——所以即便接口通了、地址拿到了，
+文件还是下不来，界面就一直停在"订单还在平台生成"。
+
+* 新增 `fetchBytesInPage()`：在**页面里**把文件整份读进内存，再按 6MB 一块
+  把 base64 搬回后台，避免一次塞几十 MB 进 executeScript。
+* 补订单（`harvestPendingOrders`）和正常导出（`saveOne`）都改用它；
+  正常导出还留着"取不到就退回后台直取"的兜底，给将来可能出现的 CDN 直链。
+
+### 二、为什么非要这么绕
+
+同源 + Cookie 只有页面里有。扩展后台是独立源，TikTok 的这些地址一律按跨域拒。
+这一版的链路是：页面发请求 → 页面取文件 → 分块搬回 → 后台传桥 → 桥核算出报表。
+
 ## [v0.24.26] - 2026-11-03
 
 补订单失败的第二个原因：**页面被自己关了**。

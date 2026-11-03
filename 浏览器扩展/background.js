@@ -849,6 +849,61 @@ async function rememberPendingOrder(item) {
  *
  * shopId 传了就只收这家店的（新一轮开始时先试一次，能补回就不用重导）。
  */
+/** 在页面里把文件取下来，分块搬回后台。
+
+ * 为什么非要这么绕：订单的下载地址长这样
+ *   https://seller-my.tiktok.com/easesafe/oec_trade_order_export/object/xxxx
+ * ——它跟接口一样在卖家后台的域名下，后台脚本直接 fetch 会被按跨域挡掉
+ * （`Failed to fetch`）。只有页面里（同源、带 Cookie）才能取。
+ * 文件可能几十 MB，所以先在页面里整份读进内存，再按 6MB 一块搬回来，
+ * 避免一次塞一个几十 MB 的 base64 进 executeScript。
+ */
+async function fetchBytesInPage(host, url) {
+  const CHUNK = 6 * 1024 * 1024;
+  const begin = await runInPage(host, async (u) => {
+    try {
+      const r = await fetch(u, { credentials: "include" });
+      if (!r.ok) return { error: `HTTP ${r.status}` };
+      const b = await r.arrayBuffer();
+      window.__jlFile = new Uint8Array(b);
+      return { size: window.__jlFile.length };
+    } catch (e) {
+      return { error: String((e && e.message) || e) };
+    }
+  }, [url]);
+  if (begin.missingTab) throw new Error(`没有开着的 ${host} 页面`);
+  if (begin.error) throw new Error(begin.error);
+  const st = begin.result || {};
+  if (st.error) throw new Error(st.error);
+  const size = Number(st.size) || 0;
+  if (!size) throw new Error("取到 0 字节，不像订单表");
+
+  const out = new Uint8Array(size);
+  for (let off = 0; off < size; off += CHUNK) {
+    const part = await runInPage(host, async (o, n) => {
+      try {
+        const a = window.__jlFile;
+        if (!a) return { error: "页面里的文件缓存没了" };
+        const seg = a.subarray(o, Math.min(o + n, a.length));
+        let bin = "";
+        const CH = 0x8000;
+        for (let i = 0; i < seg.length; i += CH) {
+          bin += String.fromCharCode.apply(null, seg.subarray(i, i + CH));
+        }
+        return { b64: btoa(bin), size: seg.length };
+      } catch (e) {
+        return { error: String((e && e.message) || e) };
+      }
+    }, [off, CHUNK]);
+    const g = (part && part.result) || {};
+    if (g.error) throw new Error(g.error);
+    const bin = atob(g.b64 || "");
+    for (let i = 0; i < bin.length; i++) out[off + i] = bin.charCodeAt(i);
+  }
+  try { await runInPage(host, async () => { window.__jlFile = null; return 1; }, []); } catch (e) { /* 清不掉也无所谓 */ }
+  return out.buffer;
+}
+
 async function harvestPendingOrders(log, shopId, onlyRange) {
   const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
   if (!pendingOrders.length) return 0;
@@ -939,14 +994,17 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
           + (st.code ? `（code=${st.code}）` : ""));
         keep.push(it); continue;
       }
-      const resp = await fetch(url, { credentials: "include" });
-      if (!resp.ok) {
-        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 下载失败 HTTP ${resp.status}`);
+      // 文件也必须在页面里取：地址就在卖家后台域名下，后台直接 fetch 会被跨域挡。
+      let buf = null;
+      try {
+        buf = await fetchBytesInPage(host, url);
+      } catch (e) {
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 取文件失败：`
+          + `${(e && e.message) || e}`);
         keep.push(it); continue;
       }
-      const buf = await resp.arrayBuffer();
       if (!buf || buf.byteLength < 200) {
-        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 下载内容只有 `
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 文件只有 `
           + `${buf ? buf.byteLength : 0} 字节，不像订单表`);
         keep.push(it); continue;
       }
@@ -1049,9 +1107,19 @@ async function runOrders({ startMs, endMs }, log) {
     }
     if (!url) url = findUrl(rec) || "";
     if (!url) throw new Error(dlErr || "没有拿到下载地址");
-    const fileResp = await fetch(url, { credentials: "include" });
-    if (!fileResp.ok) throw new Error(`下载失败 HTTP ${fileResp.status}`);
-    const buf = await fileResp.arrayBuffer();
+    // 先按"页面里取"走：卖家后台的下载地址（/easesafe/...）在后台直接 fetch
+    // 会被跨域挡。取不成再退回后台直取——有些站点给的是 CDN 直链，那条能用。
+    let buf = null;
+    try {
+      buf = await fetchBytesInPage(host, url);
+    } catch (ePage) {
+      const fileResp = await fetch(url, { credentials: "include" });
+      if (!fileResp.ok) {
+        throw new Error(`下载失败 HTTP ${fileResp.status}`
+          + `（页面里也取不到：${(ePage && ePage.message) || ePage}）`);
+      }
+      buf = await fileResp.arrayBuffer();
+    }
     const saved = await uploadToBridge(name, buf);
     log(`   已保存：${saved.path}`);
     return { path: saved.path, bytes: buf.byteLength };
