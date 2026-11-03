@@ -977,7 +977,24 @@ async function fetchBytesInPage(host, url) {
   return fetchBytesInTab(tab.id, url);
 }
 
+let HARVESTING = false;
+
 async function harvestPendingOrders(log, shopId, onlyRange) {
+  // 同时只允许跑一份。
+  // pending-watch 闹钟、consumePending 收尾、以及手动触发都会调进来，
+  // 两个实例会各自读到同一份 pendingOrders，都处理成功、又各自写回自己的
+  // keep —— 后写的把"刚处理完那条"写回去了。实测同一条被补回 12 次，
+  // 收件箱里堆了 10 份 11.8MB 的同一区间订单。
+  if (HARVESTING) return 0;
+  HARVESTING = true;
+  try {
+    return await harvestPendingOrdersInner(log, shopId, onlyRange);
+  } finally {
+    HARVESTING = false;
+  }
+}
+
+async function harvestPendingOrdersInner(log, shopId, onlyRange) {
   // 有任务正在跑就先让路：它自己的标签页在不停导航，这时候注入只会互相打架
   // （日志里就是"这个标签页不能注入脚本"）。跑完再来收。
   if (!log) {
@@ -1079,6 +1096,14 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
       if (log) log(`   订单已自动补回：${saved.path}`);
       appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 已补回：${saved.path}`);
       got++;
+      // 立刻从 storage 里摘掉这条：整轮跑完才写回的话，中途被浏览器
+      // 回收一次，下次又会把已经补好的再补一遍。
+      try {
+        const cur = await skGet({ pendingOrders: [] });
+        const rest = (cur.pendingOrders || []).filter(
+          (x) => String(x.taskId) !== String(it.taskId));
+        await skSet({ pendingOrders: rest });
+      } catch (e) { /* 写失败也不要紧，下面整轮还会再写一次 */ }
     } catch (e) {
       // 带上堆栈第一行：只写 "Failed to fetch" 时分不清是接口、取文件还是上传
       const st = String((e && e.stack) || "").split("\n").slice(0, 2).join(" | ");
