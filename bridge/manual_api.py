@@ -519,6 +519,8 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
 
     summary["report_path"] = str(out)
     summary["report_name"] = out.name
+    # 子进程报的是它写的临时文件名，换名之后要让调用方看到真实名字
+    summary["file"] = str(out)
 
     # 复制到「手动报表」的下载目录（设置里那个；没设就只留程序目录）
     copied = None

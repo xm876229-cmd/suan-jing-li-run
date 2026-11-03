@@ -141,7 +141,7 @@ def _run_calc_cmd(cmd: list[str], timeout: int = 900) -> tuple[bool, str]:
 
 
 def _report_out(store_name: str, dfrom: str, dto: str, suffix: str = "",
-                shop_id: str = "") -> Path:
+                shop_id: str = "", unique: bool = True) -> Path:
     """补算（订单晚到）用的报表路径——跟正常核算一样落在「自动」房间里。
 
     以前这里写的是 `报表/<店名>/`（老布局）。补算一次就会在房间外多出一个
@@ -167,6 +167,11 @@ def _report_out(store_name: str, dfrom: str, dto: str, suffix: str = "",
         h = hashlib.sha1(base.encode("utf-8")).hexdigest()[:6]
         base = base[:100].rstrip(" .") + "_" + h
     p = out_dir / f"{base}.xlsx"
+    if not unique:
+        # 补算走「先算临时文件、成功再换名」，跟正常核算一样覆盖同名报表。
+        # 原来这里永远不覆盖（自动加 (2)），同一段数据补算两次就多出一份 (2)，
+        # 报表页上还分不清哪份是最后那版。
+        return p
     i = 2
     while p.exists():
         p = out_dir / f"{base} ({i}).xlsx"
@@ -216,7 +221,11 @@ def _pending_tick() -> None:
         if not _lk.acquire(blocking=False):
             continue
         try:
-            out = _report_out(store_name, dfrom, dto, shop_id=shop_id)
+            # 先算临时文件、成功了再换名：跟 /run 同一套规矩。
+            # 直接往正式文件里写，算到一半失败会留下半截 xlsx。
+            final_out = _report_out(store_name, dfrom, dto, shop_id=shop_id,
+                                    unique=False)
+            out = final_out.with_name(f".{os.getpid()}.calc.xlsx")
             _append_log(f"[auto] 订单已到，自动补算：{store_name} {dfrom}~{dto}")
             try:
                 ok, msg = _run_calc_cmd(_calc_cmd(shop_id, str(info.get("country") or ""),
@@ -224,6 +233,15 @@ def _pending_tick() -> None:
                                                   bool(info.get("with_formula"))))
             except Exception as e:  # noqa: BLE001
                 ok, msg = False, str(e)
+            if ok and out.exists():
+                out = safeio.swap_report(
+                    out, final_out,
+                    paths.DATA / "回收站" / f"报表_{datetime.now():%Y%m%d_%H%M%S_%f}")
+            elif out.exists():
+                try:
+                    out.unlink()
+                except OSError:
+                    pass
         finally:
             _lk.release()
         _pending_drop(key)
@@ -3186,6 +3204,11 @@ class Handler(BaseHTTPRequestHandler):
                         out, final_out,
                         paths.DATA / "回收站" / f"报表_{datetime.now():%Y%m%d_%H%M%S_%f}")
                     _tmp_out = None
+                # 子进程返回的 file 是它自己写的那个路径（现在是临时名
+                # `.<pid>.calc.xlsx`）。换名成功之后必须改回来，否则界面和日志里
+                # 显示的是「.15144.calc.xlsx」——一个已经被改掉、根本不存在的文件名，
+                # 卡片上的报表名点进去也就找不到东西。
+                summary["file"] = str(out)
                 # 检查用到的导出文件有没有太旧的：广告任务可能还没下来，
                 # 这时会静默沿用上一期文件，数字看着正常但其实是错的。
                 stale = []

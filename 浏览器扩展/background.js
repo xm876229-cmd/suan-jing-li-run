@@ -1908,11 +1908,36 @@ async function runLinkInfo(range, log, opts = {}) {
  *       .product_metrics.product_orders_cnt             → 订单数
  *   旧工作簿的「达人佣金」口径就是「联盟报表预估佣金，按商品ID汇总」，与这里一致。
  */
-const AFFILIATE_METRICS = [1, 3, 2, 4, 9, 20, 13, 14, 19, 6, 24, 22, 16, 17, 18, 25, 26, 23, 5];
+// 指标 id 必须跟页面自己发的**完全一致**。以前这套里混进了 24/22/25/26/23，
+// 页面根本不发这几个，平台整条请求直接回 16048002 —— 看着像"时区不对"，其实是参数不对。
+// 下面这 19 个是从抓包里原样抄下来的，实测响应里 commission/gmv/orders 全都有。
+const AFFILIATE_METRICS = [1, 3, 2, 4, 9, 20, 13, 14, 19, 6, 12, 11, 16, 17, 18, 8, 7, 10, 5];
+
+/** 联盟的接口和页面都必须带「店铺身份」。
+ *
+ * 少了 shop_id / shop_region，平台算不出这家店在哪个时区，接口回
+ * `16048002 invalid timezone offset`；页面自己也一样——我们裸开
+ * `insights/transaction-analysis`（不带参数）时，页面自己发出去的请求
+ * 连 shop_region 都没有，于是页面空着、点导出也没数据。
+ * 抓包里平台自己用的地址是 `...?shop_region=MY&shop_id=7496...`。
+ */
+function withShopCtx(url) {
+  try {
+    const u = new URL(url);
+    const sid = String((CURRENT_SHOP && CURRENT_SHOP.shop_id) || "");
+    const reg = String((CURRENT_SHOP && CURRENT_SHOP.region) || "").toUpperCase();
+    if (sid && !u.searchParams.get("shop_id")) u.searchParams.set("shop_id", sid);
+    if (reg && !u.searchParams.get("shop_region")) u.searchParams.set("shop_region", reg);
+    return u.toString();
+  } catch (e) {
+    return url;
+  }
+}
 
 async function pagePullAffiliateProducts(host, startSec, endSec, tz, log) {
-  const url = await buildUrl(host, "/api/v1/oec/affiliate/compass/transaction/detail_list/get");
-  const PAGE_SIZE = 100;
+  const url = withShopCtx(await buildUrl(host,
+    "/api/v1/oec/affiliate/compass/transaction/detail_list/get"));
+  const PAGE_SIZE = 200;          // 页面用 200，一页顶两页，少一半请求
   const MAX_PAGES = 100;
 
   const r = await runInPage(host, async (u, s, e, tzOffset, metrics, pageSize, maxPages) => {
@@ -1965,7 +1990,9 @@ async function pagePullAffiliateProducts(host, startSec, endSec, tz, log) {
       if (perfs.length < pageSize) return { rows, pages: pageNo, done: true };
     }
     return { rows, pages: maxPages, done: false, truncated: true };
-  }, [url, startSec, endSec, tz, AFFILIATE_METRICS, PAGE_SIZE, MAX_PAGES]);
+  }, [url, startSec, endSec, tz, AFFILIATE_METRICS, PAGE_SIZE, MAX_PAGES],
+     // 必须在「联盟分析」页里发：从首页/参数页发出会被判非法（16048002）
+     "insights/transaction-analysis");
 
   if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
   if (r.error) throw new Error(r.error);
@@ -2006,8 +2033,53 @@ function affiliateRowsToCsv(rows) {
   return lines.join("\r\n");
 }
 
+/** 确保有一个「带店铺身份」的联盟分析页，并返回它的 tabId。
+ *
+ * 为什么要专门做这件事（18:33 实测）：
+ *   裸开 `insights/transaction-analysis`（不带 ?shop_region&shop_id）时，
+ *   页面自己发出去的请求**也没有店铺身份**，平台算不出这家店在哪个时区，
+ *   一律回 `16048002 invalid timezone offset`——不是我们的 body 写错了。
+ *   抓包里平台自己的地址是 `...?shop_region=MY&shop_id=7496...`，
+ *   从那个页面发出来的同类请求全是 200。
+ */
+async function ensureAffiliatePage(host, ctxUrl, log) {
+  const want = "insights/transaction-analysis";
+  const sid = String((CURRENT_SHOP && CURRENT_SHOP.shop_id) || "");
+  if (!sid) return 0;                      // 没认出店铺就别乱开页
+  let tab = null;
+  try {
+    const all = (await chrome.tabs.query({ url: [`*://${host}/*`] })) || [];
+    tab = all.find((t) => String(t.url || "").includes(want)) || null;
+  } catch (e) { /* 忽略 */ }
+
+  if (tab) {
+    if (!String(tab.url || "").includes("shop_id=")) {
+      // 之前被我们裸开过一次：原地补上身份，页面会自己重发请求
+      try {
+        await chrome.tabs.update(tab.id, { url: ctxUrl });
+        await waitTabReady(tab.id);
+        if (log) log("   联盟页补上店铺身份后重新加载");
+      } catch (e) { /* 改不动就用旧的，后面还有页面导出兜底 */ }
+    }
+    return tab.id;
+  }
+  try {
+    const nt = await chrome.tabs.create({ url: ctxUrl, active: false });
+    await waitTabReady(nt.id);
+    if (log) log("   已打开带店铺身份的联盟页");
+    return nt.id;
+  } catch (e) {
+    return 0;
+  }
+}
+
 async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
   const host = await ensureHost("affiliate", log);
+  const region = String((CURRENT_SHOP && CURRENT_SHOP.region) || "MY").toUpperCase();
+  const sid = String((CURRENT_SHOP && CURRENT_SHOP.shop_id) || "");
+  await ensureAffiliatePage(host,
+    `https://${host}/insights/transaction-analysis?shop_region=${region}`
+    + (sid ? `&shop_id=${sid}` : ""), log);
 
   const startSec = Math.floor(new Date(startDate + "T00:00:00").getTime() / 1000);
   const endSec = Math.floor(new Date(endDateExclusive + "T00:00:00").getTime() / 1000) - 1;
@@ -2978,7 +3050,11 @@ const EXPORT_FLOWS = {
 
     host: "affiliate.tiktok.com",
     page: "insights/transaction-analysis",
-    steps: [["导出数据", "导出"], ["导出", "确定", "确认", "下载"]],
+    // 联盟中心这个页面会跟着账号语言变：同一台机器上，卖家后台是中文、
+    // 联盟页却是英文（实测按钮就叫「Export」）。以前只写中文，
+    // 结果整张联盟表取不回来——净利里少了一笔佣金，数字偏高还看不出来。
+    steps: [["导出数据", "导出", "Export data", "Export", "Download"],
+            ["导出", "确定", "确认", "下载", "Export", "Download"]],
   },
   sku: {
     label: "商品SKU表",
@@ -3378,6 +3454,14 @@ async function exportViaApi(kind, host, log, opts = {}) {
     // 少了 type/mpa 会停在卖家后台首页，地址栏却还是 ads-creation/dashboard。
     pagePath += `?shop_region=${region}&type=product&mpa=1`;
     if (log) log(`   广告页带站点参数：${region}`);
+  }
+  if (kind === "affiliate") {
+    // 必须带店铺身份（见 withShopCtx 的说明）：裸开这个页面的话，
+    // 页面自己发出去的请求也没有 shop_region，接口一律回 16048002。
+    const reg = String((CURRENT_SHOP && CURRENT_SHOP.region) || "MY").toUpperCase();
+    const sid = String((CURRENT_SHOP && CURRENT_SHOP.shop_id) || "");
+    pagePath += `?shop_region=${reg}` + (sid ? `&shop_id=${sid}` : "");
+    if (log) log(`   联盟页带店铺身份：${reg} / ${sid || "（没认出店铺）"}`);
   }
   if (kind === "sku" && opts.range && opts.range.start) {
     let region = "MY";
@@ -5594,25 +5678,66 @@ async function runTask(task, range, log, opts = {}) {
   }
 }
 
+/** 把「这轮要算」登记到桥的待补清单：订单文件一落地，桥自己算、自己出报表。
+ *
+ *  返回桥的 JSON：ok=true 表示当场就算完了（订单其实已经到了）。
+ */
+async function registerPendingCalc(range, log, opts = {}) {
+  const { settings = {} } = await chrome.storage.local.get({ settings: {} });
+  const country = opts.country || settings.country || "马来西亚";
+  const store = opts.store || settings.store || "";
+  const from = range.startDate || "";
+  const to = range.to || (range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : "");
+  try {
+    const resp = await fetch(`${BRIDGE}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        country, from, to, store,
+        shop_id: CURRENT_SHOP.shop_id || "",
+        auto: !!opts.auto,
+        with_formula: (typeof opts.with_formula === "boolean" ? opts.with_formula : undefined),
+        replace: true,
+      }),
+    });
+    return await resp.json();
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
 async function runTaskThenCalc(task, range, log, opts = {}) {
   const r = await runTask(task, range, log, opts);
 
-  // 订单还在平台排队时别急着算：算出来只会是"没有订单表"，白跑一趟。
-  // 大店导出要几分钟，这里等它（后台跑，面板关了也不影响），
-  // 拿到就直接接着算，用户不用再点第二次。
+  // 订单还在平台排队：**马上交给桥去等**，不在扩展里干等。
+  //
+  // 为什么改（2026-11-02 计划任务实测）：
+  //   原来是在后台循环等 12 分钟，每 20 秒查一次订单好了没。
+  //   MV3 的后台随时可能被浏览器回收——那天的日志里 18:47、18:48 各重启过一次。
+  //   循环一断，这轮就永远不算了：界面上留一个「已排队」，人以为过会儿会自己算，
+  //   其实什么都不会发生（4 家店就这么白跑了一轮）。
+  //   桥是常驻进程，它的补算线程每分钟看一眼，浏览器的开关、后台回收都不影响。
   const ordErr = (r && r.orders && r.orders.error) ? String(r.orders.error) : "";
   if (/排队/.test(ordErr)) {
-    // 大店订单导出要多久？实测 Chroma Home（5.7 万单 / 39MB）约 8 分钟。
-    // 以前只等 4 分钟，到点就「没有订单表」失败——文件 3 分钟后才到，
-    // 用户还得自己再点一次核算。等够 12 分钟，把这条鸿沟盖住。
-    const rounds = 36;           // 36 × 20s = 12 分钟
-    log("订单还在平台排队，等它生成好再算（最多 12 分钟，可以先干别的）…");
-    for (let i = 0; i < rounds; i++) {
-      await sleep(20000);
-      const got = await harvestPendingOrders(log, CURRENT_SHOP.shop_id).catch(() => 0);
-      if (got > 0) { log("订单已到，继续核算"); break; }
-      if (i % 3 === 2) log(`   还在等订单…（${Math.round((i + 1) * 20 / 60)} 分钟）`);
+    await reportProgress("calc", "running", { detail: "订单还在平台生成，到了自动算" });
+    const j = await registerPendingCalc(range, log, opts);
+    if (j && j.ok) {
+      log("订单已到，直接接着算");
+      // 桥那边已经算完了（文件其实已经落地），把结果接回来显示
+      try {
+        const c = await calcNow(range, log, { ...opts, replace: true });
+        await reportProgress("calc", "done", {});
+        await reportProgress("report", "done", {
+          detail: (c && c.file) ? String(c.file).split(/[\\/]/).pop().slice(0, 40) : "",
+        });
+        return { fetch: r, calc: c };
+      } catch (e) { /* 接不回来也不要紧，桥已经出报表了 */ }
+      return { fetch: r, pendingCalc: true };
     }
+    log(`订单还没生成好（${String((j && j.error) || "").slice(0, 40)}），`
+        + "已记成待补：文件一落地桥会自动算、自动出报表，不用再点");
+    await reportProgress("calc", "skip", { detail: "等订单：到了自动算" });
+    return { fetch: r, pendingCalc: true };
   }
   try {
     await reportProgress("calc", "running");
