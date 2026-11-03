@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "净利取数助手",
-  "version": "0.24.38",
+  "version": "0.24.39",
   "description": "在店铺后台记录数据接口，并把结果回传给本地净利核算程序",
   "permissions": [
     "storage",

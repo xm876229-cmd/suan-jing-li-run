@@ -1005,68 +1005,36 @@ async function harvestPendingOrders(log, shopId, onlyRange) {
           keep.push(it); continue;
         }
       }
-      // **必须在页面主世界里发**：后台脚本直接 fetch 卖家后台会被浏览器按跨域挡掉，
-      // 报 `Failed to fetch`——实测 4 家大店每分钟都栽在这一步，
-      // 而日志里之前一个字都没有，所以一直以为"平台还没生成好"。
-      // 文件本身（CDN 直链）可以留在后台下，那条路是通的。
-      const r = await runInTab(tabId, async (recU, dlU, taskId) => {
-        // 出错也**返回**而不是抛出：抛出会被 runInPage 当成"这个页面不行"，
-        // 连换三个页面再报一句没有上下文的 Failed to fetch，什么也查不到。
-        try {
-        const post = async (u, body) => {
-          const resp = await fetch(u, {
-            method: "POST",
-            credentials: "include",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body || {}),
-          });
-          const text = await resp.text();
-          let json = null;
-          try { json = JSON.parse(text); } catch (e) { /* 非 JSON */ }
-          return { json, raw: json ? "" : text.slice(0, 160), status: resp.status };
-        };
-        const rec = await post(recU, {});
-        const list = (rec.json && rec.json.data && rec.json.data.export_records) || [];
-        const hit = list.find((x) => String(x.export_task_id) === String(taskId)
-                                   && x.file_key && !/^\d+$/.test(String(x.file_key)));
-        if (!hit) {
-          const mine = list.find((x) => String(x.export_task_id) === String(taskId)) || {};
-          return { state: "waiting",
-                   have: list.map((x) => String(x.export_task_id)).filter(Boolean).slice(0, 4),
-                   keys: Object.keys(mine).slice(0, 10),
-                   fileKey: String(mine.file_key || ""),
-                   status: String(mine.status || mine.task_status || mine.state || ""),
-                   code: rec.json && rec.json.code, raw: rec.raw };
-        }
-        const dl = await post(dlU, { file_key: hit.file_key, export_task_id: taskId });
-        const d = (dl.json && dl.json.data) || {};
-        const url = d.download_url || d.url || d.file_url || "";
-        return { state: url ? "url" : "nourl", url: url || "",
-                 code: dl.json && dl.json.code, raw: dl.raw };
-        } catch (e) {
-          return { state: "error", msg: String((e && e.message) || e),
-                   url: String(recU).slice(0, 180) };
-        }
-      }, [recUrl, dlUrl, it.taskId]);
-      if (r.error) throw new Error(r.error);
-      const st = (r.result || {});
-      if (st.state === "error") {
-        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 页面里发请求失败：`
-          + `${st.msg}（${st.url}）`);
-        keep.push(it); continue;
-      }
-      if (st.state === "waiting") {
+      // 接口必须在**后台**发：`apiPost` 会带上按站点学到的请求头
+      // （x-tt-oec-region 之类）。放到页面里发 POST 会触发 CORS 预检，
+      // 平台不放行 → 浏览器直接抛 `Failed to fetch`，连状态码都没有，
+      // 看起来跟"网线断了"一模一样——今天在这上面绕了三小时。
+      // 后台 fetch 有 host_permissions、不受 CORS 约束，所以这条路才是对的。
+      //
+      // 反过来，文件（GET 的 /easesafe/...）必须走页面：同源、要带 Cookie。
+      const rec = await apiPost(recUrl, {});
+      const list = (rec && rec.data && rec.data.export_records) || [];
+      const hit = list.find((x) => String(x.export_task_id) === String(it.taskId)
+                                 && x.file_key && !/^\d+$/.test(String(x.file_key)));
+      if (!hit) {
+        const mine = list.find((x) => String(x.export_task_id) === String(it.taskId)) || {};
         appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 还没生成好`
-          + `（等任务 ${it.taskId}；记录里现有：${(st.have || []).join(",") || "空"}`
-          + `；本任务字段：${(st.keys || []).join("/") || "无"}`
-          + `；status=${st.status || "空"}；file_key=${st.fileKey || "空"}` +
-          (st.code ? `；code=${st.code}` : "") + `）`);
+          + `（等任务 ${it.taskId}；记录里现有：`
+          + `${list.map((x) => String(x.export_task_id)).filter(Boolean).slice(0, 4).join(",") || "空"}`
+          + `；本任务字段：${Object.keys(mine).slice(0, 10).join("/") || "无"}`
+          + `；status=${String(mine.status || mine.task_status || mine.state || "空")}`
+          + `；file_key=${String(mine.file_key || "空")}）`);
         keep.push(it); continue;
       }
-      let url = st.url || "";
+      let url = "";
+      try {
+        const dl = await apiPost(dlUrl, { file_key: hit.file_key, export_task_id: it.taskId });
+        const d = (dl && dl.data) || {};
+        url = d.download_url || d.url || d.file_url || findUrl(dl) || "";
+      } catch (e) { /* 记录里通常还有直链，下面兜住 */ }
+      if (!url) url = findUrl(hit) || "";
       if (!url) {
-        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 有 file_key 但拿不到下载地址`
-          + (st.code ? `（code=${st.code}）` : ""));
+        appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 有 file_key 但拿不到下载地址`);
         keep.push(it); continue;
       }
       // 文件也必须在页面里取：地址就在卖家后台域名下，后台直接 fetch 会被跨域挡。
