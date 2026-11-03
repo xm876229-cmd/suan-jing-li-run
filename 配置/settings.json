@@ -2,7 +2,7 @@
   "report": {
     "name_template": "{店铺}_{开始}_{结束}",
     "auto_copy": false,
-    "download_dir": "",
+    "download_dir": "C:\\Users\\Administrator\\Desktop",
     "template_dir": ""
   },
   "fx": {
@@ -10,15 +10,15 @@
   },
   "schedules": [
     {
-      "id": "r1793685877_1",
-      "name": "每天 14:06",
+      "id": "r1793691101_1",
+      "name": "每天 15:33",
       "enabled": true,
       "freq": "daily",
-      "time": "14:06",
+      "time": "15:33",
       "day": 1,
       "weekday": 0,
       "period": "month",
-      "offset": 1,
+      "offset": 2,
       "cut": "end",
       "cut_day": 1,
       "stores": [],

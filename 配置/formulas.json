@@ -393,7 +393,9 @@
     "orders",
     "aov",
     "gross_margin",
+    "fee:dispatch",
     "ratio:dispatch",
+    "fee:ads",
     "ratio:ads",
     "net_rate",
     "net",
@@ -407,7 +409,9 @@
     "orders",
     "aov",
     "gross_margin",
+    "fee:dispatch",
     "ratio:dispatch",
+    "fee:ads",
     "ratio:ads",
     "net_rate",
     "net",
@@ -417,10 +421,8 @@
     "buyer_paid",
     "cost",
     "gross_profit",
-    "fee:dispatch",
     "fee:platform_commission",
     "fee:tx_fee",
-    "fee:ads",
     "fee:affiliate",
     "fee:cashback",
     "fee:order_service",
@@ -428,5 +430,5 @@
     "alt_net",
     "alt_diff"
   ],
-  "report_total_position": "bottom"
+  "report_total_position": "top"
 }

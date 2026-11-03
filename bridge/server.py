@@ -379,7 +379,10 @@ _STOP_TTL = 600.0
 # Crochet Studio，14:20 换成 Chroma Home，纯属谁抢输了谁失败。
 # 平台那边同一账户并发导出也吃不消（一上午堆几十个任务后全部卡在"生成中"）。
 # 限制并发比继续加超时有效：一次跑 2 家，其余排队等下一分钟领。
-_MAX_ACTIVE_FETCH = 4
+# 实测（2026-11-03 15:33，从零取 9 月）7 家同时跑全部成功，连大店都通了。
+# 真正的问题是上传 8MB 上限和页面 POST 被 CORS 挡，并发不是瓶颈。
+# 所以这里放到 7（= 不限制），不再让用户等批次。
+_MAX_ACTIVE_FETCH = 7
 _ONLINE_TTL = 150.0          # 超过这个秒数没心跳就算离线（心跳 60 秒一次）
 
 # 进度：shop_id → {task, run_id, steps:{step: {...}}, current, started, updated}
