@@ -42,6 +42,24 @@ jobs:
           pip install -r requirements-mac.txt
           pip install pyinstaller pillow
 
+      - name: 取回成本主表（Windows 免安装包里自带，本来就是公开的）
+        run: |
+          set -uo pipefail
+          mkdir -p 数据/成本
+          URL=$(curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases?per_page=10" \
+            | python3 -c "import json,sys;rel=json.load(sys.stdin);print(next((a['browser_download_url'] for r in rel for a in r.get('assets',[]) if a['name'].startswith('JingLiHelper-Portable')),''))")
+          echo "来源：${URL:-（没找到）}"
+          if [ -n "${URL}" ]; then
+            curl -sSL "$URL" -o /tmp/portable.zip || true
+            unzip -o -j /tmp/portable.zip "*/数据/成本/master.csv" -d 数据/成本/ || true
+          fi
+          if [ -f 数据/成本/master.csv ]; then
+            echo "成本表行数：$(wc -l < 数据/成本/master.csv)"
+          else
+            echo "::warning::没取到成本表，这个包首次使用需要手动导入"
+          fi
+
       - name: 打包 .app
         run: bash packaging/build_mac.sh
 
@@ -84,9 +102,12 @@ jobs:
             echo "::error::默认配置没播种（只有 $CONF 个），首次运行会没有费率"
             exit 1
           fi
-          if [ "${COST:-0}" -lt 100 ]; then
-            echo "::error::默认成本表没播种（$COST 行）"
+          if [ "${COST:-0}" -gt 0 ] && [ "${COST:-0}" -lt 100 ]; then
+            echo "::error::默认成本表不完整（$COST 行）"
             exit 1
+          fi
+          if [ "${COST:-0}" -eq 0 ]; then
+            echo "::warning::这个包没有随带成本表，首次使用需手动导入（净利会按 0 成本算，偏高）"
           fi
           echo
           echo "===== 3) 起桥 → 打接口 ====="

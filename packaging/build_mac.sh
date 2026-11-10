@@ -59,10 +59,16 @@ for f in sorted(src.glob("*.json")):
         json.dumps(d, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print("  ", f.name)
 
-cost = root / "数据" / "成本" / "master.csv"
-if cost.is_file():
-    shutil.copy2(cost, stage / "默认数据" / "costs" / "master.csv")
-    print("   成本表 master.csv")
+# 成本表在哪个位置因环境而异：项目根 / release / 构建中间产物，按顺序找
+for cand in (root / "数据" / "成本" / "master.csv",
+             root / "release" / "净利助手" / "数据" / "成本" / "master.csv",
+             root / "build" / "app" / "jingli" / "_internal" / "默认数据" / "costs" / "master.csv"):
+    if cand.is_file():
+        shutil.copy2(cand, stage / "默认数据" / "costs" / "master.csv")
+        print(f"   成本表 {cand.relative_to(root)}")
+        break
+else:
+    print("   ⚠ 没找到成本表：这个包首次使用要手动导入 成本表")
 PY
 
 echo "生成图标…"
