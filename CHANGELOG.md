@@ -4,6 +4,37 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.24.84] - 2026-11-10
+
+**Mac 包补齐：默认配置与成本表真的落盘；首次诊断不再看到空目录。**
+
+### 一、云端真跑暴露的两个问题
+
+拿 GitHub 的 macOS 机器把打包好的 .app 真跑了一遍（doctor → serve → 打接口），
+发现两处只有真机才会暴露的问题：
+
+1. **`doctor` 不建目录**：装完先跑诊断，看到的是「成本主表：未建立」，
+   而界面启动时才补，容易让人以为装坏了
+2. **默认成本表没进包**：构建脚本只从项目根找 `数据/成本/master.csv`，
+   而这个文件实际在 `release/` 下（仓库里没有），云端 checkout 更不可能有
+
+### 二、修法
+
+- `cmd_doctor()` 开头先 `paths.ensure_dirs()`：建目录 + 补默认配置/成本表（只补缺的）
+- macOS 上「数据根 ≠ 程序目录」是正常的（.app 内不可写），自检不再报
+  「⚠ 与程序目录不一致」，改说「macOS 应用支持目录（与 .app 分离，属正常）」
+- 打包脚本按 项目根 → release → 构建中间产物 三个位置找成本表
+- 云端构建从**最近的 Windows 免安装包**里取成本表（它本来就随包公开，
+  不额外增加暴露面），解压改用 Python（`unzip` 对中文路径匹配不上）
+
+### 三、云端实测数据（真实运行，不是静态检查）
+
+- `doctor`：配置 8 个、成本表 9126 行，数据在
+  `~/Library/Application Support/JingLiHelper`
+- `serve` + `/api/selfcheck`、`/api/live`、`/api/schedules` 全部 `ok:true`
+- `webview` + `webview.platforms.cocoa` 导入成功（窗口后端可用）
+- 包结构：`lipo -archs` = arm64、bundle id `com.jingli.helper`
+
 ## [v0.24.83] - 2026-11-10
 
 **支持 Apple Silicon Mac。同一套代码，Windows 行为完全不变。**
