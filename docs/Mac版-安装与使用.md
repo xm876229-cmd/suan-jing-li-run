@@ -7,12 +7,20 @@ Windows 版和 Mac 版是**同一套代码**：核算、报表、取数、界面
 
 Mac 版在 GitHub 的 macOS 机器上编译（本机是 Windows，PyInstaller 不能交叉编译）。
 
-1. 打开仓库：`https://github.com/xm876229-cmd/suan-jing-li-run`
-2. 点 **Actions** → 左边选 **Build macOS (Apple Silicon)** → 右边 **Run workflow**
-3. 等 3～5 分钟，点进这次运行，页面底部 **Artifacts** 下载 `JingLiHelper-mac-arm64`
-4. 解压得到 `JingLiHelper-mac-arm64-v版本.zip`，再解压出 **净利助手.app**
+**最省事：直接去 Releases 下载**
 
-> 打标签（`git push origin v0.24.83`）会顺带把它挂到 Release 页，和 exe 放一起。
+打开 `https://github.com/xm876229-cmd/suan-jing-li-run/releases`，
+在最新版本（如 v0.24.83）的 Assets 里找：
+
+- `JingLiHelper-mac-arm64-v0.24.83.zip` ← Mac 版（Apple Silicon）
+- `JingLiHelper-Setup-v0.24.83.exe` ← Windows 安装版
+- `JingLiHelper-Portable-v0.24.83.zip` ← Windows 免安装版
+
+解压后得到 **净利助手.app**。
+
+**要重新构建**：Actions → Build macOS (Apple Silicon) → Run workflow
+（可填 `release_tag` 让它顺便挂到对应 Release），几分钟后在该次运行页面底部
+Artifacts 里下载 `JingLiHelper-mac-arm64`。
 
 ## 二、第一次打开（必看）
 
