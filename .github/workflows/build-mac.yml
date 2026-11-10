@@ -74,9 +74,20 @@ jobs:
           "$APP" doctor
           echo
           echo "===== 2) 数据目录落在哪 ====="
-          ls -la "$HOME/Library/Application Support/JingLiHelper" || true
-          echo "配置个数：$(ls "$HOME/Library/Application Support/JingLiHelper/配置" 2>/dev/null | wc -l)"
-          echo "成本表行数：$(wc -l < "$HOME/Library/Application Support/JingLiHelper/数据/成本/master.csv" 2>/dev/null || echo 0)"
+          D="$HOME/Library/Application Support/JingLiHelper"
+          ls -la "$D" || true
+          CONF=$(ls "$D/配置" 2>/dev/null | wc -l | tr -d ' ')
+          COST=$(wc -l < "$D/数据/成本/master.csv" 2>/dev/null || echo 0)
+          echo "配置个数：$CONF"
+          echo "成本表行数：$COST"
+          if [ "${CONF:-0}" -lt 8 ]; then
+            echo "::error::默认配置没播种（只有 $CONF 个），首次运行会没有费率"
+            exit 1
+          fi
+          if [ "${COST:-0}" -lt 100 ]; then
+            echo "::error::默认成本表没播种（$COST 行）"
+            exit 1
+          fi
           echo
           echo "===== 3) 起桥 → 打接口 ====="
           "$APP" serve > /tmp/jingli-serve.log 2>&1 &

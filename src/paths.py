@@ -803,10 +803,16 @@ def describe() -> dict[str, str]:
     same = str(DATA_HOME) == str(ROOT)
     # 数据根是不是这个程序自己的目录，一句话说清 —— 用户最关心的就是
     # 「安装版和免安装版会不会互写数据」，这里直接给结论。
+    mac_default = (sys.platform == "darwin" and is_frozen()
+                   and str(DATA_HOME) == str(Path.home() / "Library"
+                                             / "Application Support" / "JingLiHelper"))
     if env_on:
         scope = "JINGLI_HOME 指定（注意：与程序目录不同）"
     elif same:
         scope = "本程序目录（与其他版本互相独立）"
+    elif mac_default:
+        # .app 里不能写数据，macOS 上数据放这里才是正常的
+        scope = "macOS 应用支持目录（与 .app 分离，属正常）"
     else:
         scope = "⚠ 与程序目录不一致，请检查"
     return {

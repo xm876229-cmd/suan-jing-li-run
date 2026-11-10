@@ -528,6 +528,13 @@ def cmd_autostart(argv: list[str]) -> int:
 
 def cmd_doctor() -> int:
     from src import setup_core
+    # 先建一遍目录并补默认配置：第一次装完先跑 doctor 的人，
+    # 应该看到「配置 8 个、成本 9125 条」，而不是空目录。
+    # 只补「不存在」的，已存在的一律不动。
+    try:
+        paths.ensure_dirs()
+    except Exception:  # noqa: BLE001
+        pass
     print(f"\n=== {APP_TITLE} 诊断 ===\n")
     for k, v in paths.describe().items():
         print(f"{k:8} {v}")
