@@ -9,16 +9,17 @@ name: Build macOS (Apple Silicon)
 #   1. 手动：仓库 Actions → Build macOS → Run workflow
 #   2. 打标签：git push origin v0.24.83 → 自动编，并挂到 Release 上
 
+# 只手动触发，**不要**加 push/tags。
+# 原因：do_release.py 用 API 建 Release 时，GitHub 会顺带创建同名 tag，
+# 于是「打标签就构建」会在每次发布后自己多跑一遍；两次构建的产物版本号
+# 还容易错位（0.24.86 的 Release 里混进了 0.24.85 的 Mac 包，就是这么来的）。
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "要挂到哪个 Release（如 v0.24.83；留空只出 Artifact）"
+        description: "要挂到哪个 Release（如 v0.24.86；留空只出 Artifact）"
         required: false
         default: ""
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: write      # 打标签触发时要往 Release 里传附件
@@ -154,9 +155,9 @@ jobs:
           retention-days: 30
 
       - name: 挂到 Release（打标签自动，或手动指定 tag）
-        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+        if: inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          tag_name: ${{ inputs.release_tag }}
           files: dist/*.zip
           fail_on_unmatched_files: false
