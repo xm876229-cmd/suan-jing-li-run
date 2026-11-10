@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   build-mac:
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 40
     steps:
       - name: 取代码
