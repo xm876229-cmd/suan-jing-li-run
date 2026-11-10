@@ -40,8 +40,26 @@ jobs:
       - name: 打包 .app
         run: bash packaging/build_mac.sh
 
-      - name: 产物清单
-        run: ls -lh dist
+      - name: 自检产物（架构 / 结构 / 资源）
+        run: |
+          APP="dist/净利助手.app"
+          echo "== 体积 =="
+          du -sh "$APP"
+          echo "== Contents =="
+          ls "$APP/Contents"
+          echo "== 可执行文件架构 =="
+          file "$APP/Contents/MacOS/JingLiHelper"
+          lipo -archs "$APP/Contents/MacOS/JingLiHelper"
+          echo "== 资源（扩展 / 默认配置 / 默认成本）=="
+          ls "$APP/Contents/Frameworks" | head -20
+          test -d "$APP/Contents/Frameworks/浏览器扩展" && echo "浏览器扩展 ✓"
+          test -d "$APP/Contents/Frameworks/默认配置" && echo "默认配置 ✓"
+          test -f "$APP/Contents/Frameworks/默认数据/costs/master.csv" && echo "默认成本表 ✓"
+          echo "== Info.plist =="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
+          echo "== 源码模式冒烟：导入全部模块 =="
+          python3 -c "import sys;sys.path.insert(0,'.');import src.paths,src.calc,src.report,src.loader,src.setup_core,src.platform_os;print('import ok')"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
