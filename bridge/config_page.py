@@ -100,6 +100,49 @@ def _clean_order_fields(fields: dict | None) -> dict:
     return clean
 
 
+def _check_formulas(params: list, formulas: dict) -> list[str]:
+    """试算每一条公式，返回人话错误说明（空列表 = 都能算）。
+
+    能做/不能做和核算时完全是同一套解析（formula.check_expr），
+    所以这里放过去，核算时就不会再出现「名字认不出、静默按 0」。
+    """
+    from types import SimpleNamespace
+
+    from src import formula as _f
+
+    ctx: dict = {}
+    for p in params or []:
+        if isinstance(p, dict) and str(p.get("id") or "").strip():
+            ctx[str(p["id"]).strip()] = 1.0
+    for k in ("gmv", "cost", "paid", "orders", "qty", "order_count", "items",
+              "buyer_paid", "cost_cny", "cost_unit", "refund", "commission",
+              "ads", "fees_total"):
+        ctx[k] = 1.0
+    for k in (formulas or {}):
+        ctx[str(k)] = 1.0
+    # 费率写成 params.xxx，校验时给个「什么字段都有、都是 1」的对象
+    ctx["params"] = SimpleNamespace(**{k: 1.0 for k in _f.DEFAULT_RATE_CN})
+
+    aliases = _f.rate_aliases(None)
+    for fid, cn in _f.FORMULA_CN.items():      # FORMULA_CN 是 {id: 中文名}
+        aliases.setdefault(cn, fid)
+    for p in params or []:
+        if not isinstance(p, dict):
+            continue
+        fid = str(p.get("id") or "").strip()
+        lab = str(p.get("label") or "").strip()
+        if fid and lab:
+            aliases[lab] = fid
+
+    problems: list[str] = []
+    for name, expr in (formulas or {}).items():
+        ok, err = _f.check_expr(expr, ctx, aliases)
+        if not ok:
+            label = _f.FORMULA_CN.get(str(name), str(name))
+            problems.append(f"「{label}」这一行算不了：{err}")
+    return problems
+
+
 def save_config(params: list, formulas: dict, keep_readme: bool = True,
                 by_country: dict | None = None,
                 order_fields: dict | None = None,
@@ -113,6 +156,12 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
                 affiliate_fields: dict | None = None,
                 mapping_fields: dict | None = None) -> dict:
     """保存参数表。保留原来的 _readme 说明文字，别把它冲掉。"""
+    # 先校验四条公式：名字写错、写成中文标点、括号不配，都在这里挡住。
+    # 为什么必须挡：以前能存，核算时未知变量静默按 0，净利看着正常其实漏扣了。
+    bad = _check_formulas(params, formulas or {})
+    if bad:
+        return {"ok": False, "error": "；".join(bad[:3])}
+
     old: dict = {}
     try:
         old = json.loads(config_path().read_text(encoding="utf-8"))

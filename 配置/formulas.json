@@ -430,12 +430,39 @@
     "normal",
     "refunded"
    ]
+  },
+  {
+   "id": "super_coupon",
+   "label": "超级优惠券",
+   "expr": "本行GMV * 超级优惠券率",
+   "kinds": [
+    "normal",
+    "zero_amount"
+   ]
+  },
+  {
+   "id": "growth_fee",
+   "label": "商家成长",
+   "expr": "本行GMV * 商家成长费率",
+   "kinds": [
+    "normal",
+    "zero_amount"
+   ]
+  },
+  {
+   "id": "logistics",
+   "label": "物流费",
+   "expr": "本行GMV * 物流费率",
+   "kinds": [
+    "normal",
+    "zero_amount"
+   ]
   }
  ],
  "formulas": {
   "gross_profit": "GMV - 商品成本",
-  "total_fees": "发单费 + 平台佣金 + 交易手续费 + 奖金返现 + 广告花费 + 达人佣金 + 订单服务费",
-  "net": "GMV - 商品成本 - 发单费 - 平台佣金 - 交易手续费 - 奖金返现 - 广告花费 - 达人佣金 - 订单服务费",
+  "total_fees": "费用项合计",
+  "net": "GMV - 商品成本 - 费用项合计",
   "net_rate": "净利 / GMV"
  },
  "report_columns": [

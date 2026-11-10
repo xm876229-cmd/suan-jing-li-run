@@ -798,11 +798,13 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
     # 加一项新支出也是加一条，自动参与 net 的计算。
     param_cfg = list(cc["params"])
     net_formulas = cc["formulas"]
-    # 老开关仍然生效：超级优惠券原来由 switches 控制
-    if switches.super_coupon_enabled:
-        for it in param_cfg:
-            if isinstance(it, dict) and it.get("id") == "super_coupon":
-                it["enabled"] = True
+    # 超级优惠券由 switches 控制「算不算」：
+    #   开 = 按费率算；关 = 按 0 计（原表里就是 ×0，费率填了也不生效）。
+    # 以前只写「开的时候启用」，关着的时候参数默认启用 → 费率填多少扣多少，
+    # 和费率页那个开关对不上。现在两个方向都写清楚。
+    for it in param_cfg:
+        if isinstance(it, dict) and it.get("id") == "super_coupon":
+            it["enabled"] = bool(switches.super_coupon_enabled)
 
     # 参数表里这几项有固定去处（报表要按列展示），其余都进「费用明细」。
     # 优先认参数上写的 role；没写就按 id 猜（老配置没有 role）。
@@ -886,6 +888,9 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
                 "cost_cny": m.cost_local / (params.cny_to_local or 1.0),
                 "commission": m.fees.get("affiliate", ZERO),
                 "ads": m.fees.get("ads", ZERO),
+                # 「费用项合计」：参数表里所有费用项之和。
+                # 净利公式只要减它一个，以后加费用项不用再改净利。
+                "fees_total": sum(m.fees.values()),
                 "fees": m.fees, "params": params}
         # 净利这几行也支持中文写法：GMV - 商品成本 - 发单费 - ...
         # 优先级：参数表那一行的名字 > 费率项的中文名 > 内置量的中文名。

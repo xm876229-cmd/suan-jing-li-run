@@ -1439,22 +1439,43 @@ _TEMPLATE = r"""<!DOCTYPE html>
       </div>
 
       <div class="pane" data-pane="formula" hidden>
-      <div class="card"><h2>净利怎么算<span class="hint">这一条也可以改</span></h2>
+      <div class="card"><h2>净利是怎么算出来的<span class="hint">只有三行，加费用不用动这里</span></h2>
+        <div class="body">
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <div style="flex:1;min-width:240px;background:#f6f9f8;border:1px solid #e2ece8;border-radius:10px;padding:12px 14px">
+              <div style="font-size:12px;color:#7c8b86;margin-bottom:6px">① 净利</div>
+              <div class="mono" style="font-size:13.5px">GMV − 商品成本 − 费用合计</div>
+            </div>
+            <div style="flex:1;min-width:240px;background:#f6f9f8;border:1px solid #e2ece8;border-radius:10px;padding:12px 14px">
+              <div style="font-size:12px;color:#7c8b86;margin-bottom:6px">② 费用合计</div>
+              <div class="mono" style="font-size:13.5px">参数表里所有费用项自动相加</div>
+              <div style="font-size:12px;color:#7c8b86;margin-top:6px">发单费、平台佣金、物流费、商家成长…都在里面</div>
+            </div>
+            <div style="flex:1;min-width:240px;background:#fff8ee;border:1px solid #f0dfc4;border-radius:10px;padding:12px 14px">
+              <div style="font-size:12px;color:#a0824d;margin-bottom:6px">③ 要加/减一项费用</div>
+              <div style="font-size:13px;line-height:1.6">去<b>「参数表」</b>加一行，它会自动进「费用合计」<br>
+              <b>不需要</b>回来改下面的公式</div>
+            </div>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:10px 0 0">
+            只有改口径时才动下面。比如「广告不算进净利」，就把「费用合计」写成
+            <span class="mono">费用项合计 - 广告花费</span>。
+          </p>
+        </div>
+      </div>
+
+      <div class="card"><h2>公式<span class="hint">中文直接写；点下面的变量会插到光标处</span></h2>
         <div class="body tight"><div class="tbl-wrap">
           <table class="cfg-tbl" id="ftbl"><thead><tr>
-            <th style="width:170px">结果</th><th>公式（可直接写中文）</th><th style="width:40px"></th>
+            <th style="width:170px">结果</th><th>公式</th><th style="width:40px"></th>
           </tr></thead><tbody id="fbody"></tbody></table>
         </div></div>
         <div class="body" style="padding-top:0">
-          <p class="muted" style="font-size:12.5px;margin:0">
-            默认就是把上面每一项减掉：
-            <span class="mono">净利 = GMV - 商品成本 - 发单费 - 平台佣金 - 交易手续费
-            - 奖金返现 - 广告花费 - 达人佣金 - 订单服务费</span>。
-            你在参数表里新增了一项，记得也把它加进这一行。<br>
-            这里也能用中文：参数表里那一行的名字直接写（<span class="mono">商品成本</span>），
-            费率写成「…率」（<span class="mono">平台佣金率</span>），
-            「净利」这种结果名也能直接引用。
-          </p>
+          <div id="ftray" style="display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 10px"></div>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <button class="ghost" id="freset" style="padding:5px 10px;font-size:12.5px">恢复默认三行</button>
+            <span class="muted" style="font-size:12.5px">先点一下要改的输入框，再点变量</span>
+          </div>
         </div>
       </div>
       </div>
@@ -4768,6 +4789,58 @@ function renderFormulas(){
     if(!confirm('删掉公式「' + (FORMULA_CN[k] || k) + '」？')) return;
     delete fmls[k];
     renderFormulas();
+  });
+  renderFormulaTray();
+  const rst = $('#freset');
+  if(rst) rst.onclick = () => {
+    if(!confirm('恢复成默认三行？\n净利 = GMV - 商品成本 - 费用合计')) return;
+    fmls = {
+      gross_profit: 'GMV - 商品成本',
+      total_fees: '费用项合计',
+      net: 'GMV - 商品成本 - 费用项合计',
+      net_rate: '净利 / GMV',
+    };
+    renderFormulas();
+    toast('已恢复默认三行，记得点保存');
+  };
+}
+
+/** 公式页底部的「可用变量」：点一下插到当前输入框的光标处。
+ *  为什么要这个：用户不知道能写什么，只能猜参数名（"新加的参数去哪加"就是这么来的）。
+ *  这里把能用的名字直接摆出来，点一下就插进去。 */
+function renderFormulaTray(){
+  const tray = $('#ftray');
+  if(!tray) return;
+  const skip = new Set(['gmv', 'cost', 'order_count', 'items', 'buyer_paid']);
+  const chips = [{ n:'GMV', t:'收入' }, { n:'商品成本', t:'成本' }, { n:'费用项合计', t:'所有费用自动相加' }];
+  rowsOf().forEach(r => {
+    if(!r || !r.id || skip.has(r.id)) return;
+    const name = String(r.label || r.id).trim();
+    if(name) chips.push({ n:name, t:'参数表里的费用项' });
+  });
+  chips.push({ n:'净利', t:'上一个公式的结果' });
+  tray.innerHTML = chips.map(c =>
+    `<button class="mini" data-chip="${esc(c.n)}" title="${esc(c.t)}"
+       style="padding:4px 9px;font-size:12.5px">${esc(c.n)}</button>`).join('');
+  tray.querySelectorAll('[data-chip]').forEach(b => b.onclick = () => {
+    const name = b.dataset.chip;
+    const inp = lastFormulaInput || $('#fbody').querySelector('[data-fi]');
+    if(!inp){ toast('先点一下要编辑的公式框'); return; }
+    inp.focus();
+    const s0 = inp.selectionStart ?? inp.value.length;
+    const s1 = inp.selectionEnd ?? s0;
+    const before = inp.value.slice(0, s0), after = inp.value.slice(s1);
+    // 挨着变量/数字时补空格，免得插出「商品成本平台佣金」这种粘在一起的写法
+    const pre = (before && !/[\s(+*/-]$/.test(before)) ? ' ' : '';
+    const suf = (after && !/^[\s)+*/-]/.test(after) ? ' ' : '';
+    const ins = pre + name + suf;
+    inp.value = before + ins + after;
+    const i = Number(inp.dataset.fi);
+    fmls[Object.keys(fmls)[i]] = inp.value;
+    const pos = s0 + ins.length;
+    inp.selectionStart = inp.selectionEnd = pos;
+    lastFormulaInput = inp;
+    checkFml(i);
   });
 }
 

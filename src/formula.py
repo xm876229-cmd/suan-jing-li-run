@@ -342,6 +342,12 @@ DEFAULTS: dict = {
         {"id": "cashback", "label": "奖金返现",
          "expr": "gmv * params.cashback", "kinds": ["normal", "zero_amount"]},
         {"id": "affiliate", "label": "联盟佣金", "expr": "commission"},
+        {"id": "super_coupon", "label": "超级优惠券",
+         "expr": "gmv * params.super_coupon", "kinds": ["normal", "zero_amount"]},
+        {"id": "growth_fee", "label": "商家成长",
+         "expr": "gmv * params.growth_fee", "kinds": ["normal", "zero_amount"]},
+        {"id": "logistics", "label": "物流费",
+         "expr": "gmv * params.logistics", "kinds": ["normal", "zero_amount"]},
         {"id": "order_service", "label": "订单服务费",
          "expr": "orders * params.order_service",
          "kinds": ["normal", "refunded"]},
@@ -351,10 +357,10 @@ DEFAULTS: dict = {
     "by_country": {},
     "formulas": {
         "gross_profit": "gmv - cost",
-        "total_fees": ("dispatch + platform_commission + tx_fee + cashback"
-                       " + ads + affiliate + order_service"),
-        "net": ("gmv - cost - dispatch - platform_commission - tx_fee - cashback"
-                " - ads - affiliate - order_service"),
+        # 费用合计 = 参数表里所有费用项之和（自动，不用逐项列）
+        "total_fees": "fees_total",
+        # 净利 = GMV - 成本 - 费用合计。加一项费用只改参数表，这里永远不用动。
+        "net": "gmv - cost - fees_total",
         "net_rate": "net / gmv",
     },
 }
@@ -520,6 +526,10 @@ BUILTIN_CN: dict[str, str] = {
     "退款金额": "refund",
     "达人佣金": "commission",
     "联盟佣金": "commission",
+    # 「费用项合计」= 参数表里所有费用项之和（不含 GMV/成本/数量这些原始量）。
+    # 净利只引用它：以后加一项费用，自动就被扣掉，不用再改净利公式。
+    "费用项合计": "fees_total",
+    "各项费用合计": "fees_total",
     "广告花费": "ads",
 }
 
@@ -965,6 +975,27 @@ def compute_formulas(formulas: dict, ctx: dict,
     return values, issues
 
 
+def check_expr(expr: str, ctx: dict,
+               aliases: dict[str, str] | None = None) -> tuple[bool, str]:
+    """把一条公式试算一遍，返回 (能不能算, 错误说明)。
+
+    保存配置时用它挡住「写了个不存在的名字」：以前这种公式能存进去，
+    核算时静默按 0 算，用户看着数字正常、其实是漏扣了一整项费用。
+    ctx 里给每个认识的变量一个数就行（不用真值），只做名字检查。
+    """
+    text = str(expr or "").strip()
+    if not text:
+        return True, ""
+    try:
+        code = _apply_aliases(text, aliases or {})
+        safe_eval(code, dict(ctx))
+        return True, ""
+    except FormulaError as e:
+        return False, str(e)
+    except Exception as e:  # noqa: BLE001
+        return False, f"公式写法有问题：{e}"
+
+
 def _apply_aliases(expr: str, aliases: dict[str, str]) -> str:
     """把公式里的中文名换成内部变量名。
 
@@ -977,6 +1008,9 @@ def _apply_aliases(expr: str, aliases: dict[str, str]) -> str:
     if not pairs:
         return str(expr or "")
     alt = "|".join(re.escape(k) for k, _ in pairs)
-    pat = re.compile(r"(?<![A-Za-z0-9_])(" + alt + r")(?![A-Za-z0-9_])")
+    # 前后都不许紧贴「字母/数字/下划线/汉字」：
+    # 否则「物流费率X」会被拆成「物流费 + 率X」，报错信息就成了看不懂的英文混中文。
+    pat = re.compile(r"(?<![A-Za-z0-9_\u4e00-\u9fff])(" + alt + r")"
+                     r"(?![A-Za-z0-9_\u4e00-\u9fff])")
     lookup = {k: v for k, v in pairs}
     return pat.sub(lambda m: lookup.get(m.group(1), m.group(0)), str(expr or ""))
