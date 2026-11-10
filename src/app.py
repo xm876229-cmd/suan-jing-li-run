@@ -892,6 +892,19 @@ def _dispatch(argv: list[str]) -> int:
         return cmd_autostart(rest)
     if cmd == "doctor":
         return cmd_doctor()
+    if cmd in ("selfcheck-ui", "ui-check"):
+        # 只验「窗口这一层」能不能加载：进了包里的 pyobjc / WKWebView 缺一块，
+        # 双击时才会闪一下就退，现场很难看出原因。这个命令能把问题提前暴露，
+        # 真机上打不开时也让用户有一条能一次说清的命令。
+        try:
+            import webview
+            from webview.platforms import cocoa  # noqa: F401
+            print("窗口组件：webview "
+                  + str(getattr(webview, "__version__", "?")) + " + cocoa 后端 可用")
+            return 0
+        except Exception as e:  # noqa: BLE001
+            print(f"窗口组件不可用：{e}")
+            return 1
 
     # 不认识的子命令：当成 cli 参数，兼容老用法
     return cmd_run(argv)

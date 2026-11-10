@@ -136,12 +136,10 @@ jobs:
           echo "===== 4) 桥日志尾部 ====="
           tail -20 /tmp/jingli-serve.log || true
           echo
-          echo "===== 5) 窗口后端能否加载（不建窗口）====="
-          python3 - <<'PY'
-          import webview
-          from webview.platforms import cocoa
-          print("webview", getattr(webview, "__version__", "?"), "| cocoa 后端导入 ok")
-          PY
+          echo "===== 5) 窗口后端（在打包产物里验，不是 pip 环境）====="
+          "$APP" selfcheck-ui
+          echo "Frameworks 里的 pyobjc 框架："
+          ls "$APP/Contents/Frameworks" | grep -iE '^(objc|AppKit|Foundation|WebKit)' || true
           if [ "$OK" != "1" ]; then
             echo "::error::桥没起来，接口打不通"
             exit 1

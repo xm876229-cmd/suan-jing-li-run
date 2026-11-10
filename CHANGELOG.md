@@ -4,6 +4,38 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.24.85] - 2026-11-10
+
+**补上一个验证盲区：以前验窗口用的是 pip 环境，不是打包后的程序。**
+
+### 一、盲区在哪
+
+Mac 包第一次云端构建时，第 5 步写的是：
+
+```
+python3 -c "import webview; from webview.platforms import cocoa"
+```
+
+跑的是 runner 上那个 pip 装出来的 Python，**不是** `净利助手.app` 里的东西。
+也就是说：就算 pyobjc 没打进包，这一步照样绿。
+
+而窗口组件缺失的后果是——双击闪一下就退，用户完全看不出原因。
+
+### 二、改法
+
+- 新增隐藏命令 `selfcheck-ui`：在**程序自己**里 import `webview` 和
+  `webview.platforms.cocoa`，成功打印版本、失败打印原因并返回 1
+- 云端第 5 步改成执行打包产物里的这个命令，并列出 `Contents/Frameworks`
+  里的 pyobjc 框架（AppKit / Foundation / WebKit）
+- 真机上打不开时，让用户跑一条命令就能说清问题：
+  `/Applications/净利助手.app/Contents/MacOS/JingLiHelper selfcheck-ui`
+
+### 三、这次检查还确认了什么
+
+- `Contents/Frameworks` 里确实有 AppKit / Foundation / CoreFoundation
+- `默认配置`、`默认数据`、`浏览器扩展` 都在包里
+- Info.plist：`com.jingli.helper` / `0.24.85`
+
 ## [v0.24.84] - 2026-11-10
 
 **Mac 包补齐：默认配置与成本表真的落盘；首次诊断不再看到空目录。**
