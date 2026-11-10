@@ -142,6 +142,44 @@ def check(path: Path) -> list[str]:
     return check_text(path.read_text(encoding="utf-8"))
 
 
+def _js_syntax_error(code: str) -> str:
+    """用 node --check 验一遍内嵌脚本的语法（没装 node 就跳过）。
+
+    为什么非加不可：0.24.87 有两行正则少写了一个右括号
+    （`(after && !/^[…]/.test(after) ? ' ' : ''`），整个前端脚本语法错，
+    界面停在「正在读取店铺…」、所有按钮都点不动。
+    而当时的 check_ext 只查「函数有没有定义」，语法错照样报 OK，
+    于是这个版本被打包、发布，用户装完才发现用不了。
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    if not shutil.which("node"):
+        return ""
+    path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(code)
+            path = f.name
+        r = subprocess.run(["node", "--check", path], capture_output=True,
+                           text=True, timeout=60)
+        if r.returncode != 0:
+            lines = [ln.strip() for ln in (r.stderr or "").strip().splitlines() if ln.strip()]
+            return " ".join(lines[:4])[:400]
+    except Exception:  # noqa: BLE001
+        return ""
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    return ""
+
+
 def check_ui() -> list[str]:
     """界面（bridge/ui.py）里那段内嵌 JS 也要查。
 
@@ -155,7 +193,11 @@ def check_ui() -> list[str]:
     except Exception as e:  # noqa: BLE001
         return [f"（界面渲染失败：{e}）"]
     blocks = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
-    missing = check_text("\n".join(blocks))
+    code = "\n".join(blocks)
+    syntax = _js_syntax_error(code)
+    if syntax:
+        return [f"语法错误（浏览器里会整页失灵）：{syntax}"]
+    missing = check_text(code)
     # 导航里有这个页面，HTML 里却没有对应区块：点进去是空白，
     # 而且脚本里对它的引用全是空转（v0.24.10 把「导入数据」整页删掉就是这样）
     views = set(re.findall(r'data-view="([a-z0-9-]+)"', html))
@@ -179,7 +221,8 @@ def main() -> int:
         else:
             print(f"[OK]   {rel}")
     if bad:
-        print("\n有函数被调用但找不到定义，运行时会抛 ReferenceError 并静默失败。")
+        print("\n前端脚本有问题：语法错会让整页失灵（停在「正在读取店铺…」），\n"
+          "引用了不存在的函数则会在点到那个功能时才炸。都必须在打包前修掉。")
         return 1
     return 0
 

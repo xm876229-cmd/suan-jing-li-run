@@ -4830,9 +4830,13 @@ function renderFormulaTray(){
     const s0 = inp.selectionStart ?? inp.value.length;
     const s1 = inp.selectionEnd ?? s0;
     const before = inp.value.slice(0, s0), after = inp.value.slice(s1);
-    // 挨着变量/数字时补空格，免得插出「商品成本平台佣金」这种粘在一起的写法
-    const pre = (before && !/[\s(+*/-]$/.test(before)) ? ' ' : '';
-    const suf = (after && !/^[\s)+*/-]/.test(after) ? ' ' : '';
+    // 挨着变量/数字时补空格，免得插出「商品成本平台佣金」这种粘在一起的写法。
+    // 这里不用正则、改用 includes，是为了少一层括号嵌套。
+    // 0.24.87 就是这两行少写了一个右括号（`(after && !/…/.test(after) ? …`），
+    // 整个前端脚本语法错，页面停在「正在读取店铺…」、所有按钮都点不动。
+    const tail = before.slice(-1), head = after.slice(0, 1);
+    const pre = (tail && !' \t(+*/-'.includes(tail)) ? ' ' : '';
+    const suf = (head && !' \t)+*/-'.includes(head)) ? ' ' : '';
     const ins = pre + name + suf;
     inp.value = before + ins + after;
     const i = Number(inp.dataset.fi);
