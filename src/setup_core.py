@@ -49,9 +49,10 @@ KEEP_DIRS = ["数据", "报表", "config", "output", "data"]
 def default_install_dir() -> Path:
     """默认安装位置：当前用户目录下，按用户安装，不需要管理员权限。"""
     if not IS_WIN:
-        # macOS 的「安装」就是把 .app 拖进 /Applications；这里只在源码模式下用到
+        # macOS 的「安装」就是把 .app 拖进 /Applications，没有注册表可查。
+        # 这里返回程序自己所在位置，别把数据目录当成"安装目录"报给用户。
         from src import paths
-        return paths.DATA_HOME
+        return paths.ROOT
     base = os.environ.get("LOCALAPPDATA") or str(Path.home())
     return Path(base) / APP_ID
 

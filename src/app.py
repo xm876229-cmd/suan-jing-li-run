@@ -898,9 +898,24 @@ def _dispatch(argv: list[str]) -> int:
         # 真机上打不开时也让用户有一条能一次说清的命令。
         try:
             import webview
-            from webview.platforms import cocoa  # noqa: F401
-            print("窗口组件：webview "
-                  + str(getattr(webview, "__version__", "?")) + " + cocoa 后端 可用")
+            if sys.platform == "darwin":
+                from webview.platforms import cocoa  # noqa: F401
+            # Windows 的后端依赖 pythonnet（pip 环境里可能没装），
+            # 这个命令的意义主要在 Mac 上，别的平台只验 webview 本身能导入。
+            # pywebview 没有 __version__，用包元数据；取不到就写「已加载」
+            try:
+                from importlib.metadata import version as _pkg_ver
+                _wv = _pkg_ver("pywebview")
+            except Exception:  # noqa: BLE001
+                _wv = "已加载"
+            try:
+                from importlib.metadata import version as _pkg_ver2
+                _py = _pkg_ver2("pyobjc-core")
+            except Exception:  # noqa: BLE001
+                _py = ""
+            _suffix = " + cocoa 后端 可用" if sys.platform == "darwin" else ""
+            print(f"窗口组件：pywebview {_wv}{_suffix}"
+                  + (f"（pyobjc {_py}）" if _py else ""))
             return 0
         except Exception as e:  # noqa: BLE001
             print(f"窗口组件不可用：{e}")

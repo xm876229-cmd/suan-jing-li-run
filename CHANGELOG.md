@@ -4,6 +4,17 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.24.86] - 2026-11-10
+
+**诊断信息的小修：让「窗口组件」和「安装目录」在 Mac 上说得准。**
+
+- `selfcheck-ui` 打印真实的 pywebview / pyobjc 版本（pywebview 没有 `__version__`，
+  之前显示成 `?`）；非 macOS 上只验 webview 自身能导入，不再因为
+  缺 `AppKit` 报错
+- macOS 数据目录改成唯一出处 `paths.mac_data_home()`，
+  原来 `_data_root()` 和 `describe()` 各写了一遍同样的路径，容易改一处漏一处
+- 诊断里的「安装目录」在 macOS 上原来显示成数据目录，改成显示程序位置
+
 ## [v0.24.85] - 2026-11-10
 
 **补上一个验证盲区：以前验窗口用的是 pip 环境，不是打包后的程序。**

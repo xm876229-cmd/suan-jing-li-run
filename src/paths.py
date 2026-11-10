@@ -53,6 +53,15 @@ def app_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def mac_data_home() -> Path:
+    """macOS 上数据放哪（唯一出处，别再各处手写这个路径）。
+
+    .app 在 /Applications 里是只读的；未签名应用从「下载」双击还会被系统
+    搬到随机只读路径（App Translocation）。所以数据必须放在这个用户目录下。
+    """
+    return Path.home() / "Library" / "Application Support" / "JingLiHelper"
+
+
 def resource_root() -> Path:
     """**只读资源**所在目录：浏览器扩展、文档、随包默认配置。
 
@@ -106,7 +115,7 @@ def _data_root() -> Path:
         return Path(env).expanduser().resolve()
     if sys.platform == "darwin" and is_frozen():
         # macOS：.app 内部不能写，放到系统标准的「应用支持」目录
-        return Path.home() / "Library" / "Application Support" / "JingLiHelper"
+        return mac_data_home()
     return app_root()
 
 
@@ -804,8 +813,7 @@ def describe() -> dict[str, str]:
     # 数据根是不是这个程序自己的目录，一句话说清 —— 用户最关心的就是
     # 「安装版和免安装版会不会互写数据」，这里直接给结论。
     mac_default = (sys.platform == "darwin" and is_frozen()
-                   and str(DATA_HOME) == str(Path.home() / "Library"
-                                             / "Application Support" / "JingLiHelper"))
+                   and str(DATA_HOME) == str(mac_data_home()))
     if env_on:
         scope = "JINGLI_HOME 指定（注意：与程序目录不同）"
     elif same:
