@@ -66,6 +66,46 @@ jobs:
           echo "== 源码模式冒烟：导入全部模块 =="
           python3 -c "import sys;sys.path.insert(0,'.');import src.paths,src.calc,src.report,src.loader,src.setup_core,src.platform_os;print('import ok')"
 
+      - name: 真跑一遍（诊断 / 起桥 / 接口 / 配置落盘）
+        run: |
+          set -uo pipefail
+          APP="dist/净利助手.app/Contents/MacOS/JingLiHelper"
+          echo "===== 1) 诊断（会顺带建数据目录、补默认配置）====="
+          "$APP" doctor
+          echo
+          echo "===== 2) 数据目录落在哪 ====="
+          ls -la "$HOME/Library/Application Support/JingLiHelper" || true
+          echo "配置个数：$(ls "$HOME/Library/Application Support/JingLiHelper/配置" 2>/dev/null | wc -l)"
+          echo "成本表行数：$(wc -l < "$HOME/Library/Application Support/JingLiHelper/数据/成本/master.csv" 2>/dev/null || echo 0)"
+          echo
+          echo "===== 3) 起桥 → 打接口 ====="
+          "$APP" serve > /tmp/jingli-serve.log 2>&1 &
+          SERVE_PID=$!
+          OK=0
+          for i in $(seq 1 20); do
+            sleep 1
+            if curl -s --max-time 3 http://127.0.0.1:8765/api/selfcheck > /tmp/selfcheck.json; then OK=1; break; fi
+          done
+          echo "自检接口："; head -c 500 /tmp/selfcheck.json 2>/dev/null; echo
+          echo "活口（店铺/在线/端口）："; curl -s --max-time 3 http://127.0.0.1:8765/api/live | head -c 300; echo
+          echo "计划接口："; curl -s --max-time 3 http://127.0.0.1:8765/api/schedules | head -c 200; echo
+          kill $SERVE_PID 2>/dev/null || true
+          sleep 1
+          echo
+          echo "===== 4) 桥日志尾部 ====="
+          tail -20 /tmp/jingli-serve.log || true
+          echo
+          echo "===== 5) 窗口后端能否加载（不建窗口）====="
+          python3 - <<'PY'
+          import webview
+          from webview.platforms import cocoa
+          print("webview", getattr(webview, "__version__", "?"), "| cocoa 后端导入 ok")
+          PY
+          if [ "$OK" != "1" ]; then
+            echo "::error::桥没起来，接口打不通"
+            exit 1
+          fi
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
