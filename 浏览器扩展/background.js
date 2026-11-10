@@ -538,13 +538,33 @@ async function apiPost(url, body, extraHeaders) {
     if (v) headers[k] = String(v);
   }
 
-  const resp = await fetch(url, {
-    method: "POST",
-    credentials: "include",
-    headers,
-    body: JSON.stringify(body),
-  });
-  const text = await resp.text();
+  // fetch **必须带超时**。
+  //
+  // 2026-11-05 15:31 实测：MYT-V1 卡在「已提交，等平台生成」七分钟没动静，
+  // 卡片不动、也不进待补队列。原因是「等订单生成」那个循环里的请求发出去后
+  // 一直没有响应（MV3 后台上/切网/平台限流都会这样），而 fetch 默认不超时，
+  // `await` 就永远不返回 —— 后面的「等 100 秒就记待补」根本没机会执行。
+  //
+  // 45 秒：订单导出这类接口正常 1~3 秒返回，45 秒足够宽松；
+  // 超时按"网络错误"抛，postRetry 会照常重试，最终仍拿不到就交给待补队列。
+  const ctl = new AbortController();
+  const timer = setTimeout(() => { try { ctl.abort(); } catch (e) { /* 忽略 */ } }, 45000);
+  let resp, text;
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: JSON.stringify(body),
+      signal: ctl.signal,
+    });
+    text = await resp.text();
+  } catch (e) {
+    if (ctl.signal.aborted) throw new Error("NetworkError: 请求 45 秒没有响应");
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   let json;
   try { json = JSON.parse(text); } catch (e) { json = { raw: text.slice(0, 300) }; }
   if (!resp.ok) throw new Error(`HTTP ${resp.status} ${text.slice(0, 200)}`);
@@ -1010,9 +1030,13 @@ async function harvestPendingOrdersInner(log, shopId, onlyRange) {
   if (!pendingOrders.length) return 0;
   const keep = [];
   let got = 0;
+  // 这一轮补回来的都是哪几家、哪个区间（补完要挨个叫桥核算）
+  const landed = [];
   for (const it of pendingOrders) {
     if (Date.now() - (it.at || 0) > 2 * 3600 * 1000) continue;   // 太旧，丢弃
     if (shopId && String(it.shop_id || "") !== String(shopId)) { keep.push(it); continue; }
+    // 这一份是什么时候开始收的：上传落在它之后，桥拿它核对"是这次落的"
+    const _t0 = Date.now();
     // 只收「跟本轮同一个区间」的那份：区间不一样的话，把它当成本轮的数据
     // 就是拿 8 月的订单去算 9 月——数字偏了，界面上还看不出问题。
     // 留着它，下一分钟的闹钟会按它自己的区间正常补回。
@@ -1096,6 +1120,8 @@ async function harvestPendingOrdersInner(log, shopId, onlyRange) {
       if (log) log(`   订单已自动补回：${saved.path}`);
       appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 已补回：${saved.path}`);
       got++;
+      landed.push({ shop_id: it.shop_id, shop_name: it.shop_name,
+                    range: it.range || {}, since: _t0 });
       // 立刻从 storage 里摘掉这条：整轮跑完才写回的话，中途被浏览器
       // 回收一次，下次又会把已经补好的再补一遍。
       try {
@@ -1113,6 +1139,62 @@ async function harvestPendingOrdersInner(log, shopId, onlyRange) {
     }
   }
   await skSet({ pendingOrders: keep });
+
+  // 补回来的订单，要有人去算。
+  //
+  // 以前这里只把文件传上去就结束了，指望桥的「待补」队列去接。但那条队列
+  // 只在这轮核算**明确知道订单没到**时才登记；而收件箱里往往还躺着同月的
+  // 旧导出，桥的预检看见它就放行、算完还顺手把待补摘掉——于是新订单落地后
+  // 没人再算，卡片永远停在「等订单：到了自动算」。
+  // 实测 2026-11-05：MYT-J1 / PHT-B1 / PHT-W1 三家就这么卡住，报表一直不出来。
+  //
+  // 只在闹钟这条路（log 为空）里叫桥算：流程内的 harvest 是为了"当场补回来接着跑"，
+  // 那一步的核算紧跟在后，再叫一次就成同一份表算两遍。
+  if (!log && got > 0) {
+    const seen = new Set();
+    for (const d of landed) {
+      const key = `${d.shop_id}|${(d.range || {}).startDate || ""}|${(d.range || {}).to || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      try {
+        const rng = d.range || {};
+        const to = rng.to || (rng.endDateExclusive ? shiftDate(rng.endDateExclusive, -1) : "");
+        const r = await fetch(`${BRIDGE}/run`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            store: d.shop_name || "",
+            shop_id: d.shop_id || "",
+            from: rng.startDate || "",
+            to,
+            // 订单是刚才落的：桥核对文件时间后会放行；万一还缺点别的，
+            // 它会把这次压进待补，不会拿旧表凑一版。
+            fresh: true,
+            since: d.since || 0,
+            replace: true,
+            // 桥的待补线程可能已经抢先算完了（它也盯着这份订单）：
+            // 刚算过 3 分钟内就跳过，别把同一份表覆盖两遍。
+            skip_if_done: true,
+          }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (j && j.ok && j.skipped) {
+          // 桥的待补线程抢先算完了，这一单跳过是正常的，不是失败
+          appendTaskLog(`[补订单] ${d.shop_name || d.shop_id} 刚算过，跳过重复补算`);
+        } else if (j && j.ok) {
+          appendTaskLog(`[补订单] ${d.shop_name || d.shop_id} 已自动出报表：`
+                        + `${String(j.report_name || "").slice(0, 40)}`);
+        } else {
+          appendTaskLog(`[补订单] ${d.shop_name || d.shop_id} 补算没成：`
+                        + `${String((j && j.error) || "").slice(0, 120)}`);
+        }
+      } catch (e) {
+        appendTaskLog(`[补订单] ${d.shop_name || d.shop_id} 补算出错：`
+                      + `${(e && e.message) || e}`);
+      }
+    }
+  }
+
   return got;
 }
 
@@ -1275,6 +1357,17 @@ async function runOrders({ startMs, endMs }, log, opts = {}) {
   log("提交订单导出任务（每次重新生成，不复用旧文件）…");
   const fullTask = await createTask(startMs, endMs, wantName);
   log(`任务已创建：${fullTask}`);
+  if (opts && opts.submitOnly) {
+    // 只提交、不等生成：把「等平台」的时间让给 SKU/联盟/广告。
+    // 先记成待补，其余三项跑完再回来收；收不到就交给桥的待补线程。
+    await rememberPendingOrder({
+      host, taskId: fullTask, name: wantName, range_tag: rTag,
+      range: CURRENT_RANGE || null,
+      shop_id: CURRENT_SHOP.shop_id || "", shop_name: CURRENT_SHOP.shop_name || "",
+      at: Date.now(),
+    });
+    return { queued: true, task: fullTask, name: wantName, range_tag: rTag };
+  }
   // 等 100 秒（25×4s）。
   //
   // 为什么不是等更久：实测订单这一步最耗时（小店 40~90 秒，大店 3~5 分钟），
@@ -1726,6 +1819,10 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
         raw = await resp.text();
         j = JSON.parse(raw);
       } catch (err) {
+        if (/^\s*(validating|<!doctype|<html)/i.test(raw)) {
+          return { error: `接口被风控拦住（返回 validating 页面）｜${probe}`,
+                   page: page + 1, botblocked: true };
+        }
         return {
           error: `第 ${page + 1} 页请求失败：${(err && err.name) || ""} ${(err && err.message) || err}｜${probe}`,
           page: page + 1,
@@ -1807,6 +1904,7 @@ async function pagePullSkuFromProductList(host, log) {
     const all = [];
     for (let page = 1; page <= 80; page++) {
       let j;
+      let raw = "";
       try {
         const resp = await fetch(u, {
           method: "POST",
@@ -1814,8 +1912,14 @@ async function pagePullSkuFromProductList(host, log) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ page, size: 200, is_need_toggle_status: true }),
         });
-        j = JSON.parse(await resp.text());
+        raw = await resp.text();
+        j = JSON.parse(raw);
       } catch (err) {
+        // 平台风控会回一段 "validating..." 或者一个 HTML 页，JSON.parse 报的
+        // "Unexpected token 'v'" 看着像程序坏了，其实是被拦了。
+        if (/^\s*(validating|<!doctype|<html)/i.test(raw)) {
+          return { error: "接口被风控拦住（返回 validating 页面），改走导表/分段", botblocked: true };
+        }
         return { error: `第 ${page} 页请求失败：${(err && err.message) || err}` };
       }
       if (!j || j.code !== 0) {
@@ -1885,6 +1989,9 @@ async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, wai
     // 就别在这儿干等两分钟（实测一次能白等 4 分钟）。
     for (let i = 0; i < tries; i++) {
       await new Promise((r2) => setTimeout(r2, gap));
+      // 等文件生成的时候也要能停：这里一等就是几十秒，不检查的话
+      // 点了停止要等整段轮询走完才收手。
+      throwIfStopped();
       try {
         const fr = await fetch(fileUrl, { credentials: "include" });
         const ct = fr.headers.get("content-type") || "";
@@ -2025,8 +2132,8 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
       });
       if (!got || !got.path) {
         // 不再退回「浏览器下载」那条：会弹「另存为」把自动化卡住。
-        // 直接交给下面的 ①-b 深度抓取（虽然只有第一页，但不会卡住）。
-        log(`   自动导出没成：${(got && got.error) || "未知原因"}；改用页面响应抓取`);
+        // 直接交给下面的 ①-b 分段取（快），它也不成再走 ①-c 深度抓取。
+        log(`   自动导出没成：${(got && got.error) || "未知原因"}；改用分段取`);
       }
       if (got && got.path) {
         log(`   已接住导出表：${got.path}（${Math.round((got.bytes || 0) / 1024)} KB）`);
@@ -2040,18 +2147,35 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     }
   }
 
-  // ①-b 深度抓取：直接读页面自己成功的那次 sku/list 响应。
-  //
-  //   为什么必须走这条：平台对这条接口的校验极严，我们自己发请求一律被判
-  //   98001021（哪怕 URL 参数、请求体、请求头、页面上下文全部对齐）。
-  //   但页面自己发的请求是成功的——既然拿不到「正确的请求长什么样」，
-  //   就直接拿「页面已经拿到的答案」：用 chrome.debugger 挂在商品分析页上，
-  //   等页面发一次请求，用 Network.getResponseBody 把响应体读出来。
-  //
-  //   这就是用户手动导出的那份「商品数据分析 → 按 SKU」的数据本身。
+  // ①-b 兜底：list 接口分段。
+  //     放在深度抓取**前面**：实测这条 30 秒内能拿到（DXM 12:02:58→12:03:27 取到 231 条），
+  //     而深度抓取要挂调试器等页面自己发请求，等到 50 秒还是失败。先快后慢。
+  if (!done.length) {
+    const all = await pagePullSkuRanged(host, startDate, endDateExclusive, log);
+    if (all.length) {
+      const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
+      const saved = await uploadToBridge(`sku_list_${startDate}_${shiftDate(endDateExclusive, -1)}.json`, bytes.buffer, "mapping");
+      log(`①-b 已保存：${saved.path}（${all.length} 条）`);
+      done.push(`list 分段 ${all.length} 条`);
+      // 同一批数据顺便生成「链接资料」（链接 → 款式编码），
+      // 免得再单独跑一次链接资料任务
+      try {
+        const linkSaved = await saveLinkInfoCsv(all, today, log);
+        if (linkSaved) done.push(`链接资料 ${linkSaved.sku_count} 条`);
+      } catch (e) {
+        log(`   链接资料导出失败（不影响其余取数）：${(e && e.message) || e}`);
+      }
+    }
+  }
+
+  // ①-c 深度抓取：用 chrome.debugger 挂在商品分析页上，
+  //     等页面自己发一次 sku/list，用 Network.getResponseBody 把响应体读出来。
+  //     为什么排在最后：平台对这条接口校验极严，我们自己发一律 98001021；
+  //     拿页面自己的响应对得上，但要等它发请求，实测挂了 53 秒还是没等到，
+  //     而前面的分段取 30 秒就能拿到。所以只有在分段取失败时才走这条。
   if (!done.length) {
     try {
-      log("①-b 深度抓取页面自己的商品SKU响应…");
+      log("①-c 深度抓取页面自己的商品SKU响应（最后手段）…");
       const cap = await deepCaptureSku(host, await skuPageHint(), log);
       if (cap.error) {
         log(`   深度抓取失败：${cap.error}`);
@@ -2093,7 +2217,8 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   const bgTries = 30;      // 最多约 2 分钟（90 次实测拖到 8 分钟，白等）
   const bgWait = 2000;
   const startBgExport = () => {
-    // 放最后启动：它也要用页面标签页，跟③ 并发会互相干扰（表现为 Failed to fetch）
+    // 放最后启动：它也要用同一个页面标签页，跟前面几步并发会互相干扰
+    // （表现是 Failed to fetch）
     pagePullSkuByExport(host, startDate, endDateExclusive, bgTries, bgWait, log)
       .then((saved) => {
         log(`② 商品SKU导出完成（后台）：${saved.path}`);
@@ -2102,25 +2227,6 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
       .catch((e) => log(`② 商品SKU导出（后台）：${(e && e.message) || e}`));
   };
   // 故意不 await：不让这 1~4 分钟拖住报表
-
-  // ③ 兜底：list 接口分段
-  if (!done.length) {
-    const all = await pagePullSkuRanged(host, startDate, endDateExclusive, log);
-    if (all.length) {
-      const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
-      const saved = await uploadToBridge(`sku_list_${startDate}_${shiftDate(endDateExclusive, -1)}.json`, bytes.buffer, "mapping");
-      log(`③ 已保存：${saved.path}（${all.length} 条）`);
-      done.push(`list 分段 ${all.length} 条`);
-      // 同一批数据顺便生成「链接资料」（链接 → 款式编码），
-      // 免得再单独跑一次链接资料任务
-      try {
-        const linkSaved = await saveLinkInfoCsv(all, today, log);
-        if (linkSaved) done.push(`链接资料 ${linkSaved.sku_count} 条`);
-      } catch (e) {
-        log(`   链接资料导出失败（不影响其余取数）：${(e && e.message) || e}`);
-      }
-    }
-  }
 
   if (skuTableSaved) {
     log("② 本轮已按区间导好商品SKU表，后台不再重复排一份");
@@ -2962,7 +3068,7 @@ try {
       // 心跳跟轮询绑在一起：界面靠它判断「这家店的浏览器开着没」。
       // 每分钟一次，桥那边超过 150 秒没收到就算离线。
       if (a.name === "pending-watch") beatBridge().catch(() => {});
-      if (a.name === "pending-watch") consumePending().catch(() => {});
+      if (a.name === "pending-watch") fastPoll().catch(() => {});
       // 排队中的订单导出：每分钟看一眼，生成好就自动下载回传。
       // 大店导出入队要几分钟，不能靠人守着。
       if (a.name === "pending-watch") harvestPendingOrders(null, "").catch(() => {});
@@ -3434,6 +3540,57 @@ const EXPORT_FLOWS = {
 };
 
 /** 在页面里按文案点按钮（取最内层、可见的那个）。 */
+/* GMV Max 账户的广告面板，导出是**一个图标**（右上角下载/导出小图标，
+   没有「导出」两个字）。实测 Your-Self Home / LR Stationery（都是 PH 的
+   GMV Max 账户）：文字按钮一个都找不到，可见按钮只剩卖家后台侧边栏，
+   于是这两家每轮都取不到广告表 —— 报表缺一块，净利虚高。
+   文字找不到时按 aria-label / title / class 里的 export|download 兜底点。 */
+async function clickIconExport(tabId) {
+  try {
+    const rs = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true }, world: "MAIN",
+      func: () => {
+        const kw = /(导出|下載|下载|export|download)/i;
+        const sel = "button,[role=button],[aria-label],[data-testid],[class*=export],[class*=Export]";
+        for (const e of Array.from(document.querySelectorAll(sel))) {
+          const sig = [
+            e.getAttribute("aria-label") || "",
+            e.getAttribute("title") || "",
+            e.getAttribute("data-testid") || "",
+            typeof e.className === "string" ? e.className : "",
+          ].join(" ");
+          if (!kw.test(sig)) continue;
+          if (e.offsetParent === null) continue;      // 不可见的不点
+          if (e.disabled) continue;
+          try { e.click(); } catch (err) { continue; }
+          return sig.replace(/\s+/g, " ").trim().slice(0, 40);
+        }
+        return "";
+      },
+    });
+    for (const r of rs || []) if (r && r.result) return String(r.result);
+  } catch (e) { /* 忽略 */ }
+  return "";
+}
+
+/* 页面上到底有没有广告面板。
+   不能只看 URL：菲律宾的 /ads-creation/dashboard 会被渲染成卖家后台首页
+   （外层 62 个按钮全是「管理订单 / 管理退货 / 履约设置」这类侧边栏）。
+   这时如果判成「已在广告页」，就不会去点侧边栏「店铺广告」，
+   最后必然找不到导出按钮 —— 2026-11-04 两家 PH 店就是这么失败的。 */
+async function hasAdsPanel(tabId) {
+  try {
+    const rs = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true }, world: "MAIN",
+      func: () => {
+        const t = (document.body && document.body.innerText) || "";
+        return /(GMV\s*Max|广告计划|推广系列|创意作品|广告数据|广告花费|总花费)/i.test(t);
+      },
+    });
+    return (rs || []).some((r) => r && r.result === true);
+  } catch (e) { return false; }
+}
+
 async function clickByTextIn(tabId, want) {
   try {
     // allFrames 很关键：新版广告后台是嵌在 iframe 里的（外层只有卖家后台侧边栏），
@@ -3972,7 +4129,11 @@ async function exportViaApi(kind, host, log, opts = {}) {
       let onAds = false;
       try {
         const t0 = await chrome.tabs.get(tabId);
-        onAds = /ads-creation|ads-manager|\/ads\b/i.test(String((t0 && t0.url) || ""));
+        const urlOk = /ads-creation|ads-manager|\/ads\b/i.test(String((t0 && t0.url) || ""));
+        // URL 像广告页 ≠ 真的进去了。再确认页面里有广告面板（GMV Max / 广告计划…），
+        // 没有就当没进去，去点侧边栏「店铺广告」。
+        onAds = urlOk && (await hasAdsPanel(tabId));
+        if (urlOk && !onAds && log) log("   URL 是广告页但页面没渲染出广告面板，改从侧边栏进");
       } catch (e) { /* 忽略 */ }
       if (onAds) {
         if (log) log("   已在广告页，不再重复点侧边栏");
@@ -3997,6 +4158,14 @@ async function exportViaApi(kind, host, log, opts = {}) {
         clicked = await clickByTextIn(tabId, texts);
         if (clicked) break;
         await sleep(1500);
+      }
+      // 广告面板的导出是图标按钮，文字找不到时按图标兜底（见 clickIconExport）
+      if (!clicked && si === 0 && kind === "ads") {
+        const icon = await clickIconExport(tabId);
+        if (icon) {
+          clicked = true;
+          if (log) log(`   第 1 步没找到「${texts[0]}」，改用图标按钮：${icon}`);
+        }
       }
       if (log) log(`   第 ${si + 1} 步点「${texts[0]}」：${clicked}`);
       if (!clicked && si === 0) {
@@ -4080,9 +4249,12 @@ async function exportViaApi(kind, host, log, opts = {}) {
       if (log) log("   下载地址拿到了但取不到内容");
     }
 
-    // 拦截器没截到 → 退回「从接口响应里找文件地址」
-    if (log) log("   拦截器没截到文件，改从接口响应里找地址…");
-    for (let i = 0; i < 30 && !fileUrls.length; i++) await sleep(2000);
+    // 拦截器没截到 → 退回「从接口响应里找文件地址」。
+    // 这里原来等 60 秒（30×2s）。实测 DXM 12:01:05 起等到 12:02:05，一个地址都没有——
+    // 拦截器 0 条就已经说明这次点击没触发导出，再等也是白等。
+    // 20 秒足够「点了但还没回包」的情况，剩下的交给后面的 ①-b 分段取（30 秒内能拿到）。
+    if (log) log("   拦截器没截到文件，改从接口响应里找地址（最多等 20 秒）…");
+    for (let i = 0; i < 10 && !fileUrls.length; i++) await sleep(2000);
     if (!fileUrls.length) {
       return { error: "没在导出接口的响应里找到文件地址" };
     }
@@ -4675,6 +4847,13 @@ async function calcNow(range, log, opts = {}) {
         with_formula: (typeof opts.with_formula === "boolean" ? opts.with_formula : undefined),
         // 哪几类表沿用了当天已取的（桥只用来写日志，不影响算法）
         reused: opts.reused || [],
+        // fresh：这一轮是「运行」取的数，订单必须是**这次新落地**的。
+        // 收件箱里同月的旧导出照样盖得住区间，但那是上一次取数的快照——
+        // 桥要对一下文件时间，不达标就登记待补，不拿旧的先算一版。
+        // 「重算」不传这个（它要的就是本机现成的数据）。
+        fresh: !!opts.fresh,
+        // 这一轮是什么时候开始的（毫秒）：桥拿它判断订单是不是"这次"落的。
+        since: Number(opts.since || 0) || 0,
         // 重算：覆盖同一份报表，不又堆一个 (2)(3)
         replace: !!opts.replace }),
     });
@@ -4771,6 +4950,8 @@ function throwIfStopped() {
 }
 
 function startStopWatch(shopId) {
+  // 每一轮开始都必须复位：上一轮的停止标记留在这儿，会把这一轮开头就掐掉
+  // （2026-11-06 18:22 实测：新一轮刚提交导出就报「已手动停止」）。
   RUN_ABORT = false;
   if (STOP_TIMER) clearInterval(STOP_TIMER);
   STOP_TIMER = setInterval(async () => {
@@ -4782,10 +4963,31 @@ function startStopWatch(shopId) {
       const j = await r.json();
       if (j && j.stop) {
         RUN_ABORT = true;
-        appendTaskLog("[stop] 收到停止指令，正在收手…");
+        const used = Number(j.elapsed || 0);
+        appendTaskLog(`[stop] 收到停止指令，正在收手…（桥已等 ${used.toFixed(1)} 秒）`);
+        // 停止就要真停：这家店还挂着的「待补订单」一起撤掉。
+        // 不撤的话订单落地后闹钟还会补回来、又算一遍、又出一张表——
+        // 用户看到的就是「明明点了停止，夜里自己又跑起来了」。
+        try {
+          const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
+          const rest = (pendingOrders || []).filter(
+            (x) => String(x.shop_id || "") !== String(shopId || ""));
+          if (rest.length !== (pendingOrders || []).length) {
+            await skSet({ pendingOrders: rest });
+            appendTaskLog(`[stop] 撤掉 ${(pendingOrders || []).length - rest.length} 个待补订单`);
+          }
+        } catch (e) { /* 读不到就算了 */ }
+        // 回执：告诉桥「我这边真的退出了」，桥按这个时间算「停止用了多久」。
+        // 不回执的话桥只能干等 30 秒再自己收尾，用户看到的就是「按了没反应」。
+        try {
+          await fetch(`${BRIDGE}/api/run/stop-ack`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ shop_id: shopId || "", run_id: j.run_id || "" }),
+          });
+        } catch (e) { /* 桥不在就算了，主流程已经停了 */ }
       }
     } catch (e) { /* 桥不在就继续跑 */ }
-  }, 4000);
+  }, 1500);
 }
 
 function stopStopWatch() {
@@ -4846,6 +5048,10 @@ async function executeTask(task, range, log, opts = {}) {
         const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
         keepHosts = pendingOrders.map((x) => String(x.host || "")).filter(Boolean);
       } catch (e) { /* 读不到就不留 */ }
+      // 卖家页 / 联盟页**常留**：下一轮直接复用，省掉重开页面 + 重新学参数的
+      // 80~90 秒（实测 DXM 11:20 领到任务，11:22:50 才提交订单，全耗在这）。
+      // 只留这两类域名，广告页、SKU 导出页照旧关掉，标签页不会越堆越多。
+      keepHosts.push("seller-", "affiliate.tiktok.com");
       const n = await closeAllAutoTabs(keepHosts);
       if (n) log(`已关掉本轮开的 ${n} 个后台页`);
     } catch (e) { /* 忽略 */ }
@@ -4870,6 +5076,27 @@ async function executeTask(task, range, log, opts = {}) {
 // 只要有一条路通，任务就能跑起来。
 
 const PENDING_KEY = "pendingQueue";
+
+// 快速轮询：Chrome 的闹钟最小周期是 1 分钟，任务派下来后最坏要等 60 秒才被领走。
+// 三家店在三个浏览器里各等自己的闹钟，所以界面上看起来「没有同时启动」——
+// 实测 12:00:14 派发，DXM 12:00:21 领到、LR 12:01:06、Party 12:01:08，差了 54 秒。
+// 做法：闹钟一响就进入 55 秒的快轮询（每 3 秒问一次桥），
+// 把「派发 → 开跑」从 0~60 秒压到 3 秒内，三家基本同时动。
+// 领到任务后 consumePending 会一直跑到任务结束，这段时间里再进来直接返回。
+let _fastPolling = false;
+async function fastPoll(seconds = 55, every = 3) {
+  if (_fastPolling) return;
+  _fastPolling = true;
+  const until = Date.now() + seconds * 1000;
+  try {
+    while (Date.now() < until) {
+      try { await consumePending(); } catch (e) { /* 单次失败不影响后面 */ }
+      await new Promise((r) => setTimeout(r, every * 1000));
+    }
+  } finally {
+    _fastPolling = false;
+  }
+}
 
 async function consumePending() {
   // 两条来源：面板写的本地存储，以及面板通过桥中转的任务。
@@ -6018,8 +6245,138 @@ const TASK_IMPL = {
 };
 const TASK_HINT = { orders: "seller", sku: "seller", link: "seller", affiliate: "affiliate", ads: "seller" };
 
+/* 订单提交完就先去跑 SKU/联盟/广告，最后回头收订单。
+   想退回老流程（四步严格串行、订单先干等 100 秒）：把 ALL_FAST 改成 false，
+   老流程的代码原样留在 runAllSerial 里，不用改别的。 */
+const ALL_FAST = true;
+
 async function runTask(task, range, log, opts = {}) {
   if (task === "all") {
+    return ALL_FAST ? await runAllFast(range, log, opts)
+                    : await runAllSerial(range, log, opts);
+  }
+
+  return runOneTask(task, range, log, opts);
+}
+
+/* 快流程：订单只「提交」，不等生成；SKU / 联盟 / 广告三个不同接口并行跑；
+   三项都完事再回头收订单。总耗时从「订单等待 + 其余三步」压到
+   「max(订单生成, 其余三步)」。 */
+async function runAllFast(range, log, opts = {}) {
+  const out = {};
+  // 这一轮什么时候开始的：桥拿它判断订单是不是「这次」落地的。
+  // 必须在这里就记下——等订单生成几分钟后再取 Date.now()，
+  // 昨天那份同月文件也能混过去，正是要防的那个错。
+  if (!opts.since) opts.since = Date.now();
+  // 复用判定跟老流程一样：先认店，再问桥今天取过哪几类（同区间才算）
+  let reuse = {};
+  if (!opts.force) {
+    try {
+      await identifyShop(await ensureHost("seller", log), log, { force: true });
+    } catch (e) { /* 认不出就按现有身份走 */ }
+    reuse = await reuseToday(range);
+    const hit = Object.keys(reuse);
+    if (hit.length) {
+      log(`今天 ${(Object.values(reuse)[0] || {}).at || ""} 已取过这批数据（同一区间）：`
+          + hit.map((k) => TASK_CN[k] || k).join("、") + "，这次直接用");
+    }
+  }
+  for (const t of ["orders", "sku", "affiliate", "ads"]) {
+    if (!reuse[t]) continue;
+    out[t] = { reused: true, at: reuse[t].at || "", saved: reuse[t].file || "" };
+    log(`—— ${t}：复用今天 ${reuse[t].at || ""} 已取的那份 ——`);
+    await reportProgress(t, "done", { elapsed: 0, detail: `复用今日 ${reuse[t].at || ""} 的数据` });
+  }
+
+  // ① 订单：只提交任务，不等平台生成
+  if (!reuse.orders) {
+    await reportProgress("orders", "running");
+    try {
+      throwIfStopped();
+      log("—— 开始：orders（只提交，不等生成）——");
+      let r0;
+      try {
+        r0 = await runOneTask("orders", range, log, { ...opts, submitOnly: true });
+      } catch (e0) {
+        // `Failed to fetch` 几乎都是请求被浏览器/网络掐断，不是平台拒绝。
+        // 整步重来一次（重新准备页面和参数）比原地重试有效 —— 老流程实测过。
+        if (!/Failed to fetch|NetworkError/i.test(String(e0 && e0.message || e0))) throw e0;
+        log("订单提交被打断，8 秒后重来一次");
+        await sleep(8000);
+        throwIfStopped();
+        r0 = await runOneTask("orders", range, log, { ...opts, submitOnly: true });
+      }
+      out.orders = r0;
+      if (r0 && r0.saved) {
+        log(`订单直接就绪：${r0.saved}`);
+        await reportProgress("orders", "done", { detail: shortDetail(r0) });
+      } else {
+        log("订单任务已提交，先去跑其它三项");
+        await reportProgress("orders", "running", { detail: "已提交，等平台生成" });
+      }
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      out.orders = { error: msg };
+      log(`—— orders 提交失败：${msg}`);
+      await reportProgress("orders", "fail", { error: msg });
+    }
+  }
+
+  // ② SKU / 联盟 / 广告：三个不同接口，谁也不依赖谁，一起跑
+  const rest = ["sku", "affiliate", "ads"].filter((t) => !reuse[t]);
+  if (rest.length) log(`—— 并行开始：${rest.map((t) => TASK_CN[t] || t).join(" / ")} ——`);
+  const settled = await Promise.allSettled(rest.map((t) => {
+    throwIfStopped();
+    return runOneTask(t, range, log, { force: !!opts.force });
+  }));
+  for (let i = 0; i < rest.length; i++) {
+    const t = rest[i];
+    const r = settled[i];
+    if (r.status === "fulfilled") {
+      out[t] = r.value;
+      await reportProgress(t, "done", { detail: shortDetail(r.value) });
+    } else {
+      const msg = String((r.reason && r.reason.message) || r.reason || "失败");
+      out[t] = { error: msg };
+      log(`—— ${t} 失败：${msg}`);
+      await reportProgress(t, "fail", { error: msg });
+    }
+  }
+
+  // ③ 回头收订单：这时平台多半已经生成好了（只查记录，不建新任务）
+  const ordErr = String((out.orders && out.orders.error) || "");
+  const ordWaiting = !!(out.orders && (out.orders.queued || /排队/.test(ordErr)));
+  if (ordWaiting) {
+    try {
+      throwIfStopped();
+      const got = await harvestPendingOrders(log, CURRENT_SHOP.shop_id, range);
+      if (got > 0) {
+        out.orders = { saved: "已补回", collected: true };
+        log("订单已生成，已补回（不用再等下一轮）");
+        await reportProgress("orders", "done", { detail: "已补回" });
+      } else {
+        log("订单还在平台生成，已记待补：到了桥会自动下载并出报表");
+        // 必须留下「排队」这个标记：下游 runTaskThenCalc 靠它决定
+        // 「先不算、登记成待补算」。少了它就会硬算 → 缺订单表 → 这轮白跑。
+        out.orders = { error: "订单导出已排队：平台还在生成，到了桥会自动下载并出报表" };
+        await reportProgress("orders", "skip", { detail: "等订单：到了自动算" });
+      }
+    } catch (e) {
+      log("订单这次没收回，交给桥的待补线程（到了会自动算）");
+      out.orders = { error: "订单导出已排队：补回时出错，桥会继续重试" };
+      await reportProgress("orders", "skip", { detail: "等订单：到了自动算" });
+    }
+  }
+  return out;
+}
+
+/* 老流程：四步严格串行，订单那步先干等 100 秒再往下走。
+   ALL_FAST=false 时走这里，留作退路。 */
+async function runAllSerial(range, log, opts) {
+  {
+    opts = opts || {};
+    // 跟快流程一样：开头就记下这一轮的起点，桥用它核对订单新鲜度
+    if (!opts.since) opts.since = Date.now();
     const out = {};
     // 先问桥：这个区间今天取过哪几类表。取过的直接跳过，
     // 省下的时间去平台重导一遍纯属浪费（大店订单光等生成就要几分钟）。
@@ -6117,7 +6474,10 @@ async function runTask(task, range, log, opts = {}) {
     }
     return out;
   }
+}
 
+/* 单个任务：认店、装参数、跑对应实现。原来是 runTask 的正文，原样搬过来。 */
+async function runOneTask(task, range, log, opts = {}) {
   const impl = TASK_IMPL[task];
   if (!impl) throw new Error(`不支持的取数任务：${task}`);
 
@@ -6179,6 +6539,10 @@ async function registerPendingCalc(range, log, opts = {}) {
         shop_id: CURRENT_SHOP.shop_id || "",
         auto: !!opts.auto,
         with_formula: (typeof opts.with_formula === "boolean" ? opts.with_formula : undefined),
+        // 记的是「运行」这一次：订单必须是这次新落地的，否则桥只登记待补、
+        // 不拿同月的旧导出顶上去。
+        fresh: true,
+        since: Number(opts.since || 0) || 0,
         replace: true,
       }),
     });
@@ -6204,20 +6568,22 @@ async function runTaskThenCalc(task, range, log, opts = {}) {
     await reportProgress("calc", "running", { detail: "订单还在平台生成，到了自动算" });
     const j = await registerPendingCalc(range, log, opts);
     if (j && j.ok) {
-      log("订单已到，直接接着算");
-      // 桥那边已经算完了（文件其实已经落地），把结果接回来显示
-      try {
-        const c = await calcNow(range, log, { ...opts, replace: true });
-        await reportProgress("calc", "done", {});
-        await reportProgress("report", "done", {
-          detail: (c && c.file) ? String(c.file).split(/[\\/]/).pop().slice(0, 40) : "",
-        });
-        return { fetch: r, calc: c };
-      } catch (e) { /* 接不回来也不要紧，桥已经出报表了 */ }
-      return { fetch: r, pendingCalc: true };
+      // 桥这次**真的算完了**（订单刚好在这一刻落地）。直接用它出的那份报表，
+      // 不要再 calcNow 一遍 —— 同一份表会被覆盖第二次、历史多记一笔。
+      const nm = String((j && j.report_name) || "").slice(0, 40);
+      log(`订单刚好落地，桥已算完${nm ? "：" + nm : ""}`);
+      await reportProgress("calc", "done", {});
+      await reportProgress("report", "done", { detail: nm });
+      return { fetch: r, calc: j };
     }
-    log(`订单还没生成好（${String((j && j.error) || "").slice(0, 40)}），`
-        + "已记成待补：文件一落地桥会自动算、自动出报表，不用再点");
+    // 没 ok 就是「订单还没落地」（桥这时回 pending:true）。
+    //
+    // 这里**不能说「订单已到」**。以前只要 /run 返回 ok 就打印这句，
+    // 实测 2026-11-05 10:20:01 打印、订单 10:21:07 才落盘，中间那版报表
+    // 是用昨天的同月文件算的（GMV 差 85.78，肉眼看不出来）。
+    const why = String((j && j.error) || "").slice(0, 60);
+    log(`订单还没落地${why ? "（" + why + "）" : ""}，`
+        + "已登记待补：落地后桥会自动算、自动出报表，不用再点");
     await reportProgress("calc", "skip", { detail: "等订单：到了自动算" });
     return { fetch: r, pendingCalc: true };
   }
@@ -6250,7 +6616,9 @@ async function runTaskThenCalc(task, range, log, opts = {}) {
     // 数据一字没变，报表却堆出个 (2)(3) 只会让人分不清哪份是最后那版。
     // 覆盖同一份，旧版进回收站。
     const allReused = reused.length >= 4;
-    const c = await calcNow(range, log, { ...opts, reused, replace: opts.replace || allReused });
+    // fresh：这一轮是「运行」，桥会核对订单是不是这次落的（不是就登记待补）。
+    const c = await calcNow(range, log, {
+      ...opts, reused, fresh: true, replace: opts.replace || allReused });
     await reportProgress("calc", "done", { elapsed: (Date.now() - c0) / 1000 });
     await reportProgress("report", "done", {
       elapsed: (Date.now() - c0) / 1000,
@@ -6258,9 +6626,19 @@ async function runTaskThenCalc(task, range, log, opts = {}) {
     });
     return { fetch: r, calc: c };
   } catch (e) {
-    await reportProgress("calc", "fail", { error: String(e.message || e) });
-    log(`核算失败：${e.message}（取数已成功，数据在 data/exports/_inbox）`);
-    return { fetch: r, calcError: String(e.message || e) };
+    const em = String((e && e.message) || e);
+    // 桥拒绝核算、但原因是「订单还没落地」时，这**不是失败**是等待：
+    // 记成待补，订单到了桥会自动算。以前一律标 fail，卡片红叉 + 「有失败」，
+    // 看着像程序坏了，其实数据齐了在等平台生成文件。
+    if (/订单/.test(em) && /(还没|还在|没落)/.test(em)) {
+      await reportProgress("calc", "skip", { detail: "等订单：到了自动算" });
+      log(`核算先等着：${em.slice(0, 80)}`);
+      try { await registerPendingCalc(range, log, opts); } catch (e2) { /* 忽略 */ }
+      return { fetch: r, pendingCalc: true };
+    }
+    await reportProgress("calc", "fail", { error: em });
+    log(`核算失败：${em}（取数已成功，数据在 data/exports/_inbox）`);
+    return { fetch: r, calcError: em };
   }
 }
 

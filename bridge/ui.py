@@ -1083,16 +1083,15 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <button data-k="yesterday">昨天</button>
         </div>
         <div class="grow"></div>
-        <label class="chk" title="不勾：今天同一区间已经取过的表直接复用，改完费率重算只需几十秒。
-勾上：忽略记录，重新去平台导一遍（数据确实变了才勾）">
-          <input type="checkbox" id="force-fetch"> 强制重新取数
-        </label>
         <button id="btn-recalc-picked" class="ghost"
-                title="用已经在本机的数据重算勾选的店，不重新取数。
-改了佣金费率 / 成本表 / 汇率之后点这个">重算</button>
+                title="重算：用已经在本机的数据出报表，不重新取数。
+区间没变、只是改了费率 / 成本表 / 汇率时点这个，几十秒出结果。">重算</button>
         <button class="danger" id="btn-stop-all" hidden
                 title="把所有正在跑的店停下来（每一步之间都会退出）">停止全部</button>
-        <button class="primary" id="btn-run-picked">运行勾选的</button>
+        <button class="primary" id="btn-run-picked"
+                title="运行：去店铺后台重新取数（订单/广告/联盟/SKU 全部重导），
+哪怕今天刚导过也一样。要的是此刻的真实数据。
+只想用本机现成的数据出报表，点左边的「重算」。">运行勾选的</button>
       </div>
 
       <div class="store-grid" id="store-grid">
@@ -1310,7 +1309,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="body tight"><div class="tbl-wrap">
           <table class="cfg-tbl" id="ptbl"><thead><tr>
             <th style="min-width:150px">参数</th><th style="min-width:280px">计算公式</th>
-            <th class="kcell">正常</th><th class="kcell">已取消</th><th class="kcell">退货退款</th>
+            <th class="kcell">正常</th><th class="kcell" title="还没打包、没物流单号就取消了">售前取消</th>
+            <th class="kcell" title="有物流单号且已发货后取消">售后已发</th>
+            <th class="kcell" title="有物流单号但还没发货（包裹已打包）">售后未发</th>
+            <th class="kcell">退货退款</th>
             <th class="kcell">0元样品</th><th class="kcell">未付款</th>
             <th class="kcell" style="width:48px">启用</th><th style="width:54px"></th>
           </tr></thead><tbody id="pbody"></tbody></table>
@@ -1391,6 +1393,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
           </div>
         </div>
         <div class="body" style="padding-top:0">
+          <p class="muted" id="ofnote" style="font-size:12.5px;margin:0 0 6px"></p>
           <p class="muted" style="font-size:12.5px;margin:0">
             这一栏只用来判断「这行订单算不算取消/退货/未付款」「属于哪条链接」「按哪个编码对成本」。
             金额怎么算，全在参数表的公式里，不在这里。
@@ -1563,6 +1566,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="card"><h2>国家费率<span class="hint" id="rate-hint"></span></h2>
         <div class="body tight"><div class="tbl-wrap">
           <table class="cfg-tbl" id="rtbl"><thead id="rhead"></thead><tbody id="rbody"></tbody></table>
+          <datalist id="adscur-opts">
+            <option value="LOCAL">本地币（不换算）</option>
+            <option value="USD">美元 USD</option>
+            <option value="MYR">马币 MYR</option>
+            <option value="PHP">比索 PHP</option>
+            <option value="THB">泰铢 THB</option>
+            <option value="SGD">新币 SGD</option>
+            <option value="IDR">印尼盾 IDR</option>
+            <option value="VND">越南盾 VND</option>
+            <option value="CNY">人民币 CNY</option>
+            <option value="EUR">欧元 EUR</option>
+            <option value="GBP">英镑 GBP</option>
+          </datalist>
         </div></div></div>
       <div class="card"><h2>操作<span class="hint">汇率的自动抓取在「设置」里</span></h2><div class="body">
         <div class="tools"><button class="primary" id="btn-rate-save">保存费率</button>
@@ -1742,13 +1758,13 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
       <div class="card"><h2>改了参数要重算，不用重新取数<span class="hint">最省时间的一条</span></h2>
         <div class="body tight"><div class="kv">
-          <div>取数 vs 重算</div><div><b>取数</b>是去店铺后台把订单/广告/佣金导下来，慢（大店订单要等平台生成几分钟）；
-            <b>重算</b>只用已经在本机的数据重新出报表，几十秒。</div>
+          <div>运行 vs 重算</div><div><b>运行</b>（含定时任务）一律<b>重新去平台取数</b>，
+            哪怕今天刚导过同一区间也一样——它要的是此刻的真实状态，慢（大店订单要等平台生成几分钟）；
+            <b>重算</b>一个请求都不发，只用本机现成的数据重新出报表，几十秒。
+            所以：数据可能变了 → 运行；只改了费率/成本/汇率 → 重算。</div>
           <div>什么时候重算</div><div>改了<b>佣金费率、成本表、计算参数、汇率</b>之后——保存完屏幕下方会冒出
             「重新计算」的按钮，点一下就行；也可以回「驾驶舱」在各店卡片上点<b>「重算」</b>。</div>
-          <div>同一天重复跑</div><div>同一天、<b>同一个起止日期</b>再跑一次，会直接复用当天第一次导的数据（快）。
-            <b>换区间就要重新取数</b>——数据是平台按区间导的，不能拿一段充另一段。</div>
-          <div>数据确实变了</div><div>勾上驾驶舱工具条上的<b>「强制重新取数」</b>，就忽略当天的记录，重新去平台导一遍。</div>
+          <div>换区间</div><div>换区间必须运行取数——数据是平台按区间导的，不能拿一段充另一段。</div>
           <div>数据分两条线</div><div><b>驾驶舱</b>（运行 / 重算）只认店铺收件箱里自动取到的数据；
             <b>「手动核算」</b>是独立的一块：自己建批次、自己传表，报表单独放在
             <span class="mono">报表\手动\&lt;店名&gt;</span>。两边不互相掺，
@@ -1828,13 +1844,20 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
 <script>
 const $ = s => document.querySelector(s);
-const KINDS = [{id:'normal',label:'正常'},{id:'cancelled',label:'已取消'},{id:'refunded',label:'退货退款'},
+/* 订单类别 = 参数表上那几列勾选框。2026-11-04 起「取消」拆成三类：
+   售前取消（没出单号）、售后取消·已发货（有单号+发货时间）、
+   售后取消·未发货（有单号但没发货）。后两类的成本/发单费由店主自己勾。 */
+const KINDS = [{id:'normal',label:'正常'},
+  {id:'cancelled',label:'售前取消'},
+  {id:'cancelled_shipped',label:'售后已发'},
+  {id:'cancelled_unshipped',label:'售后未发'},
+  {id:'refunded',label:'退货退款'},
   {id:'zero_amount',label:'0元样品'},{id:'unpaid',label:'未付款'}];
 const BASES = [{id:'gmv',label:'GMV'},{id:'buyer_paid',label:'买家实付'},{id:'order_count',label:'订单数'},
   {id:'items',label:'件数'},{id:'cost',label:'商品成本'},{id:'refund',label:'退款金额'},
   {id:'commission',label:'达人佣金'},{id:'ads',label:'广告花费'}];
 const RATE_META = ['currency', 'rates_verified', 'dispatch_fee_local', 'dispatch_fee_cny',
-  '_dispatch_note', 'region', 'cny_to_local', 'usd_to_local'];
+  '_dispatch_note', 'region', 'cny_to_local', 'usd_to_local', 'ads_currency'];
 const RATE_LABELS = {
   platform_commission: '平台佣金', tx_fee: '交易手续费', cashback: '奖金返现',
   super_coupon: '超级优惠券', growth_fee: '商家成长', logistics: '物流'
@@ -2135,6 +2158,7 @@ function stepIcon(state, isRun){
   if(isRun) return '<span style="color:#3b82d6">◐</span>';
   if(state === 'done') return '<span style="color:#12a382">✓</span>';
   if(state === 'fail') return '<span style="color:#b4462a">✕</span>';
+  if(state === 'stopped') return '<span style="color:#b4802a">■</span>';
   return '<span style="color:#c9c7bd">○</span>';
 }
 
@@ -2160,6 +2184,13 @@ function stepsHtml(prog, labels){
 
 function lastLine(s){
   const p = s.progress || {};
+  // 停过的一轮：先说「已停止」，再报用时——用户想知道的就是「几秒真停下」
+  if(p.stopped){
+    const used = (p.stop_elapsed != null) ? (' · 用时 ' + fmtStopSec(p.stop_elapsed)) : '';
+    const at = p.finished ? (' · ' + new Date(p.finished * 1000)
+      .toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'})) : '';
+    return '已停止' + used + at;
+  }
   if(p.finished) return (p.ok === false ? '上次失败' : '上次成功') + ' · ' +
     new Date(p.finished * 1000).toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
   if(p.current) return '正在跑…';
@@ -2169,16 +2200,36 @@ function lastLine(s){
   return '还没跑过';
 }
 
+// 停止用时：一秒以内不显示小数，超过 10 秒只报整秒——这个数是用来看
+// 「到底是一点就停，还是拖了半分钟」的，精度到 0.1 秒够了。
+function fmtStopSec(x){
+  const v = Number(x) || 0;
+  if(v < 1) return v.toFixed(1) + ' 秒';
+  if(v >= 10) return Math.round(v) + ' 秒';
+  return v.toFixed(1) + ' 秒';
+}
+
 function cardHtml(id, s, labels){
   const prog = s.progress || {};
-  const cur = prog.current || '';
+  // 「在跑」但 15 分钟没有任何更新 = 卡住（典型是等平台生成订单表）。
+  // 不能再让它顶着「停止」按钮——实际上没人在干活，按钮点了也没用。
+  const stuck = !!s.stale;
+  const cur = stuck ? '' : (prog.current || '');
+  const progView = stuck ? Object.assign({}, prog, {current: ''}) : prog;
+  const stopping = !!s.stopping;
   const anyFail = Object.values(prog.steps || {}).some(x => x.state === 'fail');
   // 扩展版本和磁盘上的对不上：多半是程序升级了、扩展页没点「刷新」。
   // 这时候界面是新的、跑的代码是旧的，最容易出现「功能看着有、就是不生效」。
   const appVer = ($('#app-ver') || {}).textContent || '';
   const stale = s.ver && appVer && s.ver !== appVer;
-  const dot = cur ? 'run' : (s.online ? (anyFail ? 'warn' : (stale ? 'warn' : 'on')) : 'off');
-  const stateTxt = s.stopping ? '正在停止…' : (cur ? '运行中'
+  const dot = (cur || stopping) ? 'run' : (s.online ? (anyFail ? 'warn' : (stale ? 'warn' : 'on')) : 'off');
+  // 停止是「请求 → 等浏览器收手 → 回执」三段，卡片上要把这三段说清楚：
+  // 只写「正在停止…」用户根本不知道到底停了没，只能一遍遍点。
+  const stateTxt = stopping
+    ? ('正在停止… ' + fmtStopSec(s.stop_elapsed || 0)
+       + (s.stop_acked ? '，浏览器已收手' : '，等浏览器收手'))
+    : (cur ? '运行中'
+    : stuck ? '卡住了（15 分钟没动静）'
     : (s.online ? (anyFail ? '有失败' : (stale ? ('扩展 ' + s.ver + ' 待刷新') : '待命'))
                 : (s.heard ? '浏览器没开' : '等扩展上报')));
   const realName = s.shop_name && s.shop_name !== s.store_name ? s.shop_name : '';
@@ -2200,7 +2251,7 @@ function cardHtml(id, s, labels){
       </div>
       <span class="sc-state"><i class="dot ${dot}"></i>${esc(stateTxt)}</span>
     </div>
-    <div class="sc-body">${stepsHtml(prog, labels)}</div>
+    <div class="sc-body">${stepsHtml(progView, labels)}</div>
     <div class="sc-foot">
       <div class="last">${esc(lastTxt)}</div>
       <div class="sc-date">
@@ -2213,9 +2264,9 @@ function cardHtml(id, s, labels){
       </div>
       <button class="ghost" data-recalc="${esc(id)}" ${cur ? 'disabled' : ''}
               title="用已经在本机的数据重算，不重新取数。改了佣金费率、成本表之后点这个">重算</button>
-      ${cur || s.stopping
-        ? `<button class="stop" data-stop="${esc(id)}" ${s.stopping ? 'disabled' : ''}>
-             ${s.stopping ? '正在停…' : '停止'}</button>`
+      ${cur || stopping
+        ? `<button class="stop" data-stop="${esc(id)}" ${stopping ? 'disabled' : ''}>
+             ${stopping ? ('正在停 ' + fmtStopSec(s.stop_elapsed || 0)) : '停止'}</button>`
         : `<button data-run="${esc(id)}" class="primary">运行</button>`}
     </div>
   </div>`;
@@ -2290,8 +2341,15 @@ function renderCards(){
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({shop_id: id, store_name: ((LIVE.stores || {})[id] || {}).store_name || ''}),
       }).then(x => x.json()).catch(() => null);
-      toast(r && r.ok ? '已发送停止，最多 5 秒收手' : '停止请求没发出去');
-      setTimeout(loadLive, 800);
+      // 桥会当场掐掉本机核算、撤掉排队任务、清掉待补；浏览器那半靠扩展 1.5 秒轮询。
+      // 提示里把「已经停了什么」说出来，比一句「已发送」有用得多。
+      if(!r || !r.ok){ toast('停止请求没发出去'); return; }
+      const bits = [];
+      if(r.killed) bits.push('掐掉核算 ' + r.killed);
+      if(r.dropped_queue) bits.push('撤掉排队 ' + r.dropped_queue);
+      if(r.dropped_pending) bits.push('清掉待补 ' + r.dropped_pending);
+      toast(bits.length ? ('已停止：' + bits.join('、')) : '已发停止，浏览器那边 1~2 秒收手');
+      setTimeout(loadLive, 600);
     };
   });
   grid.querySelectorAll('[data-run]').forEach(b => {
@@ -2375,8 +2433,22 @@ function initHome(){
     const all = $('#pick-all');
     if(all) all.onchange = (e) => {
       const ids = (LIVE && LIVE.stores) ? Object.keys(LIVE.stores) : [];
-      PICKED = e.target.checked ? new Set(ids) : new Set();
-      renderCards();
+      const on = e.target.checked;
+      PICKED = on ? new Set(ids) : new Set();
+      // 直接改 DOM，**不要**调 renderCards()：那里有一层「数据没变就不重画」的
+      // 短路（sig 比对只看店铺数据/队列，不含勾选状态），点完全选后签名没变，
+      // 函数直接 return，卡片上的勾要等到下次有进度变化才跟上——看起来就是
+      // 「点了全选，过好一会下面才选上；取消也一样」。
+      // 单卡勾选本来就是直接改 DOM 的，这里跟它保持一致。
+      const grid = $('#store-grid');
+      if(grid){
+        grid.querySelectorAll('[data-pick]').forEach(cb => {
+          cb.checked = on;
+          const card = cb.closest('.sc');
+          if(card) card.classList.toggle('picked', on);
+        });
+      }
+      updatePickCount();
     };
   const runBtn = $('#btn-run-picked');
     if(runBtn) runBtn.onclick = (e) => runStores([...PICKED], e.currentTarget, homeRange());
@@ -2388,8 +2460,14 @@ function initHome(){
         body: JSON.stringify({all: true}),
       }).then(x => x.json()).catch(() => null);
       stopAllBtn.disabled = false;
-      toast(r && r.ok ? '已发送停止，正在收手的店会在几步内退出' : '停止请求没发出去');
-      setTimeout(loadLive, 800);
+      if(!r || !r.ok){ toast('停止请求没发出去'); return; }
+      const bits = [];
+      if(r.killed) bits.push('掐掉核算 ' + r.killed);
+      if(r.dropped_queue) bits.push('撤掉排队 ' + r.dropped_queue);
+      if(r.dropped_pending) bits.push('清掉待补 ' + r.dropped_pending);
+      toast(bits.length ? ('已停止：' + bits.join('、') + '；浏览器那边 1~2 秒')
+                        : '已发停止，浏览器那边 1~2 秒收手');
+      setTimeout(loadLive, 600);
     };
     // 工具条上的「重算」：勾了哪几家就重算哪几家，用的是已经在本机的数据
     const rcBtn = $('#btn-recalc-picked');
@@ -2409,8 +2487,11 @@ function cardRange(id){
 
 async function runStores(ids, btn, range){
   if(!ids || !ids.length){ toast('先勾选要跑的店铺'); return; }
-  // 勾了「强制重新取数」就不复用今天已取的表，老老实实重导一遍。
-  const force = !!($('#force-fetch') && $('#force-fetch').checked);
+  // 「运行」= 强制重新取数（2026-11-05 定的口径）。
+  // 以前这里是个可选勾选框，不勾就复用今天同区间已取的表；现在的规则是
+  // **运行一律重取**，哪怕那份数据是十分钟前刚导的——运行要的是此刻的真实状态。
+  // 想用本机现成的数据出报表，走「重算」，那条路一个请求都不发。
+  const force = true;
   // 单店模式：各区间的店可以不一样，只能一家一家派
   if(HOME_MODE === 'single' && ids.length >= 1 && !range){
     if(btn) btn.disabled = true;
@@ -2553,8 +2634,12 @@ function recalcNote(res){
       esc(o.store_name || '') + ' ' + fmt2(o.net_local)).join('　');
   }
   if(bad.length){
-    t += (t ? '<br>' : '') + '<b>失败 ' + bad.length + ' 家</b>　'
-      + esc(String(bad[0].error || '未知原因').slice(0, 120));
+    // blocked = 程序主动拦截（数据不全 / 区间不对），不是算崩了。
+    // 这两种在用户眼里完全不是一回事：一个是"程序坏了"，一个是"这张表不能出"。
+    const isBlocked = !!bad[0].blocked;
+    t += (t ? '<br>' : '') + '<b>' + (isBlocked ? '数据不全，已拦截 ' : '失败 ')
+      + bad.length + ' 家</b>　'
+      + esc(String(bad[0].error || '未知原因').slice(0, 160));
   }
   return {html: t, ok: ok.length, bad: bad.length};
 }
@@ -3298,6 +3383,8 @@ async function loadStores(){
         <td class="muted">${s.inbox_count !== undefined ? s.inbox_count + ' 个' : '—'}</td>
         <td style="white-space:nowrap">
           <button class="mini" data-rename="${esc(s.id)}">保存名字</button>
+          <button class="mini" data-batch="${esc(s.id)}"
+            data-store-name="${esc(s.name || s.id)}">取数批次</button>
           <button class="mini" data-del-store="${esc(s.id)}"
             data-store-name="${esc(s.name || s.id)}">移除</button>
         </td></tr>`;
@@ -3305,9 +3392,77 @@ async function loadStores(){
     $('#store-list').innerHTML = html + '</tbody></table>';
     document.querySelectorAll('[data-rename]').forEach(b =>
       b.onclick = () => renameStore(b.dataset.rename, b));
+    document.querySelectorAll('[data-batch]').forEach(b =>
+      b.onclick = () => showBatches(b.dataset.batch, b.dataset.storeName || ''));
     document.querySelectorAll('[data-del-store]').forEach(b =>
       b.onclick = () => removeStore(b.dataset.delStore, b.dataset.storeName, b));
   }catch(e){ $('#store-list').innerHTML = '<div class="empty">读取失败</div>'; }
+}
+
+/* 取数批次：这家店「同一天 + 同一区间」取的那几类表算一批。
+   为什么要有入口：收件箱是滚动累积的，程序按区间挑文件，但人没法确认
+   「这次到底用的是哪一批」。点「用这批重算」= 只读这一批的文件，
+   完全复现某一次取数——先算 10 月、再回头算 8 月也不会互相串。 */
+let BATCH_CACHE = {};
+async function showBatches(shopId, name){
+  $('#modal').classList.add('show');
+  $('#modal-title').textContent = (name || shopId) + ' · 取数批次';
+  $('#modal-sub').textContent = '';
+  $('#modal-body').innerHTML = '<div class="empty">读取中…</div>';
+  try{
+    const j = await (await fetch('/api/batches?shop=' + encodeURIComponent(shopId))).json();
+    if(!j.ok){
+      $('#modal-body').innerHTML = '<div class="empty">' + esc(j.error || '读取失败') + '</div>';
+      return;
+    }
+    const list = j.batches || [];
+    if(!list.length){
+      $('#modal-body').innerHTML =
+        '<div class="empty">这家店还没有取数记录。<br>在扩展里点一次「立即运行」，这里就会出现那一批。</div>';
+      return;
+    }
+    BATCH_CACHE[shopId] = list;
+    const rows = list.map(b => `<tr>
+      <td class="mono" style="font-size:12px">${esc(b.day)} ${esc(String(b.at || '').slice(11, 16))}</td>
+      <td style="font-size:12.5px">${esc(b.from)} ~ ${esc(b.to)}</td>
+      <td style="font-size:12.5px">${b.complete ? '四类齐'
+        : '<span style="color:#C0392B">缺 ' + esc((b.missing || []).join('、')) + '</span>'}</td>
+      <td style="text-align:right"><button class="mini" data-usebatch="${esc(b.id)}">用这批重算</button></td>
+    </tr>`).join('');
+    $('#modal-body').innerHTML =
+      '<div style="padding:14px 22px 6px;font-size:12.5px;color:var(--text-2);line-height:1.7">'
+      + '一批 = 同一天、同一区间取的那几类表。<b>用这批重算</b>只读这一批的文件，'
+      + '收件箱后来落的文件不参与。</div>'
+      + '<table><thead><tr><th>取数时间</th><th>区间</th><th>包含</th><th></th></tr></thead>'
+      + '<tbody>' + rows + '</tbody></table>';
+    document.querySelectorAll('[data-usebatch]').forEach(b =>
+      b.onclick = () => useBatch(shopId, b.dataset.usebatch, b));
+  }catch(e){
+    $('#modal-body').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  }
+}
+
+async function useBatch(shopId, bid, btn){
+  const b = ((BATCH_CACHE[shopId] || []).find(x => x.id === bid)) || {};
+  if(!b.complete && !confirm('这批缺 ' + ((b.missing || []).join('、'))
+      + '，算出来会被拦住（不会出假报表）。还要试吗？')) return;
+  if(btn){ btn.disabled = true; btn.textContent = '重算中…'; }
+  try{
+    const r = await fetch('/run', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({store: shopId, shop_id: shopId, batch: bid,
+                            from: b.from, to: b.to, replace: true})});
+    const j = await r.json();
+    if(j.ok){
+      toast('已按这批重算：净利 ' + fmt2(j.net_local));
+      closeModal(); loadStatus(); loadTrend();
+    }else{
+      toast((j.blocked ? '已拦截：' : '重算失败：') + String(j.error || '').slice(0, 140));
+      if(btn){ btn.disabled = false; btn.textContent = '用这批重算'; }
+    }
+  }catch(e){
+    toast('重算出错：' + e.message);
+    if(btn){ btn.disabled = false; btn.textContent = '用这批重算'; }
+  }
 }
 
 async function renameStore(shopId, btn){
@@ -3874,6 +4029,7 @@ async function loadParams(){
     });
     if(!scopeData[scope]) scope = "";
     paramsLoaded = true;
+    markSig();          // 记下「当前这份配置」，保存时才分得清改了展示还是改了数
     await buildScopeSelect();
     renderAll();
     loadFormulaVars();
@@ -4144,6 +4300,16 @@ function renderOfTabs(){
 function renderOrderFields(){
   renderOfTabs();
   const of = curOfFields();
+  const note = $('#ofnote');
+  if(note){
+    note.innerHTML = (ofTable === 'order_fields')
+      ? '售后判定就看下面这三列：<b>物流单号</b> 或 <b>物流商</b> 有值 = 包裹已打单出库 → 算<b>售后取消</b>；'
+        + '再看 <b>发货时间 / 签收时间</b> 有没有值 —— 有值 = 售后已发，没有 = 售后未发。'
+        + '这两类要不要算商品成本、发单费，在「参数表」里分别勾。'
+        + '三列都读空的话，所有取消都会被当成售前取消（成本、发单费全漏），所以平台改列名时先来这里加候选。'
+      : '';
+    note.hidden = !note.innerHTML;
+  }
   const keys = Object.keys(of);
   if(!keys.length){
     $('#ofbody').innerHTML = '<tr><td colspan="2" class="muted" style="padding:10px">这个表还没有配置字段</td></tr>';
@@ -4372,6 +4538,13 @@ const REPORT_BASE = [
   {key:'name', header:'商品名称', kind:'text'},
   {key:'gmv', header:'GMV', kind:'money'},
   {key:'orders', header:'订单数', kind:'int'},
+  /* 取消结构（2026-11-05）：订单事实，跟口径勾选无关。
+     分母「总单」= 正常 + 全部取消 + 退货退款（不含 0 元样品 / 未付款）。 */
+  {key:'pre_cancel_orders', header:'售前取消单数', kind:'int'},
+  {key:'post_cancel_orders', header:'售后取消单数', kind:'int'},
+  {key:'post_cancel_share', header:'售后取消占比', kind:'pct'},
+  {key:'all_cancel_share', header:'取消占总单比', kind:'pct'},
+  {key:'post_cancel_total_share', header:'售后占总单比', kind:'pct'},
   {key:'items', header:'件数', kind:'int'},
   {key:'aov', header:'客单价', kind:'money'},
   {key:'buyer_paid', header:'买家实付', kind:'money'},
@@ -4380,10 +4553,13 @@ const REPORT_BASE = [
   {key:'gross_margin', header:'链接毛利率', kind:'pct'},
 ];
 const REPORT_ROLE_KEYS = new Set(['gmv','cost','order_count','items','buyer_paid']);
-const REPORT_RATIOS = [
-  {key:'ratio:dispatch', header:'发单费占比', kind:'pct'},
-  {key:'ratio:ads', header:'广告费比', kind:'pct'},
-];
+// 占比列：key 是 ratio:<费用 id>，只要那项费用在参数表里存在就会出现在可选列里。
+// 后端 report.py 对 ratio: 是通用的，这里登记一行就够，不用改核算。
+/* 占比列不再写死：每个费用项都自动有一列「X占比」。
+   原来只登记了 4 个，用户勾了「联盟佣金占比」，报表却不出这一列 ——
+   后端 index 里没有这个键，勾了会被静默过滤掉（2026-11-04 实测）。
+   标题跟报表保持同一套规则：发单费/广告费沿用老叫法，其余用「参数名+占比」。 */
+const REPORT_RATIO_SPECIAL = {dispatch:'发单费占比', ads:'广告费比'};
 const REPORT_KIND_CN = {text:'文本', int:'整数', money:'金额', pct:'百分比'};
 
 function reportColumnCatalog(){
@@ -4397,7 +4573,12 @@ function reportColumnCatalog(){
     seen.add(id);
     fees.push({key:'fee:' + id, header:String(it.label || id), kind:'money'});
   }
-  const ratios = REPORT_RATIOS.filter(r => fees.some(f => f.key === 'fee:' + r.key.split(':')[1]));
+  const ratios = fees.map(f => {
+    const id = f.key.slice(4);   // 去掉 "fee:" 前缀
+    return {key:'ratio:' + id,
+            header: REPORT_RATIO_SPECIAL[id] || (f.header + '占比'),
+            kind:'pct'};
+  });
   const tail = [
     {key:'fee_total', header:'费用合计', kind:'money'},
     {key:'net_rate', header:'净利率', kind:'pct'},
@@ -4720,6 +4901,41 @@ $('#btn-preview').onclick = async () => {
   }catch(e){ body.innerHTML = '<div class="empty">试算出错：' + esc(e.message) + '</div>'; }
 };
 
+/* 「只改了展示」和「改了数字」要分开提示。
+   列顺序/列标题/合计位置只影响排版，一个数都没变；还弹「现有报表还是旧数字」，
+   人就会白跑一次重算，还以为那是必须的。 */
+let SIG_BASE = {display: '', value: ''};
+
+function _sigDisplay(c){
+  return JSON.stringify([c.report_columns || [], c.report_column_order || [],
+                         c.report_titles || {}, c.report_total_position || '']);
+}
+function _sigValue(){
+  const g = scopeData[""] || {};
+  return JSON.stringify([g.params || [], fmls || {}, collectByCountry()]);
+}
+function markSig(){ SIG_BASE = {display: _sigDisplay(cur()), value: _sigValue()}; }
+
+/* 参数表里新加的费用项，如果没写进「净利」公式，净利就是没扣它——
+   报表照样出、每列都有数，只是净利偏高、净利率偏高。这种错没人看得出来，
+   所以保存时必须主动喊一声。返回没进公式的项名。 */
+function missingInNet(){
+  const g = scopeData[""] || {};
+  const net = String((fmls && fmls.net) || '');
+  if(!net) return [];
+  const out = [];
+  for(const it of (g.params || [])){
+    const id = String(it.id || '').trim();
+    if(!id) continue;
+    if(REPORT_ROLE_KEYS.has(id) || REPORT_ROLE_KEYS.has(String(it.role || '').trim())) continue;
+    const lab = String(it.label || id).trim();
+    if(lab && net.indexOf(lab) >= 0) continue;
+    if(net.indexOf(id) >= 0) continue;
+    out.push(lab || id);
+  }
+  return out;
+}
+
 /* 保存配置：抽成一个函数，手动保存和「改了自动存」共用同一份 payload。
    注意 payload 必须是**完整**的一份（参数表 + 公式 + 各国…）：这个接口是整体覆盖，
    只传部分字段会把没传的当空，冲掉参数表和公式。 */
@@ -4752,6 +4968,7 @@ function buildSavePayload(){
 async function saveConfig(silent){
   try{
     const payload = buildSavePayload();
+    const disp = _sigDisplay(cur()), val = _sigValue();
     const r = await fetch('/api/config/save', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify(payload)});
@@ -4759,14 +4976,29 @@ async function saveConfig(silent){
     if(j.ok) paramsLoaded = false;
     if(!silent){
       const n = Object.keys(payload.by_country || {}).length;
-      toast(j.ok ? ('已保存（通用 + ' + n + ' 个国家的单独设置），下次核算立即生效')
+      const onlyDisplay = !!(SIG_BASE.value && SIG_BASE.value === val
+                             && SIG_BASE.display !== disp);
+      // 只动了列顺序/列标题/合计位置：数字一个都没变，别说「旧数字」，
+      // 直接告诉他去哪按一下就能拿到新排版的表。
+      toast(j.ok ? (onlyDisplay
+                     ? '报表样式已保存：到核算页点「重算」按新顺序重出一份（不重新取数）'
+                     : ('已保存（通用 + ' + n + ' 个国家的单独设置），下次核算立即生效'))
                  : ('保存失败：' + j.error));
       // 参数改了但报表还是旧数字，是这里最容易踩的空档：
       // 直接给一条「重算」的出路，不用人自己想起来去核算页。
-      if(j.ok) showRecalcBar('计算参数刚改过，现有报表还是旧数字');
+      if(j.ok && !onlyDisplay) showRecalcBar('计算参数刚改过，现有报表还是旧数字');
+      // 新加的费率项没进净利公式 → 净利不扣它，报表看着正常其实偏高。
+      if(j.ok){
+        const miss = missingInNet();
+        if(miss.length){
+          toast('⚠ 这些费用没进「净利」公式：' + miss.join('、')
+                + '（净利会偏高，去「净利公式」里补一项）');
+        }
+      }
     } else if(!j.ok){
       toast('自动保存失败：' + j.error);
     }
+    if(j.ok && !silent) markSig();
   }catch(e){ if(!silent) toast('保存出错：' + e.message); }
 }
 
@@ -5080,6 +5312,17 @@ async function loadRates(){
     });
     feeFields = [...set];
     renderRates();
+    // 表里那两列汇率是「配置里的兜底值」；真正参与核算的是 T-1 的价。
+    // 不把这件事显示出来，人会以为程序根本没联网抓汇率。
+    try{
+      const f = await (await fetch('/api/fx')).json();
+      const hint = $('#rate-hint');
+      if(hint && f && f.ok){
+        const d = f.rate_date ? (f.rate_date + ' 的汇率') : 'T-1 汇率';
+        hint.textContent += '　·　核算用 ' + d + '（' + (f.provider || '') + '）';
+        hint.title = f.note || '';
+      }
+    }catch(e){ /* 取不到汇率不影响改费率 */ }
   }catch(e){ toast('读取费率失败'); }
 }
 
@@ -5090,6 +5333,7 @@ function renderRates(){
   $('#rhead').innerHTML = '<tr>'
     + '<th style="min-width:86px">国家</th>'
     + '<th style="width:50px">币种</th>'
+    + '<th style="width:128px">广告表币种<br><span class="muted" style="font-weight:400">LOCAL 怎么算</span></th>'
     + '<th style="width:104px">1 人民币<br><span class="muted" style="font-weight:400">= ? 本地</span></th>'
     + '<th style="width:104px">1 美元<br><span class="muted" style="font-weight:400">= ? 本地</span></th>'
     + '<th style="width:104px">发单费<br><span class="muted" style="font-weight:400">人民币</span></th>'
@@ -5113,6 +5357,9 @@ function renderRates(){
     return `<tr>
       <td><input type="text" data-i="${i}" data-k="__name" value="${esc(name)}"></td>
       <td class="muted" style="text-align:center;font-size:12px">${esc(c.currency || '')}</td>
+      <td><input type="text" data-adscur="${i}" list="adscur-opts"
+        placeholder="自动识别" value="${esc(c.ads_currency || '')}"
+        title="留空＝自动识别；填 LOCAL＝不换算；也可填任意币种代码（USD / THB / PHP …）"></td>
       <td><input type="text" data-i="${i}" data-k="cny_to_local" value="${c.cny_to_local ?? ''}"></td>
       <td><input type="text" data-i="${i}" data-k="usd_to_local" value="${c.usd_to_local ?? ''}"></td>
       <td><input type="text" data-i="${i}" data-k="dispatch_fee_cny" value="${c.dispatch_fee_cny ?? ''}"></td>
@@ -5122,7 +5369,14 @@ function renderRates(){
            data-delcountry="${i}">删</button></td></tr>`;
   }).join('');
 
-  $('#rbody').querySelectorAll('input').forEach(inp => {
+  $('#rbody').querySelectorAll('[data-adscur]').forEach(inp => {
+    inp.oninput = () => {
+      const k2 = Object.keys(rateRows)[Number(inp.dataset.adscur)];
+      if(k2) rateRows[k2].ads_currency = inp.value.trim().toUpperCase();
+    };
+  });
+
+  $('#rbody').querySelectorAll('input[data-k]').forEach(inp => {
     inp.oninput = () => {
       const i = Number(inp.dataset.i), k = inp.dataset.k;
       const key = Object.keys(rateRows)[i];

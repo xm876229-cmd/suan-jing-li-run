@@ -242,6 +242,22 @@ DEFAULT_ORDER_FIELDS: dict[str, dict] = {
     "refund_amount": {"label": "退款金额", "titles": ["Order Refund Amount", "退款金额"]},
     "created": {"label": "下单时间", "titles": ["Created Time", "创建时间", "下单时间"]},
     "paid": {"label": "付款时间", "titles": ["Paid Time", "付款时间", "支付时间"]},
+    # ---- 物流三列：判定「售前取消」还是「售后取消」（2026-11-05 摆到界面上）----
+    # 判定链：Tracking ID 或 物流商 有值 = 包裹已经打单出库 → 售后取消；
+    #         再看 发货时间/签收时间 有没有值 → 有=售后已发，没有=售后未发。
+    # 这两类在参数表里各自有勾选项，决定算不算商品成本、发单费。
+    # 以前只在代码里写死候选，平台一改列名就整列读空（表现为"全部算售前取消"、
+    # 成本漏算还看不出来），所以必须能让店主自己在界面上改。
+    "tracking_id": {"label": "物流单号（判售前/售后）", "titles": [
+        "Tracking ID", "物流单号", "运单号", "跟踪号"]},
+    "shipping_provider": {"label": "物流商（判售前/售后）", "titles": [
+        "Shipping Provider Name", "物流商", "快递公司", "承运商"]},
+    "shipped_time": {"label": "发货时间（判售后已发/未发）", "titles": [
+        "Shipped Time", "发货时间", "揽收时间"]},
+    "delivered_time": {"label": "签收时间（备用判据）", "titles": [
+        "Delivered Time", "签收时间", "送达时间"]},
+    "rts_time": {"label": "打包时间（只做参考）", "titles": [
+        "RTS Time", "打包时间", "备货时间"]},
 }
 
 # 成本表：哪一列是商品编码、哪一列是成本
@@ -277,7 +293,9 @@ DEFAULT_MAPPING_FIELDS: dict[str, dict] = {
 
 DEFAULTS: dict = {
     "kinds": {
-        "cancelled": "已取消订单",
+        "cancelled": "售前取消订单",
+        "cancelled_shipped": "售后取消订单（已发货）",
+        "cancelled_unshipped": "售后取消订单（未发货）",
         "refunded": "退货退款订单",
         "zero_amount": "0 元样品单",
         "unpaid": "未付款订单",
@@ -297,19 +315,23 @@ DEFAULTS: dict = {
          "kinds": ["normal", "zero_amount"]},
         {"id": "cost", "label": "商品成本", "role": "cost",
          "expr": "cost_cny * params.cny_to_local",
-         "kinds": ["normal", "zero_amount"]},
+         "kinds": ["normal", "zero_amount", "cancelled_shipped",
+                   "cancelled_unshipped"]},
         {"id": "order_count", "label": "订单数", "role": "order_count",
          "expr": "orders",
-         "kinds": ["normal", "refunded", "zero_amount"]},
+         "kinds": ["normal", "refunded", "zero_amount",
+                   "cancelled_shipped", "cancelled_unshipped"]},
         {"id": "items", "label": "件数", "role": "items",
          "expr": "qty",
-         "kinds": ["normal", "refunded", "zero_amount"]},
+         "kinds": ["normal", "refunded", "zero_amount",
+                   "cancelled_shipped", "cancelled_unshipped"]},
         {"id": "buyer_paid", "label": "买家实付", "role": "buyer_paid",
          "expr": "paid",
          "kinds": ["normal", "zero_amount"]},
         {"id": "dispatch", "label": "发单费",
          "expr": "orders * params.dispatch_fee_cny * params.cny_to_local",
-         "kinds": ["normal", "refunded", "zero_amount"]},
+         "kinds": ["normal", "refunded", "zero_amount",
+                   "cancelled_shipped", "cancelled_unshipped"]},
         {"id": "platform_commission", "label": "平台佣金",
          "expr": "gmv * params.platform_commission",
          "kinds": ["normal", "zero_amount"]},
@@ -319,7 +341,7 @@ DEFAULTS: dict = {
         {"id": "ads", "label": "广告花费", "expr": "ads"},
         {"id": "cashback", "label": "奖金返现",
          "expr": "gmv * params.cashback", "kinds": ["normal", "zero_amount"]},
-        {"id": "affiliate", "label": "达人佣金", "expr": "commission"},
+        {"id": "affiliate", "label": "联盟佣金", "expr": "commission"},
         {"id": "order_service", "label": "订单服务费",
          "expr": "orders * params.order_service",
          "kinds": ["normal", "refunded"]},
@@ -486,6 +508,8 @@ BUILTIN_CN: dict[str, str] = {
     "本行退款金额": "refund",
     "本行广告花费": "ads",
     "本行达人佣金": "commission",
+    # 2026-11-04：参数改名为「联盟佣金」。旧名保留，老配置/老公式照样能解析。
+    "本行联盟佣金": "commission",
     "订单数": "orders",
     "件数": "qty",
     "买家实付": "paid",
@@ -495,6 +519,7 @@ BUILTIN_CN: dict[str, str] = {
     "平均成本单价": "cost_unit",
     "退款金额": "refund",
     "达人佣金": "commission",
+    "联盟佣金": "commission",
     "广告花费": "ads",
 }
 

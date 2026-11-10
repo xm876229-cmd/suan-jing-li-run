@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -247,3 +248,160 @@ def today(shop_id: str, now: datetime | None = None) -> dict:
                           for e in doc.get("entries", [])
                           if e.get("day") == day}),
     }
+
+
+# ---------------- 取数批次（2026-11-04） ----------------
+#
+# 一批 = 同一家店、**同一天落盘、同一个区间**的那几类表。
+# 为什么要有这个概念：最常见的用法是「先算 10 月，再回头算 8 月」。
+# 收件箱是滚动累积的，程序靠区间挑文件——这已经能挡住串月，但人没法确认
+# 「这次到底用的是哪一批」。批次把这件事变成可点、可复现的一行字。
+#
+# 批次**只记不搬**：文件还在收件箱原位。不按「最新/历史」两个文件夹整包搬，是因为：
+#   ① 算 8 月时 8 月那批已经被搬到历史里，程序要么找不到、要么还得去历史捞；
+#   ② 跨月区间（7/1~8/15）天然需要两份，整包搬就少一段；
+#   ③ SKU 表是长期有效的，跟着搬走会让老月份全变「无ID」；
+#   ④ 多店并行取数时搬目录要抢锁，搬一半断电两处都不全。
+#
+# 批次不依赖「取数台账」：台账只记通过 /upload 落盘的文件，
+# 手动导入、老版本留下的文件它根本没有。这里直接按**文件本身**归组
+# （身份证里的区间优先，其次文件名），所以历史数据也能分出批次。
+BATCH_SEP = "__"
+
+# 收件箱里这四类子目录 → 台账里的 kind
+_DIR_KIND = {
+    "订单表": "orders",
+    "广告表": "ads",
+    "联盟佣金表": "affiliate",
+    "商品SKU表": "sku",
+}
+
+_RANGE_RE = re.compile(
+    r"(\d{4})[-_./]?(\d{2})[-_./]?(\d{2}).{0,12}?(\d{4})[-_./]?(\d{2})[-_./]?(\d{2})")
+
+
+def batch_id(day: str, dfrom: str, dto: str) -> str:
+    return f"{day}{BATCH_SEP}{dfrom}{BATCH_SEP}{dto}"
+
+
+def parse_batch_id(bid: str) -> tuple[str, str, str] | None:
+    parts = str(bid or "").split(BATCH_SEP)
+    if len(parts) != 3:
+        return None
+    day, a, b = (p.strip() for p in parts)
+    if not day or not a or not b:
+        return None
+    return day, a, b
+
+
+def _file_range(p: Path) -> tuple[str, str] | None:
+    """这份文件盖的是哪一段：身份证（落盘时写死）优先，其次文件名。"""
+    try:
+        from . import provenance
+        meta = provenance.read_meta(p)
+        rng = meta.get("range")
+        if isinstance(rng, (list, tuple)) and len(rng) == 2:
+            a, b = str(rng[0]), str(rng[1])
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", a) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", b):
+                return (a, b) if a <= b else (b, a)
+    except Exception:  # noqa: BLE001
+        pass
+    for m in _RANGE_RE.finditer(Path(p).name):
+        try:
+            a = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+            b = f"{int(m.group(4)):04d}-{int(m.group(5)):02d}-{int(m.group(6)):02d}"
+            datetime.strptime(a, "%Y-%m-%d")
+            datetime.strptime(b, "%Y-%m-%d")
+        except ValueError:
+            continue
+        return (a, b) if a <= b else (b, a)
+    return None
+
+
+def batches(shop_id: str, limit: int = 40) -> list[dict]:
+    """这家店取过的批次，新的在前（newest first）。
+
+    归组依据是「文件落盘那天 + 文件自己写的区间」，跟取数台账无关——
+    手动导入的、老版本留下的文件也要能分进批次，否则点进去必然缺东西。
+    """
+    root = paths.store_root(shop_id)
+    if not root.is_dir():
+        return []
+    ranged: list[tuple] = []      # (day, rng, kind, path, at)
+    sku_only: list[tuple] = []    # SKU 表没有区间概念，按天归
+    for f in root.rglob("*"):
+        if not f.is_file() or f.name.startswith(".") or f.name.startswith("~$"):
+            continue
+        if f.suffix.lower() not in (".csv", ".xlsx", ".xls"):
+            continue
+        if f.name.endswith(".srcmeta.json"):
+            continue
+        kind = _DIR_KIND.get(f.parent.name) or _DIR_KIND.get(f.parent.parent.name)
+        if not kind:
+            continue
+        try:
+            mt = datetime.fromtimestamp(f.stat().st_mtime)
+        except OSError:
+            continue
+        day = mt.strftime(DAY_FMT)
+        at = mt.strftime(_TS_FMT)
+        rng = _file_range(f)
+        if rng is None:
+            if kind == "sku":
+                sku_only.append((day, kind, f, at))
+            continue
+        ranged.append((day, rng, kind, f, at))
+
+    groups: dict[str, dict] = {}
+    for day, rng, kind, f, at in ranged:
+        bid = batch_id(day, rng[0], rng[1])
+        g = groups.setdefault(bid, {
+            "id": bid, "day": day, "from": rng[0], "to": rng[1],
+            "at": "", "files": {}, "kinds": [],
+        })
+        if at > g["at"]:
+            g["at"] = at
+        if kind not in g["files"]:
+            g["files"][kind] = str(f)
+            g["kinds"].append(kind)
+
+    # SKU 表（长期有效、文件名不带区间）挂到同一天「最新那个批次」上。
+    # 一天只有一个批次时就是它；有多个时挂最近的那个——SKU 表本来就是那时候导的。
+    for day, kind, f, at in sku_only:
+        # 挂到「区间最近」的那个批次：SKU 表是给最新一期用的，
+        # 同一天里既有 6 月批又有 7 月批时，7 月才是它该在的地方。
+        same = [g for g in groups.values() if g["day"] == day and "sku" not in g["files"]]
+        if same:
+            g = max(same, key=lambda x: (x["to"], x["at"]))
+            g["files"]["sku"] = str(f)
+            g["kinds"].append("sku")
+            continue
+        bid = batch_id(day, "", "")
+        g = groups.setdefault(bid, {
+            "id": bid, "day": day, "from": "", "to": "",
+            "at": "", "files": {}, "kinds": [],
+        })
+        if at > g["at"]:
+            g["at"] = at
+        if "sku" not in g["files"]:
+            g["files"]["sku"] = str(f)
+            g["kinds"].append("sku")
+
+    out = []
+    for g in groups.values():
+        g["kinds"] = [k for k in KINDS if k in g["kinds"]]
+        g["labels"] = [KIND_CN[k] for k in g["kinds"]]
+        g["missing"] = [KIND_CN[k] for k in KINDS if k not in g["kinds"]]
+        g["complete"] = not g["missing"]
+        out.append(g)
+    out.sort(key=lambda x: (x["at"], x["day"]), reverse=True)
+    return out[:limit]
+
+
+def batch_files(shop_id: str, bid: str) -> list[Path]:
+    """某一批实际落在磁盘上的文件（绝对路径，已验存在）。"""
+    for g in batches(shop_id, limit=500):
+        if g["id"] != bid:
+            continue
+        return [Path(p) for p in g["files"].values() if Path(p).is_file()]
+    return []

@@ -477,6 +477,10 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
     else:
         cmd = [sys.executable, "-m", "src.cli"]
     cmd += ["--dir", str(d), "--out", str(out), "--json", "--merge-all"]
+    # 手动抽屉本来就是「只传了几张表，先算个大概」的地方，缺一类就拒绝出表
+    # 会把这条路堵死。所以这里显式 allow-partial：报表的「异常」页和口径页
+    # 会写明哪一类是按 0 计的。自动取数那条路仍然是硬闸门，不放松。
+    cmd += ["--allow-partial"]
     # 公式版缓存用最终报表名（out 可能是 .<pid>.calc.xlsx 这种临时名）
     cmd += ["--final-name", final_out.name]
     if country:

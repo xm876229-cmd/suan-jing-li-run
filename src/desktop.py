@@ -111,8 +111,8 @@ def ensure_bridge(progress=None) -> bool:
 def _fatal(message: str) -> int:
     """窗口都开不了时的兜底：弹个系统对话框，别让人看着黑框发呆。"""
     try:
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(0, message, WINDOW_TITLE, 0x10)
+        from src import platform_os
+        platform_os.alert(message, WINDOW_TITLE)
     except Exception:  # noqa: BLE001
         print(message)
     return 1
@@ -192,9 +192,8 @@ class NativeApi:
             d = _P(str(path or "")).expanduser()
             if not d.is_dir():
                 return False
-            import os as _os
-            _os.startfile(str(d))  # noqa: S606  只在 Windows 桌面窗口里用
-            return True
+            from src import platform_os
+            return platform_os.open_path(d)
         except Exception:  # noqa: BLE001
             return False
 

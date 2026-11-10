@@ -27,6 +27,20 @@ from datetime import datetime
 from pathlib import Path
 
 
+def app_version() -> str:
+    """当前程序版本（唯一来源：扩展 manifest.json）。
+
+    界面页脚、发布校验都读它。公式缓存也按版本分目录存放 ——
+    换了版本，旧缓存自然失效，不会把上一版算出来的公式版拷给用户。
+    """
+    try:
+        import json as _json
+        return str(_json.loads((EXTENSION / "manifest.json")
+                               .read_text(encoding="utf-8")).get("version") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def is_frozen() -> bool:
     """是否运行在 PyInstaller 打包的 exe 里。"""
     return bool(getattr(sys, "frozen", False))
@@ -39,49 +53,70 @@ def app_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def resource_root() -> Path:
+    """**只读资源**所在目录：浏览器扩展、文档、随包默认配置。
+
+    macOS 打包后是个 .app 包，可执行文件在 `Contents/MacOS/`，
+    数据文件被 PyInstaller 放在 `Contents/Resources/`。
+    把这两个分开是很重要的：Contents 里不能写东西（未签名应用还可能被
+    系统搬到随机只读路径），所以数据根必须另找地方（见 _data_root）。
+
+    Windows 打包 / 源码运行都还是程序目录，行为不变。
+    """
+    if is_frozen():
+        if sys.platform == "darwin":
+            # .app 包里，PyInstaller 把 datas 放在 sys._MEIPASS
+            # （通常是 Contents/Frameworks）。用官方给的入口最稳，
+            # 不自己拼 Contents/Resources 的层级。
+            base = getattr(sys, "_MEIPASS", None)
+            if base:
+                return Path(base)
+            try:
+                return Path(sys.executable).resolve().parents[1] / "Resources"
+            except IndexError:
+                pass
+    return app_root()
+
+
 def _data_root() -> Path:
-    """可写数据根（配置 / 数据 / 报表）。
+    """可写数据根（配置 / 数据 / 报表）—— 就是这个程序自己的目录。
 
-    为什么要跟「程序目录」分开：以前 ROOT = exe 所在目录，
-    换个地方启动 exe（安装目录 / release / build/app/jingli）就换一份配置——
-    从构建目录启动时读到的是空的 配置\，界面就变成 0 国 0 店。
+    0.24.44 起「数据跟着程序走」：免安装版、安装版、构建目录各用各的，
+    谁也不读谁、谁也不写谁。所以这里的规则只有两条：
 
-    查找顺序：
-      1. JINGLI_HOME 环境变量：把数据钉死在某处
-      2. 从程序目录向上找 `数据目录.txt`（第一行 = 数据根路径）：
-         项目里放一个，release/、build/app/ 下启动的 exe 都会指回同一份数据
-      3. 兜底：源码 = 项目根；打包 = exe 所在目录（兼容安装版/便携版）
+      1. JINGLI_HOME 环境变量：显式把数据指到别处（开发、跑测试、
+         或者多台机器共用一块数据盘时用）。设了就以它为准。
+      2. 否则就是 exe（源码模式则是项目根）所在目录。
+
+    **为什么不再向上找 `数据目录.txt`**
+    那是 0.24.44 之前的设计：为了让 release/、build/app/ 下启动的 exe
+    共用项目根的那一份数据，程序会从自己往上翻 6 层找这个文件。
+    它带来的问题比解决的问题多：
+
+      · 包里一旦带上它（内容是相对路径 `..\\..`），用户解压到桌面
+        数据根就跑到桌面的上一级；
+      · 更麻烦的是「串」：只要某个上级目录里有这个文件，
+        A 版本就会去读写 B 版本的数据，而且**界面上完全看不出来**。
+
+    已经把这个文件从所有位置清掉、并在打包时禁止它进包，机制本身也一并删了 ——
+    现在没有任何「向上翻」的路径，两个版本不可能互相串。
     """
     env = (os.environ.get("JINGLI_HOME") or "").strip()
     if env:
         return Path(env).expanduser().resolve()
-
-    start = app_root()
-    p = start
-    for _ in range(6):
-        f = p / "数据目录.txt"
-        try:
-            if f.is_file():
-                lines = f.read_text(encoding="utf-8-sig").strip().splitlines()
-                if lines:
-                    t = Path(lines[0].strip().strip('"')).expanduser()
-                    if not t.is_absolute():
-                        t = p / t
-                    t = t.resolve()
-                    if t.is_dir():
-                        return t
-        except OSError:
-            pass
-        if p.parent == p:
-            break
-        p = p.parent
-    return start
+    if sys.platform == "darwin" and is_frozen():
+        # macOS：.app 内部不能写，放到系统标准的「应用支持」目录
+        return Path.home() / "Library" / "Application Support" / "JingLiHelper"
+    return app_root()
 
 
 ROOT = app_root()
-# 可写数据（配置/数据/报表）的根：默认跟程序目录一致；
-# 可用 JINGLI_HOME 或上层「数据目录.txt」固定到一处，让所有实例共用同一份。
+# 可写数据（配置/数据/报表）的根：跟程序目录一致。
+# 只有 JINGLI_HOME 能改它 —— 没有任何「向上翻找」的路径，
+# 所以免安装版 / 安装版 / 构建目录各用各的，不会互相读写。
 DATA_HOME = _data_root()
+# 这个环境变量在生效，界面上要能看出来（doctor 也会打）。
+DATA_HOME_FROM_ENV = bool((os.environ.get("JINGLI_HOME") or "").strip())
 
 # 用户要能一眼看出各文件夹是干嘛的，所以对外可见的目录一律中文名。
 # 代码包（src / bridge / scripts）保持英文：那是 Python 的包路径，
@@ -304,7 +339,7 @@ OUTPUT = Path(os.environ.get("JINGLI_OUTPUT") or _pick_dir(DIR_OUTPUT, "output")
 
 # ---- 只读资源 ----
 CONFIG = _pick_dir(DIR_CONFIG, "config")
-EXTENSION = _pick_dir(DIR_EXTENSION, "extension", base=ROOT)
+EXTENSION = _pick_dir(DIR_EXTENSION, "extension", base=resource_root())
 RATES_FILE = CONFIG / "rates.json"
 STORES_FILE = CONFIG / "stores.json"
 
@@ -672,8 +707,13 @@ def _bundle_dir() -> Path:
     打包后放在 `_internal/默认配置`、`_internal/默认数据`；
     源码运行时退回项目根的 `配置`、`数据`，方便调试。
     """
+    res = resource_root()
     root = app_root()
-    for cand in (root / "_internal", root):
+    seen: list[Path] = []
+    for cand in (res / "_internal", res, root / "_internal", root):
+        if cand in seen:
+            continue
+        seen.append(cand)
         if (cand / "默认配置").is_dir() or (cand / "默认数据").is_dir():
             return cand
     return root
@@ -759,10 +799,21 @@ def ensure_dirs() -> None:
 
 def describe() -> dict[str, str]:
     """诊断用：把关键路径一次性列出来。"""
+    env_on = bool((os.environ.get("JINGLI_HOME") or "").strip())
+    same = str(DATA_HOME) == str(ROOT)
+    # 数据根是不是这个程序自己的目录，一句话说清 —— 用户最关心的就是
+    # 「安装版和免安装版会不会互写数据」，这里直接给结论。
+    if env_on:
+        scope = "JINGLI_HOME 指定（注意：与程序目录不同）"
+    elif same:
+        scope = "本程序目录（与其他版本互相独立）"
+    else:
+        scope = "⚠ 与程序目录不一致，请检查"
     return {
         "运行模式": "打包 exe" if is_frozen() else "源码",
         "程序目录": str(ROOT),
         "数据根": str(DATA_HOME),
+        "数据归属": scope,
         "数据目录": str(DATA),
         "产出目录": str(OUTPUT),
         "配置目录": str(CONFIG),

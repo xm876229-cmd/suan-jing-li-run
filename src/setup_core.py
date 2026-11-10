@@ -19,8 +19,16 @@ import os
 import shutil
 import subprocess
 import sys
-import winreg
 from pathlib import Path
+
+# winreg 只有 Windows 有。Mac 版不能让顶层 import 直接抛 ImportError，
+# 否则整个程序（核算、报表都算在内）根本起不来。
+try:
+    import winreg  # type: ignore[import-not-found]
+except Exception:  # noqa: BLE001
+    winreg = None  # type: ignore[assignment]
+
+IS_WIN = os.name == "nt"
 
 APP_NAME = "净利助手"
 APP_ID = "JingLiHelper"                 # ASCII，用于目录名 / 任务名 / 注册表
@@ -40,6 +48,10 @@ KEEP_DIRS = ["数据", "报表", "config", "output", "data"]
 
 def default_install_dir() -> Path:
     """默认安装位置：当前用户目录下，按用户安装，不需要管理员权限。"""
+    if not IS_WIN:
+        # macOS 的「安装」就是把 .app 拖进 /Applications；这里只在源码模式下用到
+        from src import paths
+        return paths.DATA_HOME
     base = os.environ.get("LOCALAPPDATA") or str(Path.home())
     return Path(base) / APP_ID
 
@@ -49,6 +61,8 @@ def read_registered_dir() -> Path | None:
 
     允许用户装到任意盘（D:\\软件\\净利助手 之类），所以不能假定目录名固定。
     """
+    if not IS_WIN or winreg is None:
+        return None
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
             val, _ = winreg.QueryValueEx(k, "InstallLocation")
@@ -198,6 +212,8 @@ def ensure_layout(dest: Path) -> None:
 
 def create_shortcut(lnk: Path, target: Path, args: str = "", workdir: Path | None = None) -> bool:
     """用 PowerShell 的 WScript.Shell 建 .lnk（不依赖 pywin32）。"""
+    if not IS_WIN:
+        return False            # macOS 用 .app + Dock，不需要 .lnk
     workdir = workdir or target.parent
     ps = (
         "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}');"
@@ -232,6 +248,8 @@ def write_launcher(dest: Path) -> Path:
     这样无论装在 C 盘还是 D 盘、路径有没有中文和空格，都照样能用
     （之前把路径写死进 VBS，路径一变自启就指向不存在的文件）。
     """
+    if not IS_WIN:
+        return dest / VBS_NAME       # macOS 不用 VBS
     vbs = dest / VBS_NAME
     content = (
         'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
@@ -245,6 +263,9 @@ def write_launcher(dest: Path) -> Path:
 
 
 def register_autostart(dest: Path, log=print) -> tuple[bool, str]:
+    if not IS_WIN:
+        # Mac 版按「手动打开」设计：不注册开机自启，也不留后台常驻
+        return True, "macOS 版不注册开机自启（双击图标打开）"
     vbs = dest / VBS_NAME
     if not vbs.exists():
         write_launcher(dest)
@@ -262,6 +283,8 @@ def register_autostart(dest: Path, log=print) -> tuple[bool, str]:
 
 
 def unregister_autostart() -> tuple[bool, str]:
+    if not IS_WIN:
+        return True, "macOS 版没有开机自启"
     r = _run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"])
     ok = r.returncode == 0 or "找不到" in (r.stdout + r.stderr) or "cannot find" in (r.stdout + r.stderr).lower()
     return ok, (r.stdout or r.stderr or "").strip()
@@ -274,6 +297,8 @@ def task_exists() -> bool:
     查不到顶多显示「未注册」，抛出去会让整个程序打不开。
     （有些安全策略会直接拦掉 schtasks 进程，连 OSError 都不给你。）
     """
+    if not IS_WIN:
+        return False
     try:
         r = _run(["schtasks", "/Query", "/TN", TASK_NAME])
         return r.returncode == 0
@@ -283,6 +308,8 @@ def task_exists() -> bool:
 
 def can_manage_tasks() -> bool:
     """能不能调用 schtasks。被安全策略禁用时给用户明确提示，而不是静默失败。"""
+    if not IS_WIN:
+        return False
     try:
         r = _run(["schtasks", "/Query", "/TN", "___nonexistent___"])
         return r.returncode != -1
@@ -293,6 +320,8 @@ def can_manage_tasks() -> bool:
 # ---------------- 卸载信息（控制面板里能看到） ----------------
 
 def write_uninstall_entry(dest: Path) -> None:
+    if not IS_WIN or winreg is None:
+        return
     exe = dest / EXE_NAME
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:

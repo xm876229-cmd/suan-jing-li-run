@@ -250,6 +250,93 @@ def check_portable(version: str) -> list[str]:
     return bad
 
 
+# 三个「会随包发出去」的位置。用户装的包里的默认配置、
+# 默认成本表，都必须来自 release\\净利助手 这份正本 ——
+# 不是项目根那堆迁移前的残留。
+def _bundled_dirs() -> list[tuple[str, Path]]:
+    out = [("release", APP_DIR),
+           ("app", ROOT / "build" / "app" / "jingli")]
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        out.append(("安装版", Path(local) / "JingLiHelper"))
+    return [(n, d) for n, d in out if (d / "_internal").is_dir()]
+
+
+def check_bundled_config() -> list[str]:
+    """随包的默认配置 / 成本表必须和 release\\净利助手 里正在用的那份一致。
+
+    为什么单列一项：这两处以前都是「打包时从项目根拷」，
+    而项目根那份从 0.24.44 迁移后就没人更新了。结果每次发版都把
+    几个月前的旧公式、旧费率塞进包，用户重装后恢复出来的是旧配置——
+    报表列少一截、费率不对，而且不报任何错（2026-11-04 实测踩过）。
+    """
+    bad: list[str] = []
+    cfg_src = APP_DIR / "配置"
+    cost_src = APP_DIR / "数据" / "成本" / "master.csv"
+    if not cfg_src.is_dir():
+        return ["release 里没有 配置 目录，无法比对"]
+
+    # ① 配置文件：逐字节比
+    for name, base in _bundled_dirs():
+        d = base / "_internal" / "默认配置"
+        if not d.is_dir():
+            bad.append(f"{name}：没有 _internal/默认配置")
+            continue
+        diff = []
+        for f in sorted(cfg_src.glob("*.json")):
+            t = d / f.name
+            if not t.is_file():
+                diff.append(f"{f.name} 缺失")
+            elif sha256(t) != sha256(f):
+                diff.append(f"{f.name} 内容不一致")
+        if diff:
+            bad.append(f"{name} 的默认配置和 release 正本不一致：{'、'.join(diff)}")
+
+    # ② 成本表：行数 + 哈希
+    if cost_src.is_file():
+        want_rows = sum(1 for _ in cost_src.open("rb")) - 1
+        for name, base in _bundled_dirs():
+            t = base / "_internal" / "默认数据" / "costs" / "master.csv"
+            if not t.is_file():
+                bad.append(f"{name}：缺 _internal/默认数据/costs/master.csv")
+                continue
+            if sha256(t) != sha256(cost_src):
+                rows = sum(1 for _ in t.open("rb")) - 1
+                bad.append(f"{name} 的成本表 {rows} 条 ≠ 正本 {want_rows} 条")
+    else:
+        bad.append("release 里没有 数据/成本/master.csv，无法比对")
+
+    if not bad:
+        rows = sum(1 for _ in cost_src.open("rb")) - 1
+        names = "、".join(n for n, _ in _bundled_dirs())
+        print(f"  ✓ 随包配置与成本表跟 release 一致（{len(list(cfg_src.glob('*.json')))} 个配置、"
+              f"成本 {rows} 条；位置：{names}）")
+    return bad
+
+
+def check_formula_health() -> list[str]:
+    """跑一份带公式报表，检查公式有没有自引用 / 合计行变常数。
+
+    这一步能抓的错，是「报表每列都有数、但整张表算成 0」那一类 ——
+    2026-11-04 取消「排名」后就是这个现象，人眼看不出是算错还是真没单。
+    顺带把「逐个取消某列」也扫一遍，确保用户随时改列都不会退化。
+    """
+    exe = APP_DIR / "jingli.exe"
+    if not exe.is_file():
+        return ["release 里没有 exe，跳过公式体检"]
+    try:
+        sys.path.insert(0, str(ROOT))
+        from scripts.check_formula import main as formula_main
+    except Exception as e:  # noqa: BLE001
+        return [f"公式体检脚本导入失败：{e}"]
+    argv = ["--all-columns"]
+    try:
+        code = formula_main(argv)
+    except Exception as e:  # noqa: BLE001
+        return [f"公式体检跑崩了：{e}"]
+    return [] if code == 0 else ["带公式报表体检没通过（见上面的明细）"]
+
+
 def check_setup() -> list[str]:
     """安装包只有二进制，验证「它比 app.zip 新」+ 体积合理。"""
     bad: list[str] = []
@@ -404,18 +491,22 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n=== 发布校验（{tag or '未知版本'}）===\n")
 
     problems: list[str] = []
-    print("[1/4] 版本源")
+    print("[1/6] 版本源")
     problems += check_versions(tag)
-    print("[2/4] 构建新鲜度")
+    print("[2/6] 构建新鲜度")
     problems += check_fresh(tag)
-    print("[3/4] 包内容")
+    print("[3/6] 包内容")
     problems += check_portable(ver)
     problems += check_setup()
+    print("[4/6] 随包配置与成本表（必须同步 release\\净利助手 正本）")
+    problems += check_bundled_config()
+    print("[5/6] 带公式报表体检（自引用 / 合计行常数 / 取消各列）")
+    problems += check_formula_health()
     if not args.no_run:
-        print("[4/4] 真跑一遍")
+        print("[6/6] 真跑一遍")
         problems += check_runtime(ver)
     else:
-        print("[4/4] 真跑一遍（已跳过）")
+        print("[6/6] 真跑一遍（已跳过）")
     if args.remote:
         print("[远程] 与 GitHub 发布对比")
         problems += check_remote(tag)

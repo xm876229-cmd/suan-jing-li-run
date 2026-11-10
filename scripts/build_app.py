@@ -218,6 +218,9 @@ def build_app() -> Path:
         "--hidden-import", "src.snapshots",
         "--hidden-import", "src.selfcheck",
         "--hidden-import", "src.auto_run",
+        # 数据凭证 / 出表闸门：桥的上传处理里是函数内导入的
+        # （写完身份证才 import，省得启动时多拉一个模块）,
+        "--hidden-import", "src.provenance",
         # 桌面窗口：pywebview 的后端是运行时才导入的，
         # PyInstaller 静态扫不到，不显式声明就会打包出一个「点了没反应」的 exe
         "--hidden-import", "src.desktop",
@@ -259,8 +262,14 @@ def build_app() -> Path:
         src = _real.get(name) or (ROOT / name)
         if not src.exists():
             continue
-        if name == "配置":
+        if name == "config":
             # 用户数据：只补缺，不覆盖（他在这台机器上改的费率/公式都在这）
+            #
+            # 这里原来写的是 `name == "配置"`，但 RESOURCES 里的键是英文 "config"，
+            # 判断永远不成立 → 走下面的 copytree(dirs_exist_ok=True) 整目录覆盖：
+            # 每次打包都拿项目根那份**迁移前的旧配置**把 配置\ 冲掉。
+            # 2026-11-04 实测：formulas.json 从 10475 被换成 10375、rates.json 从
+            # 8404 换成 8056，用户当天改的参数直接消失，而且不报任何错。
             _copy_missing_tree(src, out / CN_DIRS[name])
         elif name in CN_DIRS:
             # 顶层用中文名：浏览器扩展 / 文档（程序文件，随版本更新覆盖）
@@ -283,9 +292,12 @@ def build_app() -> Path:
     # 随包带一份「默认配置 / 默认成本」：用户升级或误删后，
     # 程序启动会自动从这里补回（只补缺失的，不覆盖用户改过的）。
     try:
-        cfg_src = _real.get("config") or (ROOT / "配置")
-        if not cfg_src.is_dir():
-            cfg_src = out / "配置"
+        # 正本是发布目录里那份（用户实际在用的配置），不是项目根里的残留。
+        # 项目根 配置\formulas.json 停在迁移前，拿它当默认值，
+        # 重装后恢复出来的就是旧公式——报表列、参数全少一截，还查不出来。
+        cfg_src = out / "配置"
+        if not (cfg_src / "formulas.json").is_file():
+            cfg_src = _real.get("config") or (ROOT / "配置")
         if cfg_src.is_dir():
             dst = out / "_internal" / "默认配置"
             if dst.exists():
@@ -535,6 +547,14 @@ def _skip_in_pack(rel: Path) -> bool:
     if not parts:
         return False
 
+    # 备份/临时文件一律不进包：`.bak`、`.bak_20261109_181429`、`.tmp`。
+    # 它们是这台机器的历史快照，而配置读坏时程序会回退到 .bak ——
+    # 带进包就等于把「开发机上的计划任务」一起发给别人。
+    # 2026-11-09 实际踩过：清理计划时留的备份被同步进「默认配置」，
+    # 0.24.81 的安装包和免安装包里都夹带了一份带计划的 settings.json.bak_xxx。
+    if any(p.endswith((".bak", ".tmp", ".part")) or ".bak_" in p for p in parts):
+        return True
+
     # 数据目录.txt 里的路径是**相对**的（发布目录里写的是 ..\..）。
     # 它一进包，用户解压到桌面，数据根就会解析到「桌面的上一级」——
     # 数据和配置散落到程序目录外面，卸载清不掉、备份也找不到。
@@ -548,7 +568,16 @@ def _skip_in_pack(rel: Path) -> bool:
     if parts[0] != "数据" or len(parts) < 2:
         return False
 
+    # safeio 留下的 .bak（汇率缓存、待补队列、计划状态）是这台机器的运行痕迹，
+    # 进包没意义，还会让「数据/ 下只该有几个种子文件」这条校验失败。
+    if parts[-1].endswith((".bak", ".tmp", ".part")):
+        return True
+
     sub = parts[1]
+    # 汇率存档是每天现抓的运行数据（数据/汇率存档/YYYY-MM-DD.json），不是种子；
+    # 带着它进包，等于把打包那天的汇率发给别人当默认值。
+    if sub == "汇率存档":
+        return True
     if sub in _PRIVATE_DATA_DIRS:
         return True
     if len(parts) == 2 and sub in ("history.jsonl", "fx_cache.json",
@@ -563,6 +592,42 @@ def _skip_in_pack(rel: Path) -> bool:
     return False
 
 
+
+# 打包时必须清掉的「这台机器自己的东西」。
+# 计划任务不是产品默认值：2026-11-04 那次装机把开发机上的测试计划
+# （每天 15:04、每月往前 3 个月、5 家店）当默认配置装进了安装版，
+# 店主从没设过，却每天 15:04 自动出一份 8 月报表放到桌面。
+# 所以进包前统一把 schedules 清空，费率/店铺/报表设置一律不动。
+_PACK_SETTINGS = {Path("配置") / "settings.json",
+                  Path("_internal") / "默认配置" / "settings.json"}
+
+
+def _settings_for_pack(path: Path) -> bytes | None:
+    """返回清空 schedules 后的 settings 字节；读不出来就返回 None（照原样打包）。"""
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(d, dict):
+        return None
+    if not d.get("schedules"):
+        return None            # 本来就没有，不必改写
+    d["schedules"] = []
+    return json.dumps(d, ensure_ascii=False, indent=1).encode("utf-8")
+
+
+def _write_to_zip(z: zipfile.ZipFile, f: Path, rel: Path, prefix: Path | None = None) -> None:
+    """把一个文件写进压缩包；配置里的 settings.json 要先清掉计划。"""
+    arc = Path(prefix) / rel if prefix else rel
+    arcname = str(arc).replace("\\", "/")
+    if rel in _PACK_SETTINGS:
+        data = _settings_for_pack(f)
+        if data is not None:
+            z.writestr(arcname, data)
+            return
+    z.write(f, arcname)
+
+
 def make_app_zip(app_dir: Path) -> Path:
     BUILD.mkdir(parents=True, exist_ok=True)
     zpath = BUILD / "app.zip"
@@ -574,7 +639,7 @@ def make_app_zip(app_dir: Path) -> Path:
                 rel = f.relative_to(app_dir)
                 if _skip_in_pack(rel):
                     continue
-                z.write(f, rel)
+                _write_to_zip(z, f, rel)
     print(f"[OK] app.zip：{zpath.stat().st_size / 1024 / 1024:.1f} MB")
     return zpath
 
@@ -610,7 +675,7 @@ def make_portable_zip(app_dir: Path) -> Path:
                 rel = f.relative_to(app_dir)
                 if _skip_in_pack(rel):
                     continue
-                z.write(f, app_dir.name / rel)
+                _write_to_zip(z, f, rel, app_dir.name)
     print(f"[OK] 免安装压缩包：{zpath}（{zpath.stat().st_size / 1024 / 1024:.1f} MB）")
     return zpath
 

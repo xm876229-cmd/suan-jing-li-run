@@ -18,7 +18,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from numbers import Number
 from pathlib import Path
 from typing import Iterable, Optional
@@ -26,6 +26,7 @@ from typing import Iterable, Optional
 import openpyxl
 
 from . import paths
+from . import provenance as prove
 
 
 # ---------------- 基础转换 ----------------
@@ -96,6 +97,14 @@ ALIASES: dict[str, list[str]] = {
     "refund_amount": ["orderrefundamount", "退款金额"],
     "created": ["createdtime", "创建时间", "下单时间"],
     "paid": ["paidtime", "付款时间", "支付时间"],
+    # 物流：判定「售前取消」还是「售后取消」。
+    # 有单号/物流商 = 已经打包出单，取消发生在履约之后——
+    # 这种订单货已经发了，发单费和商品成本是实打实花掉的。
+    "tracking_id": ["trackingid", "物流单号", "运单号", "跟踪号"],
+    "shipping_provider": ["shippingprovidername", "物流商", "快递公司", "承运商"],
+    "rts_time": ["rtstime", "打包时间", "备货时间"],
+    "shipped_time": ["shippedtime", "发货时间", "揽收时间"],
+    "delivered_time": ["deliveredtime", "签收时间", "送达时间"],
     # 广告
     "ad_cost": ["成本", "cost", "spend", "花费", "广告花费"],
     "ad_currency": ["货币", "currency"],
@@ -219,6 +228,11 @@ def merged_aliases(order_fields: dict | None) -> dict[str, list[str]]:
     配了的字段以配置为准（顺序即优先级），没配的沿用内置默认。
     """
     out = dict(get_aliases())
+    # 内置别名兜底：config/mapping.json 一旦存在，get_aliases 就**只**返回配置里
+    # 写了的字段。新增的字段（物流单号这些）没同步进配置时会整列读不到，
+    # 而且不报错——表现是「所有订单都算售前取消」。这里补齐缺的键。
+    for _k, _v in ALIASES.items():
+        out.setdefault(_k, list(_v))
     for key, v in (order_fields or {}).items():
         if isinstance(v, dict):
             titles = v.get("titles") or v.get("candidates") or []
@@ -410,6 +424,12 @@ class OrderLine:
     status: str
     created: str
     paid: str
+    # 物流三件套：判断「售前取消 / 售后取消」，见 order_kind()
+    tracking_id: str = ""
+    shipping_provider: str = ""
+    rts_time: str = ""
+    shipped_time: str = ""
+    delivered_time: str = ""
     product_id: str = ""
     style_codes: str = ""
     cost_unit_cny: Optional[float] = None
@@ -477,6 +497,16 @@ class RawData:
     # 广告 / 佣金表没有日期列，费用是按整段计入的；
     # 报表区间和导出区间对不上时，净利会偏，得让人看得见。
     ranges: dict = field(default_factory=dict)
+    # 这次**真正参与计算**的是哪几份文件、盖的哪一段、多少行（见 src/provenance.py）。
+    # sources 只能说明「认出了这类表」，不等于「数据真的用上了」——
+    # 出表闸门看的是这里，不是 sources。
+    uses: dict = field(default_factory=dict)
+    # 这家店显式声明「本来就没有」的类别（no_ads / no_affiliate）
+    declared: set = field(default_factory=set)
+    # 这次核算的区间（闸门要用它判「盖不盖得住」）
+    window: tuple[str, str] | None = None
+    # 成本表里查不到的编码 → 行数。报表要点名提醒，不能只写进「异常」页
+    missing_costs: dict = field(default_factory=dict)
 
 
 # ---------------- 文件读取 ----------------
@@ -513,7 +543,11 @@ def _read_table_inner(path: Path, sheet: Optional[str] = None) -> list[tuple]:
         # 先看文件头两个字节：UTF-16 有 BOM 才试。
         # 无 BOM 时硬按 UTF-16 解会「成功」解出一堆乱码（不报错），
         # 列名全认不出 —— 比直接报错更难查。
-        encs = ("utf-8-sig", "gbk", "utf-8")
+        # gb18030 要排在 gbk 前面：它是 GBK 的超集，能解 GBK 解不了的字节
+        # （0x80 这类）。2026-11-05 实测：店主从后台手动导的订单表就是 GB18030，
+        # 只试 gbk 会 UnicodeDecodeError → 整份文件被跳过 → 报「目录里没识别出
+        # 订单表」，而文件明明是好的。
+        encs = ("utf-8-sig", "gb18030", "gbk", "utf-8")
         try:
             head = path.open("rb").read(2)
             # 用 "utf-16" 而不是 "utf-16-le"：前者会读 BOM 定字节序
@@ -547,10 +581,28 @@ def _read_table_inner(path: Path, sheet: Optional[str] = None) -> list[tuple]:
             except UnicodeDecodeError as e:
                 last_err = e
                 continue
-        # 全部编码都认不出：明确报错，不要静默返回空表。
+
+        # 严格解码全失败 → 用「坏字节替换成 �」再读一遍。
+        #
+        # 真实场景（2026-11-05，店主手动导的 MYT-J1 订单表，42 MB）：整份是 GBK，
+        # 但某个客户名字段里混进了一个 0x80，位置 13,114,709。严格解码直接抛
+        # UnicodeDecodeError，整张表被跳过 → 报「目录里没识别出订单表」，
+        # 而那份文件 99.9999% 是好的。一个脏字节不该让整个月的账算不出来。
+        # 换成 � 之后，坏的那一格最多显示成问号，金额、日期、订单号全都还在。
+        for enc in ("gb18030", "utf-8"):
+            try:
+                with path.open("r", encoding=enc, errors="replace", newline="") as f:
+                    rows = [tuple(r) for r in csv.reader(f)]
+            except (UnicodeError, csv.Error, OSError):
+                continue
+            if rows and rows[0] and isinstance(rows[0][0], str):
+                rows[0] = (rows[0][0].lstrip("\ufeff"),) + tuple(rows[0][1:])
+            return rows
+
+        # 连替换解码都失败：明确报错，不要静默返回空表。
         # 静默返回空的后果是「这家店这个月没订单」，看起来像正常结论。
         raise RuntimeError(
-            f"「{path.name}」编码认不出来（试过 UTF-8 / GBK / UTF-16）："
+            f"「{path.name}」编码认不出来（试过 UTF-8 / GB18030 / GBK / UTF-16）："
             f"{last_err}。用 Excel 另存为「CSV UTF-8」再试"
         )
     wb = openpyxl.load_workbook(path, data_only=True, read_only=False)
@@ -808,6 +860,12 @@ def parse_orders(rows: list[tuple], order_fields: dict | None = None,
             continue  # 说明行 / 空行
 
         oid = to_str(get(r, "order_id", ""))
+        # 没有订单号就不是订单：平台导出的**合计行**（SKU 列也空，金额是总额）、
+        # 说明行都落在这里。2026-11-05 实测：店主手动导的订单表末尾就有一行
+        # 「SKU Subtotal 2,740,004.98 / Discount 1,502,818.20」的合计行，
+        # 万一它带着 SKU 或件数被读进来，会凭空多出一条订单、GMV 直接翻倍。
+        if not oid:
+            continue
         qty = to_num(get(r, "qty"), 1.0) or 1.0
         before = to_num(get(r, "subtotal_before"))
         amount = to_num(get(r, "order_amount"))
@@ -831,6 +889,11 @@ def parse_orders(rows: list[tuple], order_fields: dict | None = None,
             status=to_str(get(r, "status", "")),
             created=to_str(get(r, "created", "")),
             paid=to_str(get(r, "paid", "")),
+            tracking_id=to_str(get(r, "tracking_id", "")),
+            shipping_provider=to_str(get(r, "shipping_provider", "")),
+            rts_time=to_str(get(r, "rts_time", "")),
+            shipped_time=to_str(get(r, "shipped_time", "")),
+            delivered_time=to_str(get(r, "delivered_time", "")),
             product_id=to_str(get(r, "product_id", "")) or legacy_pid(r),
         )
         # 公式里写 [折扣前小计] 这种标题时，就从这里取数。
@@ -848,13 +911,60 @@ def parse_orders(rows: list[tuple], order_fields: dict | None = None,
     return lines
 
 
+# 广告账号的本位币 / 店铺本地币：由 cli 在知道国家之后设一次。
+# 为什么不从行里读：平台导出把币种写成 LOCAL，而 LOCAL 指的是**账号本位币**，
+# 不是店铺所在国货币 —— 这两者不一致（账号 USD、店铺 MYR）时，差了整整一个汇率。
+_ADS_CURRENCY = "AUTO"
+_LOCAL_CURRENCY = ""
+_ADS_RATES: dict = {}          # CNY 基准的汇率表，用来算任意币种的交叉汇率
+# 上一次 parse_ads 里「币种认不出、只能按 0 计」的金额。
+# 这个数不为 0 时出表闸门会拦住——钱静默变 0 比算错更危险，报表上完全看不出来。
+_ADS_UNKNOWN = 0.0
+
+
+def last_unknown_ads() -> float:
+    """上一次解析广告表时，有多少金额因为币种认不出被按 0 计了。"""
+    return float(_ADS_UNKNOWN or 0.0)
+
+
+def set_ads_currency(acct: str = "", local: str = "", rates: dict | None = None) -> None:
+    """核算前告诉加载器：广告表按什么币种算、店铺本地币是什么、汇率表是什么。
+
+    acct 取值：""/"AUTO" 自动识别；"LOCAL" 不换算；或任意币种代码（USD/THB/PHP…）。
+    """
+    global _ADS_CURRENCY, _LOCAL_CURRENCY, _ADS_RATES, _ADS_UNKNOWN
+    _ADS_UNKNOWN = 0.0
+    _ADS_CURRENCY = (acct or "AUTO").strip().upper()
+    _LOCAL_CURRENCY = (local or "").strip().upper()
+    _ADS_RATES = dict(rates or {}) if isinstance(rates, dict) else {}
+
+
+
+def _ads_rate_to_local(code: str, usd_to_local: float, local: str) -> float | None:
+    """1 单位 code 折成多少本地币。查不到返回 None（调用方记「未识别」，不默认 1）。"""
+    code = (code or "").strip().upper()
+    if not code or code in ("LOCAL", "RM") or (local and code == local):
+        return 1.0
+    if code in ("USD", "US$", "$"):
+        return float(usd_to_local or 1.0)
+    rf = _ADS_RATES.get(code)
+    rl = _ADS_RATES.get(local) if local else None
+    if rf and rl:
+        return float(rl) / float(rf)      # 交叉汇率：CNY→本地 ÷ CNY→该币
+    return None
+
+
 def parse_ads(rows: list[tuple], usd_to_local: float = 1.0,
-              ads_fields: dict | None = None) -> tuple[dict[str, float], list[str]]:
+              ads_fields: dict | None = None,
+              ads_currency: str | None = None,
+              local_currency: str | None = None) -> tuple[dict[str, float], list[str]]:
     """广告报表：按 商品ID 汇总花费，并按货币换算成本地货币。
 
     ads_fields 是界面上配的「广告表字段 → 标题候选」，配了优先用，
     这样平台把「成本」改成「花费」之类的也能自己加候选，不必改代码。
     """
+    global _ADS_UNKNOWN
+    _ADS_UNKNOWN = 0.0
     issues: list[str] = []
     aliases = merged_aliases(ads_fields) if ads_fields else None
     hidx, cm = find_header_row(rows, ("product_id", "ad_cost"), aliases=aliases)
@@ -876,19 +986,45 @@ def parse_ads(rows: list[tuple], usd_to_local: float = 1.0,
         cost = to_num(r[cm["ad_cost"]]) if cm["ad_cost"] < len(r) else 0.0
         cur = to_str(r[cm["ad_currency"]]).upper() if cm.get("ad_currency") is not None and cm["ad_currency"] < len(r) else ""
         currencies[cur or "未标注"] += 1
-        if cur in ("", "USD", "US$", "$"):
-            out[pid] += cost * usd_to_local
-        elif cur in ("MYR", "RM", "LOCAL"):
-            # LOCAL 是程序自己补的标记：接口不返回币种时，说明给的已经是本地货币，
-            # 不能再乘一次美金汇率（会凭空翻 4 倍）。
-            out[pid] += cost          # 已是本地货币
+        # 币种判定（2026-11-04 修正，实测后台）：
+        #   「LOCAL」和空值都表示**广告账号的本位币**，不等于店铺所在国的货币。
+        #   实测 DXM：后台成本 12,450.49 USD，导出表 Currency 写的是 LOCAL，
+        #   以前把 LOCAL 当成马币直接用 → 广告费少算 4 倍、净利虚高 3.8 万。
+        #   账号本位币由 ads_currency 配置（rates.json 每国可写），默认 USD。
+        acct = (ads_currency or _ADS_CURRENCY or "AUTO").strip().upper()
+        local = (local_currency or _LOCAL_CURRENCY or "").strip().upper()
+        # 这一行按什么币种算：
+        #   AUTO        表里写了真实币种就用它；写 LOCAL/空（账号本位币）按美金
+        #   LOCAL       不换算
+        #   USD/THB/…   强制按这个币种（汇率表里查交叉汇率）
+        c = (cur or "").strip().upper()
+        if acct == "AUTO":
+            code = "USD" if c in ("", "LOCAL") else c
+        elif acct in ("LOCAL", "本地", "本地币"):
+            code = local or "LOCAL"
         else:
+            code = acct
+        rate = _ads_rate_to_local(code, usd_to_local, local)
+        if rate is None:
             unknown += cost
-    if unknown:
-        issues.append(f"广告表有 {unknown:.2f} 金额的货币未识别，已按原值计入")
+        else:
+            out[pid] += cost * rate
     detail = "、".join(f"{k}×{v}" for k, v in currencies.most_common(3))
+    _m = (ads_currency or _ADS_CURRENCY or "AUTO").upper()
+    _local = (local_currency or _LOCAL_CURRENCY or "").upper()
     if detail:
-        issues.append(f"广告表货币分布：{detail}（已按美金→本地汇率换算）")
+        if _m in ("LOCAL", "MYR", "RM") or (_local and _m == _local):
+            _how = "按本地币直接用"
+        elif _m in ("", "AUTO"):
+            _how = "自动识别；表里写 LOCAL/空的按美金折算"
+        else:
+            _how = f"按 {_m} 折成本地币"
+        issues.append(f"广告表货币分布：{detail}（{_how}）")
+    if unknown:
+        # 这条必须放最后：币种填错/汇率表里没有时，钱会静默变 0，比少算更危险。
+        issues.append(f"⚠ 有 {unknown:,.2f} 的金额币种认不出（设置：{_m or '自动'}），"
+                      f"这部分广告费按 0 计，净利会偏高")
+    _ADS_UNKNOWN = float(unknown or 0.0)
     return dict(out), issues
 
 
@@ -914,10 +1050,56 @@ def parse_commissions(rows: list[tuple],
 
 # ---------------- 成本解析 ----------------
 
-def resolve_cost(sku: str, costs: dict[str, float]) -> tuple[Optional[float], str]:
-    """返回 (成本单价, 命中方式)。方式：exact / multipack / combo / miss。"""
+# 成本能不能「按编码规律推」——2026-11-04 起默认**不推**。
+#
+# 实测 J22-1-18pCS 会被推成 J22-1(1.55) × 18 = 27.9。乘法本身没错，
+# 但卖家编码是人工起的，「18pCS」不一定是 18 件，也不一定就是那个基座——
+# 一旦推错，成本静默变高变低，报表上看不出来。用户定的规矩：
+# 宁可按 0 计 + 在报表里点名「这个编码没成本」，也不要猜。
+# 想恢复推导把这里改回 True（老逻辑原样留在下面）。
+ALLOW_COST_DERIVE = False
+
+
+def cost_index(costs: dict[str, float]) -> dict[str, float]:
+    """「忽略大小写」的成本索引：`V26-T-21cm-2PCS` → `V26-T-21CM-2PCS`。
+
+    为什么需要（2026-11-05 实测）：店主成本表里录的是 `V26-T-21cm-2PCS`（大写 PCS），
+    订单里卖家编码是 `V26-T-21cm-2Pcs`（小写 s）。字符串不等就查不到，
+    报表就报「24 个编码没成本」——可人眼一看就是同一条。MYT-V1 一个月 42 行、
+    MYT-W1 13 个编码都是这么来的。
+
+    只做「大小写」这一种归一，不做别的：去掉 `*N`、去掉前缀这类都属于「猜」，
+    用户定的规矩是宁可按 0 计 + 点名，也不要猜。
+
+    归一后撞车的（两个不同编码只差大小写）**不放进索引** —— 分不清就不猜。
+    """
+    out: dict[str, float] = {}
+    dup: set[str] = set()
+    for k, v in (costs or {}).items():
+        key = str(k).strip().upper()
+        if not key:
+            continue
+        if key in out and out[key] != v:
+            dup.add(key)          # 同键不同价：两条都不能用
+        out[key] = v
+    for k in dup:
+        out.pop(k, None)
+    return out
+
+
+def resolve_cost(sku: str, costs: dict[str, float],
+                 index: dict[str, float] | None = None
+                 ) -> tuple[Optional[float], str]:
+    """返回 (成本单价, 命中方式)。方式：exact / case / multipack / combo / miss。"""
     if sku in costs:
         return costs[sku], "exact"
+    # 忽略大小写再试一次（不算「推导」，只是同一串字符的不同写法）
+    idx = index if index is not None else cost_index(costs)
+    hit = idx.get(str(sku).strip().upper())
+    if hit is not None:
+        return hit, "case"
+    if not ALLOW_COST_DERIVE:
+        return None, "miss"
 
     m = MULTIPACK_RE.match(sku)
     if m:
@@ -1028,20 +1210,45 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
                 l.style_codes = derived
 
 
-def attach_costs(lines: list[OrderLine], costs: dict[str, float], issues: list[str]) -> None:
+def attach_costs(lines: list[OrderLine], costs: dict[str, float],
+                 issues: list[str]) -> "Counter[str]":
+    """把成本单价挂到每一行上，返回「查不到成本的 SKU → 行数」。
+
+    返回值是给报表用的：成本查不到就是按 0 计，净利会虚高，
+    这件事必须在报表第一眼就能看到，不能只躺在「异常」页第八条。
+    """
     missing = Counter()
     derived: Counter = Counter()
+    case_hit: Counter = Counter()
+    idx = cost_index(costs)
+    orig_by_upper = {str(k).strip().upper(): str(k).strip() for k in (costs or {})}
     for l in lines:
-        unit, how = resolve_cost(l.seller_sku, costs)
+        unit, how = resolve_cost(l.seller_sku, costs, idx)
         l.cost_unit_cny = unit
         if unit is None:
             missing[l.seller_sku] += 1
+        elif how == "case":
+            case_hit[l.seller_sku] += 1
         elif how != "exact":
             derived[f"{l.seller_sku}（{how}）"] += 1
-    for sku, n in missing.most_common():
-        issues.append(f"成本表查不到「{sku}」且无法推导（{n} 行），成本按 0 计，净利偏高")
+    for sku, n in missing.most_common(20):
+        issues.append(f"成本表查不到「{sku}」（{n} 行），成本按 0 计，净利偏高——补录这条编码即可")
+    if len(missing) > 20:
+        issues.append(f"另有 {len(missing) - 20} 个编码也查不到成本，详见报表「口径」页")
+    if case_hit:
+        # 只差大小写：成本算进去了，但两边写法不一致，早晚还要再踩一次
+        _n = sum(case_hit.values())
+        _eg = []
+        for sku in list(case_hit)[:3]:
+            _o = orig_by_upper.get(str(sku).strip().upper(), "")
+            _eg.append(f"{sku} ↔ {_o}" if _o and _o != sku else sku)
+        issues.append(
+            f"{len(case_hit)} 个编码是「忽略大小写」才匹配到成本的（{_n} 行）："
+            + "、".join(_eg)
+            + "——成本已算进去，建议把订单编码和成本表改成一致的大小写")
     for sku, n in derived.most_common():
         issues.append(f"「{sku}」成本由规则推导（{n} 行），建议补录成本表")
+    return missing
 
 
 # ---------------- 对外入口 ----------------
@@ -1091,20 +1298,34 @@ def load_from_files(order_file: Path, ads_file: Optional[Path] = None,
     if ads_file and Path(ads_file).exists():
         ads, ad_issues = parse_ads(read_table(ads_file), usd_to_local, ads_fields)
         issues += ad_issues
-        sources["广告"] = Path(ads_file).name
+        if ads:
+            sources["广告"] = Path(ads_file).name
 
     commissions: dict[str, float] = {}
     if commission_file and Path(commission_file).exists():
         commissions, com_issues = parse_commissions(read_table(commission_file), affiliate_fields)
         issues += com_issues
-        sources["联盟佣金"] = Path(commission_file).name
+        if commissions:
+            sources["联盟佣金"] = Path(commission_file).name
 
     attach_product_ids(orders, sku_index, issues)
-    attach_costs(orders, costs, issues)
+    _mc = attach_costs(orders, costs, issues)
 
+    def _u(kind, label, data, path_obj) -> prove.TableUse:
+        rows = len(data or {})
+        st = prove.ST_OK if rows else prove.ST_EMPTY
+        return prove.TableUse(kind, label, st,
+                              [Path(path_obj).name] if path_obj else [], None, rows)
+
+    uses = {
+        "order": _u("order", "订单表", {i: 1 for i in range(len(orders))}, order_file),
+        "ads": _u("ads", "广告表", ads, ads_file),
+        "affiliate": _u("affiliate", "联盟佣金表", commissions, commission_file),
+        "mapping": _u("mapping", "商品SKU表", dict.fromkeys(sku_index.by_sku_id, 1), mapping_file),
+    }
     return RawData(orders=orders, costs=costs, sku_index=sku_index, ads=ads,
                    commissions=commissions, issues=issues, sources=sources,
-                   order_titles=titles)
+                   order_titles=titles, uses=uses, missing_costs=dict(_mc))
 
 
 # 每类表的特征字段：只要这几个字段同时出现在同一行，就能确定类型
@@ -1167,6 +1388,9 @@ def _scan_folder(folder: Path) -> tuple[dict, list, list]:
         if f.suffix.lower() not in (".xlsx", ".xls", ".csv", ".txt", ".json"):
             continue
         if f.name.startswith("~$") or f.name.startswith("."):
+            continue
+        # 数据身份证（<原文件名>.srcmeta.json）不是数据表，别拿去解析
+        if f.name.endswith(prove.META_SUFFIX):
             continue
         if f.suffix.lower() == ".json":
             jm = parse_mapping_json(f)
@@ -1263,9 +1487,21 @@ def _d(iso: str) -> date:
 def table_range(path: Path, rows: list[tuple]) -> tuple[str, str] | None:
     """读出这份导出覆盖的日期区间（'20260901_20261028' / '2026-09-01 00 ~ 2026-09-30 23'）。
 
-    平台把区间写在文件名里，有的还写在第一行标题里，两处都翻一遍。
-    读不出来返回 None——那种老文件只能靠“同一商品以最后一份为准”兜底。
+    **先看身份证**（上传落盘时写的 <文件名>.srcmeta.json，里面是扩展当时
+    请求的区间），再看文件名和首行标题。
+
+    为什么身份证优先：文件名是平台起的，改个名字、以「(2)」结尾、
+    或者手动另存一次，区间就没了——那时候这份表会被当成「读不出区间」，
+    而「读不出区间」以前是「全部一起读」，正是串月的老路。
+    身份证是落盘那一刻写死的，改名也甩不掉。
     """
+    meta = prove.read_meta(path)
+    rng = meta.get("range")
+    if isinstance(rng, (list, tuple)) and len(rng) == 2:
+        a, b = str(rng[0] or ""), str(rng[1] or "")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", a) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", b):
+            return (a, b) if a <= b else (b, a)
+
     texts: list[str] = [Path(path).name]
     for r in rows[:3]:
         for c in r:
@@ -1286,61 +1522,191 @@ def table_range(path: Path, rows: list[tuple]) -> tuple[str, str] | None:
     return None
 
 
+# 文件名尾部的导出时刻：`全部 笔订单-20261001-20261031-2026-11-05-10_18.csv`
+# 注意别和前面的区间（20261001-20261031）搞混——这里要求带横线和下划线。
+_NAME_TS = re.compile(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})_(\d{2})\.[A-Za-z]+$")
+
+
+def export_time(path) -> float:
+    """这份表是**哪一刻导出的**。
+
+    为什么不能只看 mtime（2026-11-05 实测踩到）：
+    把数据目录拷到另一台电脑、解压一个备份、网盘同步回来——文件的 mtime
+    全会变成"复制那一刻"。于是一堆老表看起来一样新（甚至比今天的还新），
+    「用最新导出那份」就退化成随便挑一份。测试里 `cp -r` 一次就复现了。
+
+    优先级（前两条都能扛住复制/改名）：
+      1. 身份证 `<文件名>.srcmeta.json` 里的 at —— 落盘那一刻写死
+      2. 文件名尾部的导出时刻（区间后面那一段 `2026-11-05-10_18`）
+      3. 文件 mtime —— 兜底
+
+    返回时间戳（秒）。取不到返回 0，调用方按"最旧"处理。
+    """
+    try:
+        from . import provenance
+        _at = str(provenance.read_meta(Path(path)).get("at") or "")
+        if _at:
+            try:
+                return datetime.strptime(_at, "%Y-%m-%d %H:%M:%S").timestamp()
+            except ValueError:
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        m = _NAME_TS.search(Path(path).name)
+        if m:
+            y, mo, d, hh, mm = (int(x) for x in m.groups())
+            return datetime(y, mo, d, hh, mm).timestamp()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return float(Path(path).stat().st_mtime)
+    except OSError:
+        return 0.0
+
+
 def _rng_text(rng) -> str:
     return f"{rng[0]}~{rng[1]}" if rng else "全量/无区间"
 
 
-def _pick_latest(items: list[tuple[Path, list[tuple]]], window, label: str,
-                 issues: list[str]) -> list[tuple[Path, list[tuple]]]:
-    """只留**最新导出的那一份**。
+def _mt_text(ts) -> str:
+    """把文件时间写成「11-05 10:18」，给「用了哪份、什么时候导的」那句提示用。
 
-    用户的要求：订单 / 广告 / 联盟佣金一律用"这次刚导的"，不复用旧文件。
-    文件夹里会攒下历次导出，全读进来既慢，又可能把过期的状态（比如已经退的
-    款那时候还没退）带进来。所以只取最新的一份。
-
-    前提是它盖得住本次报表区间；一份都盖不住（只导过 9 月却要算 10 月）时，
-    仍然取最新那份，并在异常页说明——让人知道这份数据不是这个区间的。
-    读不出区间的老文件不敢乱丢，保持原样。
+    刻意写月日而不是只写区间：文件名里那串日期是**数据范围**，
+    不是导出时刻。选文件时比的是导出时刻，提示里也得把它露出来，
+    不然人对不上「为什么用的是这份」。
     """
-    if len(items) <= 1:
-        return items
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%m-%d %H:%M")
+    except (TypeError, ValueError, OSError):
+        return "时间未知"
 
-    stamped: list[tuple[float, Path, list[tuple], tuple | None]] = []
-    for p, rows in items:
-        try:
-            mt = p.stat().st_mtime
-        except OSError:
-            mt = 0.0
-        stamped.append((mt, p, rows, table_range(p, rows)))
+
+def _union_cover(ranges: list[tuple[str, str] | None],
+                 window: tuple[str, str],
+                 allow_overlap: bool = False) -> list[int] | None:
+    """几份区间能不能拼成完整一段。
+
+    为什么要有：计划任务可以选「按周取数」，收件箱里就变成
+    10-05~10-11、10-12~10-18、10-19~10-25、10-26~10-31 四份，
+    谁都不单独盖住整个 10 月。以前的规则是「一份盖不住就一份都不用」，
+    结果是月底按周取过数的店铺直接算不出来——而数据其实是齐的。
+
+    **重叠怎么处理，两类表完全相反**（2026-11-05 分清）：
+
+    · 广告 / 联盟佣金是「按区间汇总」的，一行就是一个商品在这段区间的合计。
+      两份重叠的表相加 = 同一段钱算两遍，报表上看不出来，只是净利偏低。
+      所以默认 allow_overlap=False：**挑了之后还要再验一遍两两不重叠**，
+      有重叠宁可不用。
+      （原来的实现只按「谁能把光标推得更远」贪心，压根没验重叠——
+       传进两份重叠的周表，它照样拼、照样相加，是个静默的重复计入。）
+
+    · 订单是逐行明细，合并时按「订单号 + SKU」去重、还会重算每单行数，
+      重叠部分后取的那份盖掉旧的（后来退款了就该按新的算）。
+      所以订单传 allow_overlap=True：重叠不是问题，反而能修正状态。
+
+    返回选中的下标（按时间顺序），拼不成返回 None。
+    """
+    picked: list[int] = []
+    cursor = window[0]
+    idx = sorted((i for i, r in enumerate(ranges) if r),
+                 key=lambda i: (ranges[i][0], ranges[i][1]))
+    while cursor <= window[1]:
+        cand = [i for i in idx if ranges[i][0] <= cursor <= ranges[i][1]]
+        if not cand:
+            return None
+        # 从当前缺口开始、能伸到最远的那份
+        best = max(cand, key=lambda i: ranges[i][1])
+        if best in picked:
+            return None
+        picked.append(best)
+        nxt = (_d(ranges[best][1]) + timedelta(days=1)).isoformat()
+        cursor = nxt
+
+    if not allow_overlap:
+        rs = sorted((ranges[i] for i in picked), key=lambda r: (r[0], r[1]))
+        for i in range(len(rs) - 1):
+            if rs[i][1] >= rs[i + 1][0]:
+                # 汇总类表重叠 = 重复计入，不能拼
+                return None
+    return picked
+
+
+def _pick_latest(items: list[tuple[Path, list[tuple]]], window, label: str,
+                 issues: list[str]) -> tuple[list[tuple[Path, list[tuple]]], list[str]]:
+    """从一堆同类导出里挑出这次能用的**那一份**。
+
+    规则（2026-11-05 店主定稿，两条必须同时满足）：
+
+      1. **区间百分百对上**——文件写的导出区间要和报表区间一字不差。
+         算 10/1~10/7 的报表，只用区间正好是 10/1~10/7 的文件；
+         10/1~10/31 那份**不算对得上**，哪怕它盖住了这 7 天。
+         区间不同就是另一次取数：广告/佣金是整段汇总，用宽区间会把别的月份
+         算进来；订单虽然是明细，但那份报表也不是"这次区间"的导出。
+      2. 同样对得上的有几份 → 用**导出时间最新**那份（见 export_time：
+         身份证 at → 文件名尾部时刻 → mtime，拷来拷去都不失真）。
+
+    一份区间都不完全相等 → 一份都不用，并列出目录里现有哪些区间。
+    宁可不出口报，也不拿别的区间凑。
+
+    唯一的例外：目录里**一份都读不出区间**、而且就一份老文件时，用它并
+    在异常页写明（早版本留下的表，没有更好的依据）。
+
+    返回 (选中的文件, 没选中的说明)。
+    """
+    if not items:
+        return [], []
+
+    stamped: list[tuple[float, Path, list[tuple], tuple | None]] = [
+        (export_time(p), p, rows, table_range(p, rows)) for p, rows in items
+    ]
     stamped.sort(key=lambda x: (x[0], str(x[1])))
 
-    if any(s[3] is None for s in stamped):
-        return items          # 有读不出区间的，分不清新旧范围，保持全读
-
-    pick = None
-    if window:
-        lo, hi = window
-        cover = [s for s in stamped if s[3][0] <= lo and s[3][1] >= hi]
-        if cover:
-            pick = max(cover, key=lambda x: x[0])
-    if pick is None:
+    if not window:
         pick = stamped[-1]
-        if window and len(stamped) > 1:
-            issues.append(
-                f"{label}：没有一份导出盖得住报表区间 {window[0]}~{window[1]}，"
-                f"用了最新的 {pick[1].name}（{_rng_text(pick[3])}），请确认区间是否对"
-            )
-
-    dropped = [s[1].name for s in stamped if s is not pick]
-    if dropped:
-        newest = stamped[-1][1].name
-        if pick[1].name == newest:
+        dropped = stamped[:-1]
+        if dropped:
             issues.append(f"{label}：只用了最新导出的 {pick[1].name}，"
                           f"忽略 {len(dropped)} 份更早的导出")
-        else:
-            issues.append(f"{label}：用了盖住报表区间的那份 {pick[1].name}"
-                          f"（{_rng_text(pick[3])}），忽略 {len(dropped)} 份其它导出")
-    return [(pick[1], pick[2])]
+        return [(pick[1], pick[2])], [f"{s[1].name}（更早的导出）" for s in dropped]
+
+    lo, hi = window
+
+    # ① 区间完全相等的才算候选；同样相等取导出时间最新的
+    exact = [s for s in stamped if s[3] and s[3][0] == lo and s[3][1] == hi]
+    if exact:
+        exact.sort(key=lambda x: (x[0], str(x[1])))
+        pick = exact[-1]
+        dropped = [s for s in stamped if s is not pick]
+        issues.append(
+            f"{label}：用 {pick[1].name}（{_rng_text(pick[3])}，"
+            f"导出于 {_mt_text(pick[0])}）"
+            + (f"，忽略 {len(dropped)} 份其它导出" if dropped else ""))
+        return [(pick[1], pick[2])], [
+            f"{s[1].name}（{_rng_text(s[3])}）" for s in dropped
+        ]
+
+    ranged = [s for s in stamped if s[3]]
+
+    # ② 一份区间都读不出来：只有唯一一份时才敢用，且写明让人自己核
+    if not ranged:
+        if len(stamped) == 1:
+            issues.append(
+                f"{label}：{stamped[0][1].name} 读不出导出区间，按唯一一份使用——"
+                f"请自己核对这份是不是 {lo}~{hi} 的")
+            return [(stamped[0][1], stamped[0][2])], []
+        issues.append(
+            f"⚠ {label}：目录里 {len(stamped)} 份都读不出导出区间，分不清是哪个月的，"
+            f"这次一份都不用（{lo}~{hi}）。请重新导一次，文件名里带日期")
+        return [], [f"{s[1].name}（无区间）" for s in stamped]
+
+    # ③ 有区间、但没有一份正好等于报表区间 → 不用
+    have = "、".join(
+        f"{s[1].name}（{_rng_text(s[3])}，导出于 {_mt_text(s[0])}）"
+        for s in ranged[-3:])
+    issues.append(
+        f"⚠ {label}：没有区间正好是 {lo}~{hi} 的导出，这次不用任何一份。现有：{have}")
+    return [], [f"{s[1].name}（{_rng_text(s[3])}）" for s in stamped]
 
 
 def _map_rank(rng, window, mtime: float) -> tuple:
@@ -1365,7 +1731,8 @@ def _map_rank(rng, window, mtime: float) -> tuple:
 
 def _merge_aggregate(items: list[tuple[Path, list[tuple]]], label: str,
                      window: tuple[str, str] | None = None
-                     ) -> tuple[list[tuple], int, int, list[str], tuple[str, str] | None]:
+                     ) -> tuple[list[tuple], int, int, list[str],
+                                tuple[str, str] | None, list[str]]:
     """合并**按区间汇总**的表（广告 / 联盟佣金）。
 
     这类表没有日期列，一行就是一个商品在整个导出区间的合计。
@@ -1379,11 +1746,16 @@ def _merge_aggregate(items: list[tuple[Path, list[tuple]]], label: str,
       · 部分重叠 → 保留，但明确提示可能重复计入
     读不出区间、又有多份的，退化成「同一商品以最后一份为准」——宁可少算不重复算。
 
-    返回 (合并后的行, 去掉的重复行数, 同商品不同值的行数, 提示, 这次用的区间)。
+    返回 (合并后的行, 去掉的重复行数, 同商品不同值的行数, 提示,
+          这次用的区间, 这次**真正用到的文件名**)。
+
+    最后那一项是给闸门用的：广告费算成 0 有两种完全不同的原因——
+    「这份表本来就没有花费」和「这份表根本不是这个月的、被丢掉了」，
+    后者必须拦住出表，不能和前者一样静默按 0 计。
     """
     issues: list[str] = []
     if not items:
-        return [], 0, 0, issues, None
+        return [], 0, 0, issues, None, []
 
     # ① 多份快照里常常是同一个文件，内容一模一样，先按内容去重
     uniq: list[tuple[Path, list[tuple]]] = []
@@ -1408,9 +1780,17 @@ def _merge_aggregate(items: list[tuple[Path, list[tuple]]], label: str,
         lo, hi = window
         covering = [i for i, r in enumerate(ranges) if r and r[0] <= lo and r[1] >= hi]
         if covering:
-            def _span(i: int) -> int:
+            def _span(i: int) -> tuple:
                 a, b = ranges[i]
-                return (_d(b) - _d(a)).days
+                # 同样窄就挑**最新**那份：同一个月往往导过好几次（实测一家店
+                # 躺着 5 份 10/1~10/31 的广告表），最旧那份是当时的状态，
+                # 后来补的导出才包含新加的计划。以前这里只比天数，
+                # 并列时按 mtime 升序取第一个 = **最旧**，正好反了。
+                try:
+                    mt = uniq[i][0].stat().st_mtime
+                except OSError:
+                    mt = 0.0
+                return ((_d(b) - _d(a)).days, -mt)
 
             best = min(covering, key=_span)
             others = [uniq[j][0].name for j in range(len(uniq)) if j != best]
@@ -1418,6 +1798,46 @@ def _merge_aggregate(items: list[tuple[Path, list[tuple]]], label: str,
             if others:
                 issues.append(f"{label}：按报表区间 {lo}~{hi} 选用了 {uniq[best][0].name}，"
                               f"另有 {len(others)} 份区间不同的表未参与")
+        else:
+            # 一份都盖不住这次区间 → **一份都不用**。
+            #
+            # 以前这里 keep 保持全部，于是「收件箱里只有 8 月那份广告表」时算 7 月，
+            # 会直接把 8 月的花费当成 7 月的：实测 PHT-W1，8 月表 3,602.16 USD
+            # × 63.46 = 228,601 全部记进 7 月报表，广告费一分不差，但月份是错的。
+            # 这种错不报任何异常，报表每列都有数。
+            known = [i for i in range(len(uniq)) if ranges[i]]
+            if known:
+                # 按周/按半月取数的店：几份互不重叠的拼起来正好盖住整段
+                # （10-05~10-11 + 10-12~10-18 + …）。数据是齐的，不该判死。
+                parts = _union_cover(ranges, (lo, hi))
+                if parts:
+                    keep = parts
+                    issues.append(
+                        f"{label}：没有单份盖住 {lo}~{hi}，用 {len(parts)} 份不重叠的拼起来——"
+                        + "、".join(uniq[i][0].name for i in parts[:4]))
+                else:
+                    have = "、".join(
+                        f"{uniq[i][0].name}（{ranges[i][0]}~{ranges[i][1]}）" for i in known[:3]
+                    )
+                    issues.append(
+                        f"⚠ {label}：没有区间正好是 {lo}~{hi} 的导出，"
+                        f"这次不用任何一份。现有：{have}"
+                    )
+                    return [], 0, 0, issues, None, []
+            # 全都读不出区间：**不能「合并全部」**。
+            #
+            # 合并全部 = 把几个月的数据相加，而且不报错、每列都有数。
+            # 手上有几份却认不出是哪个月，唯一安全的选择是不用——
+            # 上层会拦住出表，用户重新导一次（文件名带日期）就好。
+            if len(uniq) == 1:
+                issues.append(
+                    f"{label}：{uniq[0][0].name} 读不出导出区间，按唯一一份使用——"
+                    f"请自己核对这份是不是 {lo}~{hi} 的")
+            else:
+                issues.append(
+                    f"⚠ {label}：目录里 {len(uniq)} 份都读不出导出区间，分不清是哪个月的，"
+                    f"这次一份都不用（{lo}~{hi}）")
+                return [], 0, 0, issues, None, []
 
     # ②' 没有指定区间（或没有一份能盖住整段）时，按区间包含关系去重
     if len(keep) > 1:
@@ -1492,9 +1912,10 @@ def _merge_aggregate(items: list[tuple[Path, list[tuple]]], label: str,
     _rs = [r for r in kept_ranges if r]
     if _rs:
         used = (min(r[0] for r in _rs), max(r[1] for r in _rs))
+    used_files = [p.name for p, _r in kept]
     if header is None:
-        return [], dropped, same_pid_diff, issues, used
-    return [header] + merged, dropped, same_pid_diff, issues, used
+        return [], dropped, same_pid_diff, issues, used, used_files
+    return [header] + merged, dropped, same_pid_diff, issues, used, used_files
 
 
 def _merge_orders(items: list[tuple[Path, list[tuple]]],
@@ -1549,6 +1970,62 @@ def has_orders_table(folder) -> bool:
         return True          # 判不出来就别拦，交给正常流程
 
 
+def orders_covering(folder, window=None, fresh_since: float | None = None
+                    ) -> tuple[bool, str]:
+    """目录里有没有**区间正好等于本次报表区间**的订单表，顺便说清现有什么。
+
+    判据和核算里 `_pick_latest` 完全一致：文件写的导出区间必须和报表区间
+    一字不差（算 10/1~10/7 就只认 10/1~10/7 的文件），同样相等取最新的。
+    这样预检说"有"，核算那边就一定有；两边不会各说一套。
+
+    为什么不能只看"有没有订单文件"（2026-11-05 实测）：
+    店里常年留着 6/7/8 月的老导出，算 10 月时 has_orders_table 照样返回
+    True，预检放行 → 核算跑到 loader 才因为"没有 10 月的导出"抛错。
+    那一步报错走的是"拦截"分支，**不登记待补**，于是订单真到了也没人算，
+    卡片永远停在「等订单：到了自动算」——承诺了不兑现。
+
+    fresh_since 给了就再要求这几份里最新的那份是**这次才落的**：
+    区间对上但文件是上一轮导的，同样不能用（内容可能是旧的）。
+
+    返回 (有没有, 说明)。window 为空时退化成"有没有订单文件"。
+    """
+    try:
+        b, _jm, _sk = _scan_folder(Path(folder))
+    except Exception:  # noqa: BLE001
+        return True, ""          # 判不出来就别拦，交给正常流程
+    items = b.get("order") or []
+    if not items:
+        return False, "目录里没有订单表"
+    if not window or len(window) != 2:
+        return True, ""
+
+    lo, hi = str(window[0]), str(window[1])
+    known = []
+    for p, rows in items:
+        r = table_range(p, rows)
+        if r:
+            known.append((p, r))
+    # 一份区间都读不出来：核算那边会按唯一一份兜底，预检就别拦
+    if not known:
+        return True, ""
+
+    exact = [p for p, r in known if r[0] == lo and r[1] == hi]
+    if not exact:
+        known.sort(key=lambda x: x[1][1])
+        have = "、".join(f"{p.name}（{r[0]}~{r[1]}）" for p, r in known[:3])
+        return False, (f"目录里没有区间正好是 {lo}~{hi} 的订单表"
+                       + (f"；现有：{have}" if have else ""))
+
+    if fresh_since:
+        newest = max(export_time(p) for p in exact)
+        if newest < float(fresh_since):
+            names = "、".join(p.name for p in exact[:2])
+            return False, (f"有 {lo}~{hi} 的订单表，但还是上一次取的那份"
+                           f"（{names}）——这次重新取数的订单还没落地")
+
+    return True, ""
+
+
 def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
                    usd_to_local: float = 1.0,
                    mapping_file: Optional[Path] = None,
@@ -1558,13 +2035,23 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
                    affiliate_fields: dict | None = None,
                    mapping_fields: dict | None = None,
                    window: tuple[str, str] | None = None,
-                   latest_only: bool = True) -> RawData:
+                   latest_only: bool = True,
+                   shop_id: str = "",
+                   declared: Optional[set[str]] = None,
+                   only: Optional[set[str]] = None) -> RawData:
     """从**多个**目录一起读数据，跨目录合并去重。
 
     folders 按「从旧到新」排序传入。单个目录时行为和从前一样。
     window 是这次要核算的日期区间（ISO 字符串），用来在几份广告/佣金表里
     挑出最贴合的那一份——这类表是整段汇总的，选错一份就等于把别的月份
     的费用也算进来了。
+
+    shop_id 给了就核一遍身份证：文件落盘时记的是别家店的，一律不用。
+    这是「串店」唯一能自动拦住的办法——文件名看不出来，表头更看不出来。
+
+    only 是「只用这几份文件」（按 resolve 后的绝对路径）。界面上点
+    「用这批重算」时传进来：那一批取了哪几份就只读哪几份，收件箱里
+    后来又落的文件一概不参与——这是唯一能 100% 复现某一次取数的方式。
     """
     folders = [Path(f) for f in folders if Path(f) and Path(f).is_dir()]
     if not folders:
@@ -1585,15 +2072,73 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
     issues: list[str] = []
     sources: dict[str, str] = {}
     titles: list[str] = []
+
+    # ---- 只认指定的那几份（「用这批重算」）----
+    if only:
+        def _norm(p) -> str:
+            try:
+                return str(Path(p).resolve())
+            except OSError:
+                return str(p)
+
+        allow = {_norm(p) for p in only}
+        kept_any = 0
+        _cn = {"order": "订单表", "ads": "广告表",
+               "affiliate": "联盟佣金表", "mapping": "商品SKU表"}
+        for kind in ("order", "ads", "affiliate", "mapping"):
+            before = len(buckets[kind])
+            buckets[kind] = [(p, r) for p, r in buckets[kind] if _norm(p) in allow]
+            kept_any += len(buckets[kind])
+            if before and not buckets[kind]:
+                issues.append(f"{_cn[kind]}：这一批取数里没有它的文件")
+        json_maps = [(p, i) for p, i in json_maps if _norm(p) in allow]
+        if not kept_any and not json_maps:
+            raise FileNotFoundError(
+                "这一批取数的文件都不在了（被删、被移走或被隔离）。"
+                "请重新取一次数，或者换一批")
+
     # 广告 / 佣金实际用的是哪一段区间（这类表没有日期列，只能整段计入）
     ranges: dict = {}
+    uses: dict[str, prove.TableUse] = {
+        "order": prove.TableUse("order", "订单表"),
+        "ads": prove.TableUse("ads", "广告表"),
+        "affiliate": prove.TableUse("affiliate", "联盟佣金表"),
+        "mapping": prove.TableUse("mapping", "商品SKU表"),
+    }
+
+    # ---- 身份证核对：别家店的文件不参与 ----
+    if shop_id:
+        for kind in ("order", "ads", "affiliate", "mapping"):
+            keep_f, wrong = [], []
+            for p, rows in buckets[kind]:
+                meta = prove.read_meta(p)
+                sid = str(meta.get("shop_id") or "").strip()
+                if sid and sid != str(shop_id):
+                    wrong.append(f"{p.name}（属于 {sid}）")
+                else:
+                    keep_f.append((p, rows))
+            if wrong:
+                buckets[kind] = keep_f
+                uses[kind].rejected.extend(wrong)
+                issues.append(
+                    f"⚠ {uses[kind].label}：有 {len(wrong)} 份文件属于别的店铺，"
+                    f"这次不用——{'、'.join(wrong[:3])}")
+        json_maps = [(p, i) for p, i in json_maps
+                     if not (prove.read_meta(p).get("shop_id")
+                             and str(prove.read_meta(p).get("shop_id")) != str(shop_id))]
 
     # 订单 / 广告 / 佣金一律只用**最新导出的那一份**（用户要求：不复用旧文件）。
     # 显式指定多份快照要合并时（--snapshots）例外，那种场景就是要拼起来。
     if latest_only:
-        buckets["order"] = _pick_latest(buckets["order"], window, "订单表", issues)
-        buckets["ads"] = _pick_latest(buckets["ads"], window, "广告表", issues)
-        buckets["affiliate"] = _pick_latest(buckets["affiliate"], window, "联盟佣金表", issues)
+        for kind, label in (("order", "订单表"), ("ads", "广告表"),
+                            ("affiliate", "联盟佣金表")):
+            picked, rejected = _pick_latest(buckets[kind], window, label, issues)
+            buckets[kind] = picked
+            uses[kind].rejected.extend(rejected)
+            if not picked and rejected and kind != "order":
+                # 有文件但一份都没选上：这是「区间不对」，不是「没有」。
+                # 具体有哪些区间、哪份更新，_pick_latest 已经写进 issues 了。
+                uses[kind].status = prove.ST_OUT_OF_RANGE
 
     # ---- 订单：多份合并去重 ----
     orders: list[OrderLine] = []
@@ -1611,6 +2156,7 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
                     keep_o.append((of, orows))
             if drop_o and keep_o:
                 buckets["order"] = keep_o
+                uses["order"].rejected.extend(drop_o)
                 issues.append("订单表：跳过了 %d 份与报表区间 %s~%s 不重叠的导出——%s"
                               % (len(drop_o), lo, hi, "、".join(drop_o[:3])))
 
@@ -1623,11 +2169,22 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
         orders, overlaps, titles = _merge_orders(buckets["order"], order_fields)
         names = " + ".join(p.name for p, _ in buckets["order"])
         sources["订单"] = names
+        uses["order"].files = [p.name for p, _ in buckets["order"]]
+        uses["order"].range = ranges.get("订单表")
+        uses["order"].rows = len(orders)
+        uses["order"].status = prove.ST_OK if orders else prove.ST_EMPTY
         if len(buckets["order"]) > 1:
             msg = (f"订单表合并：{len(buckets['order'])} 份快照共 "
                    f"{len(orders) + overlaps} 行，去重 {overlaps} 行（重叠部分以最新快照为准）")
             issues.append(msg)
     else:
+        uses["order"].status = (
+            prove.ST_OUT_OF_RANGE if uses["order"].rejected else prove.ST_MISSING)
+        # 说清楚是"根本没有订单表"还是"有、但都不覆盖这次区间"——
+        # 后者是这次才拦下来的：以前会拿别的月份凑合算，出的是废表。
+        _why = next((x for x in issues if x.startswith("⚠ 订单表")), "")
+        if _why:
+            raise FileNotFoundError(_why)
         raise FileNotFoundError(
             f"目录里没识别出订单表：{folders[0]}\n"
             f"（跳过：{'、'.join(skipped) if skipped else '无'}）"
@@ -1692,6 +2249,14 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
 
     if parts:
         sources["映射"] = " + ".join(parts)
+        uses["mapping"].files = [n for _k, n, _i, _r in sorted(fresh, key=lambda x: x[0])]
+        if mapping_file and Path(mapping_file).exists():
+            uses["mapping"].files.append(Path(mapping_file).name)
+        uses["mapping"].rows = len(getattr(sku_index, "by_sku_id", {}) or {})
+        uses["mapping"].status = prove.ST_OK if uses["mapping"].rows else prove.ST_EMPTY
+    else:
+        uses["mapping"].status = (
+            prove.ST_EMPTY if buckets["mapping"] or json_maps else prove.ST_MISSING)
 
     # 这一轮的 SKU 表是不是新导的？拿它跟本轮订单表的修改时间比。
     #
@@ -1745,33 +2310,80 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
         issues.append(f"成本文件不存在：{costs_file}")
 
     # ---- 广告 / 联盟：多份合并去重后汇总 ----
+    #
+    # 关键：`sources[...]` 只在**数据真的用上了**的时候才写。
+    # 以前不管结果是不是空的都写，于是「广告表在、但被区间筛掉了」这种情况
+    # 在 sources 里看着像「有广告数据」，缺表闸门直接放行，广告费按 0 计，
+    # 净利虚高还没人知道。闸门现在看的是 uses，这里必须保持一致。
     ads: dict[str, float] = {}
     if buckets["ads"]:
-        mrows, dropped, diff, agg_issues, used = _merge_aggregate(buckets["ads"], "广告表", window)
+        (mrows, dropped, diff, agg_issues,
+         used, used_files) = _merge_aggregate(buckets["ads"], "广告表", window)
         issues += agg_issues
+        used_files = used_files or []
         ads, ad_issues = parse_ads(mrows, usd_to_local, ads_fields)
         issues += ad_issues
-        sources["广告"] = " + ".join(p.name for p, _ in buckets["ads"])
         if used:
             ranges["广告表"] = used
-        if len(buckets["ads"]) > 1:
-            issues.append(f"广告表合并：{len(buckets['ads'])} 份快照，去重 {dropped} 行")
-            if diff:
-                issues.append(f"广告表有 {diff} 行「同商品+同日期但金额不同」，"
-                              f"若该表是按区间汇总而非按天明细，请核对是否重复计入")
+        u = uses["ads"]
+        u.files = used_files
+        u.range = used
+        u.rows = len(ads)
+        if not used_files:
+            u.status = prove.ST_OUT_OF_RANGE
+        elif not ads:
+            u.status = prove.ST_EMPTY
+        else:
+            u.status = prove.ST_OK
+            sources["广告"] = " + ".join(used_files)
+            _unk = last_unknown_ads()
+            if _unk:
+                # 币种认不出 = 这块钱按 0 计了。报表上看不出任何异常，
+                # 但净利实打实偏高——必须拦住，让人去「参数」页把广告账户币种填对。
+                u.blocker = (f"广告费里有 {_unk:,.2f} 的金额币种认不出，"
+                             f"已被按 0 计入（净利会偏高）。"
+                             f"请到「参数 → 广告账号币种」选对币种后重算")
+            if len(buckets["ads"]) > 1:
+                issues.append(f"广告表合并：{len(buckets['ads'])} 份快照，去重 {dropped} 行")
+                if diff:
+                    issues.append(f"广告表有 {diff} 行「同商品+同日期但金额不同」，"
+                                  f"若该表是按区间汇总而非按天明细，请核对是否重复计入")
 
     commissions: dict[str, float] = {}
     if buckets["affiliate"]:
-        mrows, dropped, diff, agg_issues, used = _merge_aggregate(
+        (mrows, dropped, diff, agg_issues,
+         used, used_files) = _merge_aggregate(
             buckets["affiliate"], "联盟佣金表", window)
         issues += agg_issues
+        used_files = used_files or []
         commissions, com_issues = parse_commissions(mrows, affiliate_fields)
         issues += com_issues
-        sources["联盟佣金"] = " + ".join(p.name for p, _ in buckets["affiliate"])
         if used:
             ranges["联盟佣金表"] = used
-        if len(buckets["affiliate"]) > 1:
-            issues.append(f"联盟佣金表合并：{len(buckets['affiliate'])} 份快照，去重 {dropped} 行")
+        u = uses["affiliate"]
+        u.files = used_files
+        u.range = used
+        u.rows = len(commissions)
+        if not used_files:
+            u.status = prove.ST_OUT_OF_RANGE
+        elif not commissions:
+            u.status = prove.ST_EMPTY
+        else:
+            u.status = prove.ST_OK
+            sources["联盟佣金"] = " + ".join(used_files)
+            if len(buckets["affiliate"]) > 1:
+                issues.append(f"联盟佣金表合并：{len(buckets['affiliate'])} 份快照，去重 {dropped} 行")
+
+    # 没被采用的同类文件，记进 rejected（出表被拦时原样展示，避免"我明明导了"）
+    for kind in ("ads", "affiliate"):
+        u = uses[kind]
+        if buckets[kind]:
+            if not u.files:
+                u.rejected = [f"{p.name}（区间对不上，未采用）" for p, _ in buckets[kind]]
+            else:
+                u.rejected.extend(f"{p.name}（本次未采用）" for p, _ in buckets[kind]
+                                  if p.name not in u.files)
+        u.rejected = list(dict.fromkeys(u.rejected))
 
     for kind, label in (("ads", "广告表"), ("affiliate", "联盟佣金表"), ("mapping", "商品映射表")):
         if buckets[kind]:
@@ -1787,14 +2399,22 @@ def load_from_dirs(folders: list[Path], costs_file: Optional[Path] = None,
                 "扩展取商品数据时会自动导出这张表，存到店铺目录下的「商品SKU表」"
             )
             continue
+        # 有文件但被区间筛掉的，别说成"没识别出"——那会让人以为文件坏了
+        if uses[kind].rejected:
+            continue
+        tgt = "ads" if kind == "ads" else "affiliate"
+        if uses[tgt].status not in (prove.ST_DECLARED,):
+            uses[tgt].status = prove.ST_MISSING
         issues.append(f"目录里没识别出{label}，相关字段按 0 计")
 
     attach_product_ids(orders, sku_index, issues)
-    attach_costs(orders, costs, issues)
+    missing_costs = attach_costs(orders, costs, issues)
 
     return RawData(orders=orders, costs=costs, sku_index=sku_index, ads=ads,
                    commissions=commissions, issues=issues, sources=sources,
-                   order_titles=titles, ranges=ranges)
+                   missing_costs=dict(missing_costs),
+                   order_titles=titles, ranges=ranges, uses=uses,
+                   declared=set(declared or ()), window=window)
 
 
 def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
@@ -1804,11 +2424,14 @@ def load_from_dir(folder: Path, costs_file: Optional[Path] = None,
                   cost_fields: dict | None = None,
                   ads_fields: dict | None = None,
                   affiliate_fields: dict | None = None,
-                  mapping_fields: dict | None = None) -> RawData:
+                  mapping_fields: dict | None = None,
+                  shop_id: str = "",
+                  declared: Optional[set[str]] = None) -> RawData:
     """从目录自动识别四类文件（单个目录的快捷方式）。"""
     return load_from_dirs([Path(folder)], costs_file, usd_to_local, mapping_file,
                           order_fields, cost_fields,
-                          ads_fields, affiliate_fields, mapping_fields)
+                          ads_fields, affiliate_fields, mapping_fields,
+                          shop_id=shop_id, declared=declared)
 
 
 def load_from_workbook(path: Path, usd_to_local: float = 1.0,
@@ -1852,8 +2475,22 @@ def load_from_workbook(path: Path, usd_to_local: float = 1.0,
     issues += ad_issues + com_issues
 
     attach_product_ids(orders, sku_index, issues)
-    attach_costs(orders, costs, issues)
+    missing_costs = attach_costs(orders, costs, issues)
 
+    # 老工作簿没有导出区间（整本就是一个区间），闸门只按「有没有数据」判
+    uses = {
+        "order": prove.TableUse("order", "订单表", prove.ST_OK if orders else prove.ST_EMPTY,
+                                [path.name], None, len(orders)),
+        "ads": prove.TableUse("ads", "广告表", prove.ST_OK if ads else prove.ST_EMPTY,
+                              [path.name], None, len(ads)),
+        "affiliate": prove.TableUse("affiliate", "联盟佣金表",
+                                    prove.ST_OK if commissions else prove.ST_EMPTY,
+                                    [path.name], None, len(commissions)),
+        "mapping": prove.TableUse("mapping", "商品SKU表",
+                                  prove.ST_OK if len(sku_index.by_sku_id) else prove.ST_EMPTY,
+                                  [path.name], None, len(sku_index.by_sku_id)),
+    }
     return RawData(orders=orders, costs=costs, sku_index=sku_index, ads=ads,
                    commissions=commissions, issues=issues,
-                   sources={"工作簿": path.name}, order_titles=titles)
+                   sources={"工作簿": path.name}, order_titles=titles, uses=uses,
+                   missing_costs=dict(missing_costs))

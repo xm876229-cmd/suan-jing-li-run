@@ -375,5 +375,14 @@ def run(verbose: bool = False, check_crash: bool = True) -> dict:
         except Exception:  # noqa: BLE001
             pass
 
+    # 顺便把「数据根在哪」一起返回：界面「调试 → 自检」能直接看到
+    # 这份数据到底是本程序目录的还是被 JINGLI_HOME 指到别处的。
+    # 装了两个版本的人最需要确认这一条 —— 串了的话所有数字都是别人的。
+    try:
+        where = paths.describe()
+    except Exception:  # noqa: BLE001
+        where = {}
+
     return {"ok": True, "crashed": crashed, "actions": actions,
+            "paths": where,
             "at": time.strftime("%Y-%m-%d %H:%M:%S")}

@@ -93,7 +93,7 @@ def _pending_drop(key: str) -> None:
 
 def _calc_cmd(shop_id: str, country: str, dfrom: str, dto: str,
               out: Path, with_formula: bool, data_dir: Path | None = None,
-              final_name: str = "") -> list[str]:
+              final_name: str = "", json_out: Path | None = None) -> list[str]:
     """拼出核算子进程的命令（和界面点「核算」走的是同一条路）。
 
     data_dir 只给手动核算用：数据在「店铺/手动导入」，但费率口径还按这家店来，
@@ -116,6 +116,10 @@ def _calc_cmd(shop_id: str, country: str, dfrom: str, dto: str,
     if final_name:
         # 公式版缓存要用最终报表名（out 可能是个临时名）
         cmd += ["--final-name", final_name]
+    if json_out is not None:
+        # 打包版 stdout 是空的（windowed → sys.stdout=None），
+        # 摘要只能走文件。这是补算写不出历史、桥判不出结果的根因。
+        cmd += ["--json-out", str(json_out)]
     return cmd
 
 
@@ -209,29 +213,22 @@ _RETRY_FETCH_AFTER = 6 * 60
 _RETRY_FETCH_GAP = 8 * 60
 
 
-def _orders_fresh(shop_id: str, since: float) -> bool:
-    """店里有没有「这次才落地」的订单表。
+def _retry_after_seconds(info: dict) -> float:
+    """等多久才重新派一轮取数。
 
-    为什么不能只看"有没有订单表"：店里往往还留着上一次导的**别的月份**，
-    拿它去核算会得到 GMV 0、净利为负的废报表，而且一声不响。
-    实测就踩过：9 月的待补，桥看见 10 月那份表就开算，报表 GMV 0、净利 -93212，
-    6 秒后 9 月的表才落地——那份废报表当时已经生成了。
+    整月的大导出本来就慢：实测 2026-11-04 的 8 月单店，平台生成订单用了 9 分钟
+    （15:04:16 提交 → 15:13:10 才落地），而这里原来是固定 6 分钟就重派。
+    重派对这家店没帮助（文件还是原来那个先到），只是又往平台排一个导出任务、
+    多占一个队列位。所以跨 20 天以上的区间放宽到 12 分钟。
+    短区间仍然 6 分钟——那种情况多半是回收路真的断了，早重派早好。
     """
     try:
-        from src import loader as _ld
-        b, _jm, _sk = _ld._scan_folder(paths.store_dir(shop_id))
+        d1 = datetime.strptime(str(info.get("from") or ""), "%Y-%m-%d")
+        d2 = datetime.strptime(str(info.get("to") or ""), "%Y-%m-%d")
+        days = (d2 - d1).days + 1
     except Exception:  # noqa: BLE001
-        return True                      # 判不出来就别拦
-    files = [p for p, _rows in (b.get("order") or [])]
-    if not files:
-        return False
-    newest = 0.0
-    for f in files:
-        try:
-            newest = max(newest, float(Path(f).stat().st_mtime))
-        except OSError:
-            continue
-    return newest >= since - 60      # 给文件系统时间戳留一分钟余量
+        return float(_RETRY_FETCH_AFTER)
+    return float(12 * 60) if days >= 20 else float(_RETRY_FETCH_AFTER)
 
 
 def _retry_fetch_if_stuck(key: str, info: dict, now: float) -> None:
@@ -243,7 +240,7 @@ def _retry_fetch_if_stuck(key: str, info: dict, now: float) -> None:
     这里兜底：等太久就重新派一轮，扩展跑任务时是在**页面里**导的，那条路是通的。
     """
     at = float(info.get("at") or 0)
-    if now - at < _RETRY_FETCH_AFTER:
+    if now - at < _retry_after_seconds(info):
         return
     last = float(info.get("retried_at") or 0)
     if last and now - last < _RETRY_FETCH_GAP:
@@ -273,25 +270,110 @@ def _retry_fetch_if_stuck(key: str, info: dict, now: float) -> None:
         _pending_save(d)
     try:
         _enqueue(shop_id, {"startDate": dfrom, "to": dto}, task="all", auto=True,
-                 country=str(info.get("country") or ""), force=True)
+                 country=str(info.get("country") or ""), force=True,
+                 # 带上计划的「带公式」开关。以前没传，重派出来的任务
+                 # 补算时按设置页的默认值（不带公式）出表 ——
+                 # 实测 2026-11-04 Your-Self Home：同一条带公式的计划里，
+                 # 只有它因为重派出了 17 列的不带公式版，其余四家都是 19 列。
+                 # None = 没记过就跟随设置，别硬写成 False（会凭空丢公式）
+                 with_formula=(info.get("with_formula")
+                               if isinstance(info.get("with_formula"), bool) else None))
     except Exception:  # noqa: BLE001
         return
     _append_log(f"[auto] {info.get('store_name') or shop_id} 的订单等太久了"
                 f"（{int((now - at) // 60)} 分钟），重新派一轮取数")
 
 
-def _mark_done_after_autocalc(shop_id: str, report_path) -> None:
-    """补算成功后，把界面上那张卡也改成「本轮到齐」。
+def _history_from_stdout(text: str, store_name: str, shop_id: str,
+                         dfrom: str, dto: str, out) -> None:
+    """把核算输出的那行 JSON 记进 history.jsonl（跟 /run 完全同一条口径）。
 
-    为什么需要：补算是桥这边起的子进程，绕过了扩展的进度上报。
-    以前算完只写一条日志，卡片还停在扩展最后报的状态——
-    「订单导出已排队」「核算 等订单」「出报表 —」，右上角标着「有失败」，
-    明明报表已经躺在 报表/自动/<店>/ 里了。用户看到的就是「它没完成」。
+    补算这条路以前不记，结果：报表在、卡片写着「上次成功」，
+    但「运行历史」和走势图里没有这一笔——对账时以为漏算了一轮。
+    """
+    try:
+        from bridge import settings_api
+        summary = None
+        for line in reversed(str(text or "").strip().splitlines()):
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    summary = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                break
+        if not isinstance(summary, dict):
+            # 解析不到就在日志里留一条：以前是静默 return，结果「补算不写历史」
+            # 这个 bug 只能靠翻 history.jsonl 才发现。
+            _append_log(f"[auto] 补算结果解析失败（历史没记）：输出 {len(str(text or ''))} 字，"
+                        f"末段 {str(text or '').strip()[-120:]!r}")
+            return
+        settings_api.append_history({
+            "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "store": store_name,
+            "shop_id": shop_id,
+            "from": dfrom or "",
+            "to": dto or "",
+            "gmv": summary.get("gmv"),
+            "cost": summary.get("cost"),
+            "fees": summary.get("fees"),
+            "net": summary.get("net_local"),
+            "net_cny": summary.get("net_cny"),
+            "report": os.path.basename(str(out or "")),
+        })
+    except Exception as e:  # noqa: BLE001
+        _append_log(f"[auto] 写历史失败：{e}")
+
+
+def _history_from_summary(path, store_name: str, shop_id: str,
+                          dfrom: str, dto: str, out, stdout_text: str = "") -> None:
+    """补算写历史：优先读核算子进程留下的 JSON 文件，读不到再解析 stdout。
+
+    为什么要有文件这条路：打包版用 --windowed，子进程里 `sys.stdout` 是 None，
+    `jingli.exe run --json` 一个字节都写不出来（实测 `_run_calc_cmd` 返回 0 字），
+    于是自动补算的报表算出来了、历史里却没有这一笔。
+    """
+    try:
+        p = Path(str(path))
+        if p.is_file():
+            txt = p.read_text(encoding="utf-8").strip()
+            if txt:
+                _history_from_stdout(txt, store_name, shop_id, dfrom, dto, out)
+                return
+        _history_from_stdout(stdout_text, store_name, shop_id, dfrom, dto, out)
+    except Exception as e:  # noqa: BLE001
+        _append_log(f"[auto] 写历史失败：{e}")
+    finally:
+        try:
+            Path(str(path)).unlink()
+        except OSError:
+            pass
+
+
+def _mark_steps_done(shop_id: str, report_name: str = "", *,
+                     mark_orders: bool = False,
+                     elapsed: float | None = None) -> None:
+    """核算成功后，把卡片上的「核算 / 出报表」两格勾上。
+
+    为什么必须由桥来做：核算有三个入口——
+
+      · 扩展点「运行」：扩展自己会逐步上报，卡片本来就是对的
+      · 界面点「重算」：走 /run，同样由扩展（或界面）负责显示
+      · **订单补回后的回调**：桥自己 POST /run 算的那一次，绕过了扩展
+
+    第三条以前走 _pending_tick（那里会同步卡片），0.24.70 改成直接调 /run
+    之后就没有这一步了。于是报表已经躺在「报表」页里，卡片还停在
+    「订单表 等订单：到了自动算 / 核算 —— / 出报表 ——」。
+    实测 2026-11-05 11:42：PHT-B1 / PHT-M2 / PHT-M4 / PHT-W1 四家全是这样，
+    而同一轮里走扩展那条路的 MYT-V1 是打勾的——正是这个差别。
+
+    mark_orders 只在「这次用的订单是刚补回的」时才给：重算用的是本机旧数据，
+    不能把「等订单」说成「已到」，那是撒谎。
     """
     if not shop_id:
         return
     now = time.time()
-    name = os.path.basename(str(report_path or ""))
+    name = os.path.basename(str(report_name or ""))
     with _PROGRESS_LOCK:
         rec = _PROGRESS.get(shop_id) or {}
         if not isinstance(rec, dict):
@@ -299,16 +381,25 @@ def _mark_done_after_autocalc(shop_id: str, report_path) -> None:
         steps = rec.get("steps")
         if not isinstance(steps, dict):
             steps = {}
-        # 订单：之前是 fail 或 skip（"等订单：到了自动算"），文件已经补回来了
-        o = steps.setdefault("orders", {})
-        o["state"] = "done"
-        o["detail"] = "订单已补回"
-        steps.setdefault("calc", {})["state"] = "done"
-        steps["calc"]["detail"] = "已自动补算"
+        if mark_orders:
+            o = steps.get("orders")
+            if isinstance(o, dict) and str(o.get("state") or "") in ("", "skip", "fail"):
+                o["state"] = "done"
+                o["detail"] = "订单已补回"
+        c = steps.setdefault("calc", {})
+        c["state"] = "done"
+        c["detail"] = "已算完"
         rp = steps.setdefault("report", {})
         rp["state"] = "done"
         if name:
             rp["detail"] = name
+        # 耗时：「核算 27 秒」这种小字只有走扩展那条路才有（扩展自己上报），
+        # 桥补回算的那条一直空着 —— 同一轮里一半店有、一半店没有，看着像漏了。
+        # 子进程跑了多久是知道的，补上。
+        if elapsed is not None:
+            sec = max(0.0, float(elapsed))
+            c["elapsed"] = round(sec, 1)
+            rp["elapsed"] = round(sec, 1)
         rec["steps"] = steps
         rec["current"] = ""
         rec["finished"] = now
@@ -328,16 +419,25 @@ def _pending_tick() -> None:
             _pending_drop(key)
             continue
         shop_id = str(info.get("shop_id") or "")
-        # 只认「这次才落地」的订单表：店里留着别的月份不算数，
-        # 拿它去算会得到 GMV 0、净利为负的废报表。
-        if not _orders_fresh(shop_id, float(info.get("at") or 0)):
+        store_name = str(info.get("store_name") or shop_id)
+        dfrom = str(info.get("from") or "")
+        dto = str(info.get("to") or "")
+        # 只认「这次才落地、而且盖得住本次区间」的订单表：
+        # 店里留着别的月份不算数，拿它去算会得到 GMV 0、净利为负的废报表；
+        # 同月的旧导出也不算——那是上一次取数的快照（2026-11-05 实测过）。
+        try:
+            from src import loader as _ld2
+            _win2 = (dfrom, dto) if (dfrom and dto) else None
+            _ready, _why2 = _ld2.orders_covering(
+                paths.store_dir(shop_id), _win2,
+                fresh_since=float(info.get("at") or 0))
+        except Exception:  # noqa: BLE001
+            _ready, _why2 = True, ""
+        if not _ready:
             # 订单还没到：要么平台还在生成，要么那条回收路已经废了。
             # 等太久就重新派一轮，别让这份待补无限期躺着。
             _retry_fetch_if_stuck(key, info, now)
             continue
-        store_name = str(info.get("store_name") or shop_id)
-        dfrom = str(info.get("from") or "")
-        dto = str(info.get("to") or "")
         # 同一家店可能同时在「手动点运行」和「补算排队」——两边都调核算子进程，
         # 会各写一份报表、互相抢映射主表。用同一把按店锁串起来，抢不到就下一分钟再说。
         _lk = _run_lock_for(_canon_shop(shop_id))
@@ -349,12 +449,25 @@ def _pending_tick() -> None:
             final_out = _report_out(store_name, dfrom, dto, shop_id=shop_id,
                                     unique=False)
             out = final_out.with_name(f".{os.getpid()}.calc.xlsx")
+            # 摘要写文件：打包版 stdout 是空的，_run_calc_cmd 返回 0 字节，
+            # 结果就是「报表算出来了、历史没记、日志说解析失败」。
+            _sum = out.with_name(f".{os.getpid()}.calc.summary.json")
+            # 没记过公式开关就跟随「设置 → 报表」：以前这里写死 False，
+            # 补出来的报表会比手动跑的那份少一整套公式，肉眼看不出来。
+            _wf = info.get("with_formula")
+            if not isinstance(_wf, bool):
+                try:
+                    from src import settings as _st
+                    _wf = bool(_st.load().get("with_formula"))
+                except Exception:  # noqa: BLE001
+                    _wf = False
             _append_log(f"[auto] 订单已到，自动补算：{store_name} {dfrom}~{dto}")
             try:
                 ok, msg = _run_calc_cmd(_calc_cmd(shop_id, str(info.get("country") or ""),
                                                   dfrom, dto, out,
-                                                  bool(info.get("with_formula")),
-                                                  final_name=final_out.name))
+                                                  _wf,
+                                                  final_name=final_out.name,
+                                                  json_out=_sum))
             except Exception as e:  # noqa: BLE001
                 ok, msg = False, str(e)
             if ok and out.exists():
@@ -371,7 +484,12 @@ def _pending_tick() -> None:
         _pending_drop(key)
         if ok:
             _append_log(f"[auto] 补算完成：{out}")
-            _mark_done_after_autocalc(shop_id, out)
+            _mark_calc_done(_calc_key(shop_id, dfrom, dto))
+            _mark_steps_done(shop_id, os.path.basename(str(out)),
+                             mark_orders=True)
+            # 补算绕过了 /run，所以以前只有卡片状态更新、history.jsonl 少一笔：
+            # 走势图和「运行历史」里会缺这一次，跟卡片上的「上次成功」对不上。
+            _history_from_summary(_sum, store_name, shop_id, dfrom, dto, out, msg)
         else:
             _append_log(f"[auto] 补算失败：{str(msg)[-300:]}")
 
@@ -383,10 +501,11 @@ def _pending_runner() -> None:
             _pending_tick()
         except Exception:  # noqa: BLE001
             pass
-        # 20 秒一轮（原来 60 秒）。
+        # 10 秒一轮（60 → 20 → 10）。
         # 订单文件落地后，这里就是"多久能开始算"的唯一瓶颈：
-        # 60 秒一轮意味着平均白等 30 秒，大店三家叠起来就是一两分钟。
-        time.sleep(20)
+        # 实测 LR 12:39:06 订单落地、12:39:20 才开始算，白等 14 秒。
+        # 一轮只是一次 stat，开销可忽略。
+        time.sleep(10)
 INBOX_DIR = paths.INBOX
 MAPPING_DIR = paths.MAPPING
 LOG_FILE = paths.CAPTURE / "task.log"
@@ -410,12 +529,206 @@ _AUTO_JOB_TTL_MS = 12 * 60 * 60 * 1000
 _ONLINE: dict[str, dict] = {}
 _ONLINE_LOCK = threading.Lock()
 
-# 手动「停止」：界面点一下，把这家店（或全部）标成要停；
-# 扩展在跑的过程中每隔几秒问一次，看到就收手。
-# 存时间戳而不是 True：十分钟后自动过期，免得一次误点把下一次也停了。
-_STOP: dict[str, float] = {}
+# 手动「停止」：界面点一下，把这家店（或全部）标成要停。
+#
+# 这里必须分清两件事，2026-11-06 就是混在一起才出现「点了停止、按钮挂一小时」：
+#   1. 桥自己能停的：本机核算子进程、派单队列、待补订单 —— 收到请求当场收掉；
+#   2. 桥停不了的：浏览器里正在跑的取数（页面点击、等平台生成）—— 只能发信号，
+#      扩展每 1.5 秒来问一次，收到后在下一个检查点退出，然后回一句「收手了」。
+# 所以结构里要带 ack：只有扩展确认了，才算真停；超时就由桥自己收干净并写明原因。
+_STOP: dict[str, dict] = {}
 _STOP_LOCK = threading.Lock()
 _STOP_TTL = 600.0
+# 扩展收到停止后，最多等这么久回执。超过认定浏览器没响应（标签休眠/扩展挂了）。
+_STOP_ACK_TIMEOUT = 12.0
+# 正在跑的核算子进程：停止时直接掐，不能让它算完（大店一算就是两三分钟）。
+_RUNNING_PROC: dict[str, dict] = {}
+# 被「停止」掐掉的店。Windows 上被 kill 的进程返回码是 1（不是负数），
+# 光看 returncode 分不出「用户停的」和「真的算错了」，所以自己记一笔。
+_KILLED: set[str] = set()
+_PROC_LOCK = threading.Lock()
+
+
+def _stop_purge(now: float | None = None) -> None:
+    """丢掉过期标记。必须在持锁时调用。"""
+    t = float(now if now is not None else time.time())
+    for k in list(_STOP):
+        ent = _STOP.get(k)
+        at = float((ent or {}).get("at") or 0) if isinstance(ent, dict) else 0.0
+        if not at or t - at > _STOP_TTL:
+            _STOP.pop(k, None)
+
+
+def _stop_request(sid: str, run_id: str = "") -> dict:
+    """记下停止请求，返回这条记录。"""
+    with _STOP_LOCK:
+        _stop_purge()
+        ent = {"at": time.time(), "run_id": str(run_id or ""),
+               "ack": None, "acks": set()}
+        _STOP[(sid or "*")] = ent
+        return {"at": ent["at"], "run_id": ent["run_id"], "ack": None}
+
+
+def _stop_state(sid: str) -> tuple[bool, float, bool, str]:
+    """→ (这家店还在停的过程里吗, 已过几秒, 扩展确认了没, 那一轮的 run_id)。
+
+    「停止全部」是一条 "*" 记录，但每家店各自 ack，所以这里按店判断：
+    已经回过执的店不再显示「正在停止」，免得一家店卡住把别家也拖着。
+    """
+    with _STOP_LOCK:
+        _stop_purge()
+        ent = _STOP.get(sid)
+        if isinstance(ent, dict):
+            acked = bool(ent.get("ack"))
+        else:
+            ent = _STOP.get("*")
+            if not isinstance(ent, dict):
+                return False, 0.0, False, ""
+            acked = sid in (ent.get("acks") or set())
+        elapsed = max(0.0, time.time() - float(ent.get("at") or 0))
+        return (not acked), elapsed, acked, str(ent.get("run_id") or "")
+
+
+def _stop_ack(sid: str, run_id: str = "") -> float | None:
+    """扩展回执：它那边的循环真的退出了。返回用时（秒）。"""
+    with _STOP_LOCK:
+        ent = _STOP.get(sid)
+        if not isinstance(ent, dict):
+            ent = _STOP.get("*")
+            if isinstance(ent, dict):
+                acks = ent.setdefault("acks", set())
+                if isinstance(acks, list):
+                    acks = set(acks)
+                    ent["acks"] = acks
+                acks.add(sid)
+        if not isinstance(ent, dict):
+            return None
+        if run_id and ent.get("run_id") and run_id != ent.get("run_id"):
+            return None            # 不是这一轮的回执，别把用时算错
+        ent["ack"] = time.time()
+        ent["elapsed"] = round(max(0.0, ent["ack"] - float(ent.get("at") or 0)), 1)
+        return float(ent["elapsed"])
+
+
+def _stop_skip(sid: str) -> None:
+    """这家店要开新一轮了：让它不再受上一轮（含「全部停止」）影响。
+
+    只 pop 自己的键还不够——「全部停止」是 "*" 那条记录，不清的话
+    这家店的扩展下一次轮询仍会拿到 stop=true，新一轮刚起就被掐。
+    """
+    _stop_clear(sid)
+    with _STOP_LOCK:
+        ent = _STOP.get("*")
+        if isinstance(ent, dict):
+            acks = ent.setdefault("acks", set())
+            if isinstance(acks, list):
+                acks = set(acks)
+                ent["acks"] = acks
+            acks.add(sid)
+
+
+def _stop_clear(sid: str) -> None:
+    """清掉这家店自己的停止标记（新一轮开始用）。
+
+    注意**不动** "*"：那是「全部停止」，一家店开新一轮不该把别家的停止撤掉。
+    """
+    with _STOP_LOCK:
+        if sid:
+            _STOP.pop(sid, None)
+
+
+def _mark_stopped(sid: str, note: str = "已按停止收手") -> bool:
+    """把这家店还挂着 running 的步骤就地改成 stopped，并清掉 current。
+
+    这一步是「界面上按钮当场回运行」的关键：界面判断在不在跑看的就是
+    progress.current，不清它，停止信号发一百遍按钮也不会变。
+    """
+    now = time.time()
+    changed = False
+    with _PROGRESS_LOCK:
+        rec = _PROGRESS.get(sid)
+        if not isinstance(rec, dict):
+            return False
+        steps = rec.get("steps")
+        if not isinstance(steps, dict):
+            steps = {}
+        for v in steps.values():
+            if isinstance(v, dict) and str(v.get("state") or "") == "running":
+                v["state"] = "stopped"
+                v["detail"] = note
+                v["at"] = now
+                changed = True
+        if rec.get("current"):
+            rec["current"] = ""
+            rec["updated"] = now
+            rec["finished"] = now
+            rec["ok"] = False
+            rec["stopped"] = True
+            changed = True
+        rec["steps"] = steps
+        _PROGRESS[sid] = rec
+    return changed
+
+
+def _drop_queue(sid: str) -> int:
+    """把这家店还没被领走的任务从队列里删掉（停都停了，别再跑）。"""
+    if not sid:
+        return 0
+    n = 0
+    try:
+        with _PENDING_LOCK:
+            keep = []
+            for j in _PENDING:
+                if isinstance(j, dict) and str(j.get("store") or "") == sid:
+                    n += 1
+                    continue
+                keep.append(j)
+            _PENDING[:] = keep
+    except Exception:  # noqa: BLE001
+        return 0
+    return n
+
+
+def _drop_pending_runs(sid: str, store_name: str = "") -> int:
+    """把「等订单到了自动算」的待补记录删掉，否则停完它还会自己去取、去出表。"""
+    try:
+        d = _pending_load()
+    except Exception:  # noqa: BLE001
+        return 0
+    if not d:
+        return 0
+    n = 0
+    for key in list(d.keys()):
+        info = d.get(key) or {}
+        if str(info.get("shop_id") or "") == sid or (
+                store_name and str(info.get("store_name") or "") == store_name):
+            d.pop(key, None)
+            n += 1
+    if n:
+        try:
+            _pending_save(d)
+        except Exception:  # noqa: BLE001
+            pass
+    return n
+
+
+def _kill_calc(sid: str) -> bool:
+    """掐掉这家店正在跑的核算子进程。"""
+    with _PROC_LOCK:
+        item = _RUNNING_PROC.get(sid)
+    if not item:
+        return False
+    proc = item.get("proc")
+    try:
+        if proc and proc.poll() is None:
+            with _PROC_LOCK:
+                _KILLED.add(sid)
+            proc.kill()
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
 
 # 同一时刻最多几家在取数。
 #
@@ -458,6 +771,129 @@ def _online_now(shop_id: str) -> bool:
 _CAP_TTL = 12.0
 _CAP_BRIEF: dict[str, tuple[float, dict]] = {}
 _CAP_BRIEF_LOCK = threading.Lock()
+
+
+# 卡片上那四行「订单表 / 商品SKU表 / 广告表 / 联盟佣金表」分别对应哪个目录。
+# 桥要能从磁盘上把「这次到底落了哪个文件」读出来，不能只靠扩展上报——
+# 扩展在复用、补回、接口直下这几条路上都不会带文件名，卡片那格就空着，
+# 看起来像「这一类没取到」，实际是取到了只是没显示。
+_STEP_DIR = {
+    "orders": "订单表",
+    "sku": "商品SKU表",
+    "ads": "广告表",
+    "affiliate": "联盟佣金表",
+}
+
+
+def _latest_kind_files(shop_id: str, since: float = 0.0) -> dict[str, str]:
+    """这家店每类表**最近落盘的那一份**（文件名）。
+
+    since 是「这一轮大约什么时候开始的」。只认这之后（留 6 小时余量）落盘的文件——
+    否则会把上个月那份的名字贴到这次的卡片上，比空着更误导。
+
+    来源两处，先台账（上传当时记的，最准），再目录（手动导入/老版本留下的没有台账）。
+    """
+    sid = (shop_id or "").strip()
+    out: dict[str, str] = {}
+    if not sid:
+        return out
+    floor = (since - 6 * 3600) if since else 0.0
+    try:
+        from src import capture as _cap
+        for e in reversed(_cap.load(sid).get("entries") or []):
+            k = str(e.get("kind") or "")
+            if k in _STEP_DIR and k not in out:
+                rel = str(e.get("file") or "")
+                at = str(e.get("at") or "")
+                if not rel:
+                    continue
+                if floor:
+                    try:
+                        ts = datetime.strptime(at, "%Y-%m-%d %H:%M:%S").timestamp()
+                    except ValueError:
+                        ts = 0.0
+                    if ts and ts < floor:
+                        continue
+                base = os.path.basename(rel.replace("\\", "/"))
+                # 台账里 kind=sku 也记过「链接资料」导出的 CSV（同一接口顺带导的），
+                # 拿它当「商品SKU表」显示会让人以为 SKU 表没取到。跳过，交给目录扫描。
+                if k == "sku" and not ("sku" in base.lower() or "商品数据" in base):
+                    continue
+                out[k] = base
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        root = paths.store_root(sid)
+        for kind, sub in _STEP_DIR.items():
+            if kind in out:
+                continue
+            # 收件箱是按「收件箱/<类型>/」放的，SKU 表直接在店铺根下。
+            # 两个位置都要找，不能只认一种。
+            dirs = [d for d in (root / sub, root / "收件箱" / sub) if d.is_dir()]
+            best = None
+            for d in dirs:
+                for f in d.rglob("*"):
+                    if not f.is_file() or f.name.startswith(".") or f.name.startswith("~$"):
+                        continue
+                    if f.name.endswith(".srcmeta.json"):
+                        continue
+                    if f.suffix.lower() not in (".csv", ".xlsx", ".xls"):
+                        continue
+                    try:
+                        mt = f.stat().st_mtime
+                    except OSError:
+                        continue
+                    if floor and mt < floor:
+                        continue
+                    # SKU 表目录里还躺着「链接资料」导出的 CSV，选它显示会让人
+                    # 以为商品 SKU 表没取到。优先 name 里带 sku / 商品数据的。
+                    pref = 1 if (kind == "sku" and ("sku" in f.name.lower()
+                                                    or "商品数据" in f.name)) else 0
+                    key = (pref, mt)
+                    if best is None or key > best[0]:
+                        best = (key, f)
+            if best:
+                out[kind] = best[1].name
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _fill_step_files(shop_id: str, rec: dict | None) -> None:
+    """把「已完成」的那几类表补上文件名（就地改 rec）。
+
+    只补**这一轮报过 done 的**，不碰 running / skip / fail：
+    「等订单：到了自动算」那行必须保持原样，不能被一个上个月的文件名盖掉。
+    """
+    if not isinstance(rec, dict):
+        return
+    steps = rec.get("steps")
+    if not isinstance(steps, dict) or not steps:
+        return
+    since = float(rec.get("started") or rec.get("updated") or 0.0)
+    files = _latest_kind_files(shop_id, since)
+    if not files:
+        return
+    for kind, name in files.items():
+        one = steps.get(kind)
+        if not isinstance(one, dict):
+            # 这一格干脆没有记录：文件明明已经落地了，卡片却还是空圈。
+            # 2026-11-05 15:39 实测：MYT-V1 的 SKU / 广告 / 联盟三项 15:31:49
+            # 就存好了（日志有「完成：1 个文件」），卡片却全是○，只有「订单」
+            # 那行在走 —— 看着就像「没有并发去取」。文件在就算完成，补上。
+            steps[kind] = {"state": "done", "detail": name}
+            continue
+        if one.get("state") != "done":
+            continue
+        detail = str(one.get("detail") or "").strip()
+        if not detail:
+            one["detail"] = name
+        elif name in detail:
+            continue
+        elif detail in ("已完成", "完成", "订单已补回", "已补回", "已自动补算"):
+            one["detail"] = f"{detail} · {name}"
+        elif detail.startswith("复用今日"):
+            one["detail"] = f"{detail} · {name}"
 
 
 def _captured_brief(shop_id: str) -> dict:
@@ -600,6 +1036,28 @@ def _canon_shop(key: str) -> str:
     except Exception:  # noqa: BLE001
         pass
     return k
+
+
+# 刚算完的店+区间 → 时刻。给「补算」这类重复触发用的：
+# 订单刚落地时，桥的待补线程和扩展的补回回调几乎同时动手，
+# 两边都算一遍会让同一份报表被覆盖两次、历史多记一笔。
+_LAST_CALC: dict[str, float] = {}
+_LAST_CALC_LOCK = threading.Lock()
+
+
+def _calc_key(shop: str, dfrom: str, dto: str) -> str:
+    return f"{_canon_shop(shop)}|{dfrom or ''}|{dto or ''}"
+
+
+def _calc_recently(key: str, within: float = 180.0) -> bool:
+    with _LAST_CALC_LOCK:
+        at = float(_LAST_CALC.get(key) or 0.0)
+    return bool(at) and (time.time() - at) < within
+
+
+def _mark_calc_done(key: str) -> None:
+    with _LAST_CALC_LOCK:
+        _LAST_CALC[key] = time.time()
 
 
 def _run_lock_for(key: str) -> threading.Lock:
@@ -1387,20 +1845,16 @@ class Handler(BaseHTTPRequestHandler):
                             f"（计划任务 12 小时有效，手动任务 30 分钟）")
             _json(self, {"ok": True, "job": job, "shop": want})
         elif self.path.startswith("/api/run/stop"):
-            # 扩展在跑的时候轮询这里：有没有人要求停。
-            # 读一次就清掉——只停当前这一轮，不能把下一轮也停了。
+            # 扩展在跑的时候每 1.5 秒问一次：有没有人要求停。
+            #
+            # 0.24.80 起**不在这里清标记**：要等扩展回一句 /api/run/stop-ack 才算真收手。
+            # 以前问一次就 pop，结果扩展收没收到没人知道，界面上「正在停…」和
+            # 「停止」来回跳，而那一轮其实还挂在那儿（2026-11-06 实况）。
             q = parse_qs(urlparse(self.path).query)
             sid = (q.get("shop") or [""])[0].strip()
-            hit = False
-            with _STOP_LOCK:
-                now = time.time()
-                for k in list(_STOP):
-                    if now - _STOP[k] > _STOP_TTL:
-                        _STOP.pop(k, None)
-                if sid and (sid in _STOP or "*" in _STOP):
-                    _STOP.pop(sid, None)
-                    hit = True
-            _json(self, {"ok": True, "stop": hit})
+            stopping, elapsed, acked, run_id = _stop_state(sid) if sid else (False, 0.0, False, "")
+            _json(self, {"ok": True, "stop": bool(stopping and not acked),
+                         "run_id": run_id, "elapsed": round(elapsed, 1)})
         elif self.path.startswith("/api/live"):
             # 界面轮询这一个口子就够了：谁在线、跑到哪一步、队列里还压着几个。
             self._get_live()
@@ -1552,6 +2006,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/settings"):
             from src import settings as cfg_settings
             _json(self, {"ok": True, "settings": cfg_settings.load()})
+        elif self.path.startswith("/api/fx"):
+            # 「这次核算用哪天的汇率」——费率页那两列是配置里的兜底值，
+            # 真正参与计算的是 T-1 的价，不显示出来人会以为没联网。
+            from src import fx as _fx
+            _json(self, _fx.status())
         elif self.path.startswith("/api/rates"):
             from bridge import settings_api
             _json(self, settings_api.read_rates())
@@ -1588,6 +2047,23 @@ class Handler(BaseHTTPRequestHandler):
             # 不能只靠前端那次点击留下的内存状态。
             _json(self, {"ok": True, "spaces": manual_api.list_spaces(),
                          "running": manual_api.running_keys()})
+        elif self.path.startswith("/api/batches"):
+            # 取数批次：这家店每次「同一天 + 同一区间」取的那几类表。
+            # 界面用它画「用这批重算」——只有按批次重算才 100% 复现某一次取数。
+            from src import capture as _cap
+            from urllib.parse import parse_qs, urlparse as _up
+            q = parse_qs(_up(self.path).query)
+            shop = (q.get("shop") or q.get("shop_id") or [""])[0].strip()
+            sid = _canon_shop(shop) if shop else ""
+            if not sid:
+                _json(self, {"ok": False, "error": "缺 shop 参数", "batches": []})
+            else:
+                try:
+                    limit = int((q.get("limit") or ["40"])[0])
+                except ValueError:
+                    limit = 40
+                _json(self, {"ok": True, "shop_id": sid,
+                             "batches": _cap.batches(sid, limit=limit)})
         elif self.path.startswith("/api/capture"):
             # 「今天这个区间取过没有」——扩展跑之前问一句，取过的就不再导。
             # 参数：shop / from / to，缺区间就直说判断不了（照常全部重取）。
@@ -1689,7 +2165,10 @@ class Handler(BaseHTTPRequestHandler):
                         # ① 先用核算时顺手缓存好的那份（src/cli.py 会生成）。
                         #    直接拷贝，不再重算——大店重算要一两分钟，
                         #    用户会以为"导出这么慢"，其实是重新算了一遍。
-                        _cache = paths.OUTPUT / "_公式缓存"
+                        # 版本子目录必须和 src/cli.py 写缓存时一致；
+                        # 版本一变旧缓存自动不命中，宁可重算也不给错表。
+                        _cache = (paths.OUTPUT / "_公式缓存"
+                                  / f"v{paths.app_version() or 'dev'}")
                         for _seg in str(rel).replace("\\", "/").split("/"):
                             _cache = _cache / _seg
                         if _cache.is_file() and _cache.resolve() != src.resolve():
@@ -1769,7 +2248,9 @@ class Handler(BaseHTTPRequestHandler):
             self._post_hello()
         elif self.path.startswith("/progress"):
             self._post_progress()
-        elif self.path.startswith("/api/run/stop"):
+        elif urlparse(self.path).path.rstrip("/") == "/api/run/stop":
+            # 精确匹配：/api/run/stop-ack 也以它开头，用 startswith 会把回执
+            # 当成又一次停止请求（实测：回执被吞掉，界面永远停在「正在停…」）。
             try:
                 p = self._read_payload() or {}
             except Exception:  # noqa: BLE001
@@ -1782,13 +2263,82 @@ class Handler(BaseHTTPRequestHandler):
                 _json(self, {"ok": True, "cancelled": okc})
                 return
             sid = str(p.get("shop_id") or "").strip()
-            keys = ["*"] if (not sid or p.get("all")) else [sid]
-            with _STOP_LOCK:
-                for k in keys:
-                    _STOP[k] = time.time()
-            who = "全部店铺" if keys == ["*"] else (p.get("store_name") or sid)
-            _append_log(f"[stop] 收到停止请求：{who}")
-            _json(self, {"ok": True, "stopping": keys})
+            all_stores = bool(not sid or p.get("all"))
+            with _PROGRESS_LOCK:
+                _rid = str((_PROGRESS.get(sid) or {}).get("run_id") or "") if sid else ""
+            _stop_request("*" if all_stores else sid, _rid)
+
+            # ── 桥自己能停的，当场停掉，不等浏览器 ──
+            targets = [sid] if sid else []
+            if all_stores:
+                try:
+                    targets = list(_store_dir_names().keys())
+                except Exception:  # noqa: BLE001
+                    targets = []
+            killed = dropped_q = dropped_p = marked = 0
+            for t in targets:
+                if not t:
+                    continue
+                # 先看这家店「浏览器那边到底有没有活在跑」：
+                # 没有的话根本不需要等回执，否则用户要对着「正在停止…」干等十几秒。
+                with _PROGRESS_LOCK:
+                    _cur = str(((_PROGRESS.get(t) or {}).get("current")) or "")
+                try:
+                    with _PENDING_LOCK:
+                        _q = sum(1 for j in _PENDING
+                                 if isinstance(j, dict) and str(j.get("store") or "") == t)
+                except Exception:  # noqa: BLE001
+                    _q = 0
+                if _kill_calc(t):
+                    killed += 1
+                dropped_q += _drop_queue(t)
+                dropped_p += _drop_pending_runs(t, "")
+                if _mark_stopped(t):
+                    marked += 1
+                if not _cur and not _q:
+                    # 本机没活、浏览器也没在跑：直接算收手，不必等回执
+                    _stop_ack(t, "")
+
+            who = "全部店铺" if all_stores else (p.get("store_name") or sid)
+            bits = []
+            if killed:
+                bits.append(f"掐掉核算进程 {killed}")
+            if dropped_q:
+                bits.append(f"撤掉排队任务 {dropped_q}")
+            if dropped_p:
+                bits.append(f"清掉待补 {dropped_p}")
+            if marked:
+                bits.append(f"标记收手 {marked}")
+            _append_log(f"[stop] 收到停止请求：{who}"
+                        + (f"（{'、'.join(bits)}）" if bits else "（没有在本机跑的活）"))
+            _json(self, {"ok": True, "stopping": ["*"] if all_stores else [sid],
+                         "killed": killed, "dropped_queue": dropped_q,
+                         "dropped_pending": dropped_p, "marked": marked})
+        elif self.path.startswith("/api/run/stop-ack"):
+            # 扩展的回执：它那边的循环真的退出了。
+            # 有了这条，「停止用了多久」才是可测的，而不是靠猜。
+            try:
+                p = self._read_payload() or {}
+            except Exception:  # noqa: BLE001
+                p = {}
+            sid = str(p.get("shop_id") or "").strip()
+            rid = str(p.get("run_id") or "").strip()
+            used = _stop_ack(sid, rid)
+            if used is None:
+                _json(self, {"ok": True, "ack": False})
+                return
+            _append_log(f"[stop] 扩展已收手（用时 {used:.1f} 秒）")
+            # 把用时写进进度，卡片上直接显示「已停止 · 用时 1.6 秒」
+            try:
+                with _PROGRESS_LOCK:
+                    rec = _PROGRESS.get(sid)
+                    if isinstance(rec, dict):
+                        rec["stop_elapsed"] = used
+                        rec["stopped"] = True
+            except Exception:  # noqa: BLE001
+                pass
+            _stop_clear(sid)
+            _json(self, {"ok": True, "ack": True, "elapsed": used})
         elif self.path.startswith("/api/run-stores"):
             self._post_run_stores()
         elif self.path.startswith("/api/mapping"):
@@ -2146,6 +2696,36 @@ class Handler(BaseHTTPRequestHandler):
             return
         who = f"[{shop_id}] " if shop_id else "[未识别店铺] "
         _append_log(f"{who}文件已保存：{path.name}（{len(data)/1024:.0f} KB）")
+
+        # 给这份文件写「身份证」：哪家店、盖的哪一段、哪类表、什么时候落的盘。
+        #
+        # 为什么要写：核算时只能靠文件名猜区间，而文件名是平台起的、用户还会改。
+        # 「收件箱里混进一份读不出区间的老文件，于是把几个月的表加在一起」
+        # 就是猜不出来时的兜底逻辑造成的。身份证在落盘那一刻写死，改名也甩不掉。
+        # 映射表不写：SKU→商品ID 是全局的，跟店铺无关，写了反而会被当成串店。
+        if kind != "mapping" and table_kind != "mapping":
+            try:
+                from src import provenance as prove
+                _raw = payload.get("range")
+                _rng = None
+                if isinstance(_raw, (list, tuple)) and len(_raw) == 2:
+                    _a, _b = str(_raw[0] or ""), str(_raw[1] or "")
+                    if (re.fullmatch(r"\d{4}-\d{2}-\d{2}", _a)
+                            and re.fullmatch(r"\d{4}-\d{2}-\d{2}", _b)):
+                        _rng = (_a, _b) if _a <= _b else (_b, _a)
+                if _rng is None:
+                    # 扩展没带区间时，至少用文件名里的；再不行就留空（核算时再猜）
+                    from src.loader import table_range, read_table
+                    try:
+                        _rng = table_range(path, read_table(path))
+                    except Exception:  # noqa: BLE001
+                        _rng = None
+                prove.write_meta(
+                    path, shop_id=shop_id, kind=table_kind or kind, rng=_rng,
+                    at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), source="upload")
+            except Exception as _e:  # noqa: BLE001
+                _append_log(f"[warn] 写数据身份证失败（不影响核算）：{_e}")
+
         if warning:
             _append_log(f"[warn] {warning}")
         # 记账：哪家店、哪个区间、哪一类表，今天已经取到了。
@@ -2723,7 +3303,10 @@ class Handler(BaseHTTPRequestHandler):
                            manual=not bool(payload.get("auto")),
                            with_formula=payload.get("with_formula"),
                            country=str(payload.get("country") or ""),
-                           force=bool(payload.get("force")))
+                           # 「运行」= 重新取数（2026-11-05 店主定的口径）：
+                           # 不再复用今天已取的同区间数据，哪怕那份是十分钟前刚导的。
+                           # 想用本机现成的数据出报表，点「重算」——那条路不取数。
+                           force=True)
             # 错峰：7 家同时开跑会互相挤（抓包里能看到请求发出去、没有任何响应）。
             # 第 i 家延后 i*12 秒才允许被领走，前面几家先跑起来。
             try:
@@ -2740,29 +3323,15 @@ class Handler(BaseHTTPRequestHandler):
             _append_log(f"[运行] 派给 {_names.get(sid, sid)}"
                         f"{'（在线）' if is_on else '（浏览器没开，排队等 30 分钟）'}")
 
-        # 说清楚这次会不会真去平台导：今天同区间已经取全的店，会直接复用，
-        # 几十秒就出结果——不然用户会以为「怎么这么快，是不是没跑」。
-        _reuse_names: list[str] = []
-        if not payload.get("force"):
-            try:
-                from src import capture as _cap
-                _a = str((rng or {}).get("startDate") or "")
-                _b = str((rng or {}).get("to") or "")
-                for sid in ids:
-                    if len(_cap.status(sid, _a, _b).get("reuse") or []) >= 4:
-                        _reuse_names.append(_names.get(sid, sid))
-            except Exception:  # noqa: BLE001
-                _reuse_names = []
-
-        _base_note = ("已派发。在线的店几秒内开始；离线的店等浏览器打开后自动开跑。"
-                      if offline else "已派发，在线的店几秒内开始。")
-        if _reuse_names:
-            _base_note += "（" + "、".join(_reuse_names) + " 今天已取过这批数据，会直接复用；要重导勾「强制重新取数」）"
+        # 运行一律重新取数，所以不再有「复用今日」这回事——
+        # 卡片上也就不会出现「怎么这么快，是不是没跑」的疑问。
+        _base_note = ("已派发，正在重新取数（不复用今天的旧数据）。在线的店几秒内开始"
+                      + ("；离线的店等浏览器打开后自动开跑。" if offline else "。"))
 
         _json(self, {
             "ok": True, "count": len(ids), "jobs": jobs,
             "range": rng, "sent": sent, "offline": offline,
-            "reuse": _reuse_names, "ignored": ignored,
+            "reuse": [], "ignored": ignored,
             "note": _base_note,
         })
 
@@ -2783,6 +3352,29 @@ class Handler(BaseHTTPRequestHandler):
         for sid, nm in names.items():
             rec = online.get(sid) or {}
             age = now - float(rec.get("at") or 0) if rec else 1e9
+            # 卡片上每类表后面显示「用的是哪个文件」：扩展没报文件名时，
+            # 从磁盘/台账把它补上，免得那格空着像是没取到。
+            _prog = prog.get(sid) or None
+            try:
+                _fill_step_files(sid, _prog)
+            except Exception:  # noqa: BLE001
+                pass
+            # 停止流程：扩展回执超时 → 认定已停，别让按钮永远停在「正在停…」
+            _stopping, _stop_elapsed, _acked, _ = _stop_state(sid)
+            _note = ""
+            if _stopping and not _acked and _stop_elapsed > _STOP_ACK_TIMEOUT:
+                _mark_stopped(sid, "已按停止收手（浏览器没有回执）")
+                # 记成「这家店已收尾」：只 pop 自己的键，对「全部停止」那条
+                # 记录还要把它加进 acks，否则每 3 秒轮询都会重新判一次、刷一行日志。
+                _stop_ack(sid, "")
+                _stop_clear(sid)
+                _note = "浏览器没有回执，已按停止处理"
+                _append_log(f"[stop] {nm} 超过 {int(_STOP_ACK_TIMEOUT)} 秒没有回执，"
+                            f"已按停止处理")
+                _stopping, _stop_elapsed, _acked = False, 0.0, False
+            _stop_info = {"stopping": _stopping,
+                          "elapsed": round(_stop_elapsed, 1),
+                          "acked": _acked, "note": _note}
             out[sid] = {
                 "shop_id": sid,
                 "store_name": nm,
@@ -2799,10 +3391,20 @@ class Handler(BaseHTTPRequestHandler):
                 "last_beat": int(rec.get("at") or 0),
                 "ver": rec.get("ver") or "",
                 "running": rec.get("running") or None,
-                "progress": prog.get(sid) or None,
+                "progress": _prog,
                 "queued": sum(1 for q in queue if q.get("store") == sid),
-                # 已经点了「停止」、扩展还没收手的这段：界面显示「正在停…」
-                "stopping": (sid in _STOP or "*" in _STOP),
+                # 停止流程：stopping=true 的这段时间界面显示「正在停止… X.X 秒」，
+                # 扩展回执（stopped_ack）之后才算真停，按钮才回「运行」。
+                # 超过 _STOP_ACK_TIMEOUT 还没回执 → 桥判定浏览器没响应，
+                # 自己把标记收掉，并在 note 里说明，不让人对着按钮干等。
+                "stopping": _stop_info["stopping"],
+                "stop_elapsed": _stop_info["elapsed"],
+                "stop_acked": _stop_info["acked"],
+                "stop_note": _stop_info["note"],
+                # 「在跑」但十几分钟没有任何更新 = 卡住（等平台生成订单表那种）。
+                # 界面据此把按钮放回「运行」，否则会一直挂着「停止」。
+                "stale": bool(_prog and (_prog.get("current"))
+                              and (now - float(_prog.get("updated") or 0) > 900)),
                 # 今天这家店已经取到过什么（卡片上那行「今日 09:12 已取数」）。
                 # 有了它，用户点运行前就知道这次会不会真去平台导。
                 "captured": _captured_brief(sid),
@@ -3247,8 +3849,16 @@ class Handler(BaseHTTPRequestHandler):
             country = str(payload.get("country") or "")
             store = str(payload.get("store") or "").strip()
             shop_id = str(payload.get("shop_id") or store or "").strip()
+            # 新一轮开始：先把这家店上一轮的停止标记清掉。
+            # 不清的话，扩展下一次轮询还会看到「停止」，新一轮刚提交就被判
+            # 「已手动停止」——2026-11-06 18:22 就这么把一次运行掐掉了。
+            for _k in {shop_id, store}:
+                if _k:
+                    _stop_skip(_k)
             dfrom = payload.get("from") or None
             dto = payload.get("to") or None
+            # 「用这批重算」：只读那一批落盘的文件（批次号见 /api/batches）
+            batch = str(payload.get("batch") or "").strip()
 
             # 店铺信息：名字给人看，shop_id 给程序用。
             # 名字优先用用户在 stores.json 里起的别名，没有就用平台原名。
@@ -3299,6 +3909,16 @@ class Handler(BaseHTTPRequestHandler):
             if not store_name:
                 store_name = country or "未识别店铺"
             country = country or "马来西亚"
+
+            # 「补算」的重复触发：同一家店、同一区间刚算完不到 3 分钟就跳过。
+            # 订单落地那一刻，桥的待补线程（10 秒一轮）和扩展的补回回调
+            # 会几乎同时动手；不拦一下，同一份报表会被覆盖两次、历史多记一笔，
+            # 用户看着像「怎么跑了两轮」。
+            _ck = _calc_key(shop_id or store, dfrom or "", dto or "")
+            if payload.get("skip_if_done") and _calc_recently(_ck):
+                _json(self, {"ok": True, "skipped": True,
+                             "note": "这个区间刚算过，跳过重复补算"})
+                return
 
             # 数据来源：有 shop_id 就读它自己的目录，各店数据不混
             data_dir = paths.store_dir(shop_id)
@@ -3383,25 +4003,68 @@ class Handler(BaseHTTPRequestHandler):
             # 预检订单表：没有订单就没有核算的必要。
             # 以前让它一路跑到 loader 抛 FileNotFoundError，子进程还会卡住不退，
             # 界面只能干等 15 分钟——不如在这里直接说清。
+            #
+            # 判据是「有没有**覆盖本次区间**的订单表」，不是「有没有订单文件」。
+            # 店里常年留着 6/7/8 月的老导出，只看文件会放行，真正的缺口要等核算
+            # 跑到 loader 才报错；那条路走的是「拦截」分支、**不登记待补**，
+            # 于是订单真到了也没人算，卡片永远停在「等订单：到了自动算」。
+            # 实测 2026-11-05 10:19：MYT-J1 / PHT-B1 / PHT-W1 三家就这么卡住，
+            # 待补队列是空的，报表一直不出来。
+            _fresh_wanted = bool(payload.get("fresh"))
             try:
                 from src import loader as _ld
-                _has_order = _ld.has_orders_table(data_dir)
+                _win = (str(dfrom), str(dto)) if (dfrom and dto) else None
+
+                # 「运行」（含计划任务、订单补回后的自动算）还要求订单是
+                # **这次新落地**的：同月的旧导出照样能盖住区间，但那是上一次
+                # 取数的快照，这中间退的款、改的状态都不在里面。
+                # 「重算」不传 fresh，它本来就是要用已经在本机的数据。
+                _rv = payload.get("reused")
+                _reused_list = [str(x) for x in _rv] if isinstance(_rv, list) else []
+                _orders_reused = any("订单" in x for x in _reused_list)
+
+                _since = 0.0
+                if _fresh_wanted and not _orders_reused:
+                    try:
+                        _since = float(payload.get("since") or 0)
+                    except (TypeError, ValueError):
+                        _since = 0.0
+                    # 扩展传的是毫秒时间戳；没传就只认最近半小时落地的
+                    if _since > 1e11:
+                        _since /= 1000.0
+                    if _since <= 0:
+                        _since = time.time() - 1800
+                    _since -= 5.0        # 同机时钟，留 5 秒足够
+                _has_order, _why = _ld.orders_covering(
+                    data_dir, _win, fresh_since=(_since or None))
             except Exception:  # noqa: BLE001
-                _has_order = True
+                _has_order, _why = True, ""
+
             if not _has_order:
                 # 大店订单在平台要生成好几分钟，取数那边常常是"已排队、还没落地"。
                 # 记一条待补算：文件一落地后台自己算，不用人再点第二次。
+                #
+                # 「重算」不登记待补——它不会再有新文件来，登记了就是永远躺着。
+                if not _fresh_wanted:
+                    _json(self, {"ok": False, "blocked": True,
+                                 "error": f"店铺「{store_name}」算不了：{_why}"})
+                    return
                 try:
                     _pending_add(str(shop_id or store_name), {
                         "shop_id": shop_id, "store_name": store_name,
                         "country": country, "from": dfrom or "", "to": dto or "",
-                        "with_formula": bool(payload.get("with_formula")),
+                        # 没指定就存 None：补算时跟随「设置 → 报表」，
+                        # 存成 False 会让补出来的表凭空丢掉公式
+                        # （计划任务那条本来就带自己的开关）。
+                        "with_formula": (payload.get("with_formula")
+                                         if isinstance(payload.get("with_formula"), bool)
+                                         else None),
                         "at": time.time(),
                     })
                 except Exception:  # noqa: BLE001
                     pass
                 _json(self, {"ok": False, "pending": True,
-                             "error": f"店铺「{store_name}」的订单还在平台生成，还没落到本地。"
+                             "error": f"店铺「{store_name}」的订单还没准备好（{_why}）。"
                                       f"已记下这次核算——订单一落地程序会自动补算，不用再点。"
                                       f"报表会出现在「报表」页。"})
                 return
@@ -3458,6 +4121,8 @@ class Handler(BaseHTTPRequestHandler):
                 "--out", str(out),
                 "--json",
             ]
+            if batch:
+                cmd += ["--batch", batch]
             if len(data_dirs) > 1:
                 cmd += ["--snapshots", ",".join(d.name for d in data_dirs)]
             elif snap_id:
@@ -3477,20 +4142,44 @@ class Handler(BaseHTTPRequestHandler):
             # 照它缓存的话下载时按正式名找不到（缓存会叫 .12345.calc.xlsx）。
             if final_out is not None:
                 cmd += ["--final-name", final_out.name]
+            # 摘要同时写一份文件：打包版 stdout 可能一个字节都没有
+            # （windowed 模式 sys.stdout 为 None），只靠 stdout 解析会拿到 None，
+            # 于是报表算出来了、界面却当失败。
+            _sum_path = Path(str(out) + ".summary.json")
+            cmd += ["--json-out", str(_sum_path)]
 
             _append_log(f"[run] 开始核算 {country} {dfrom or '全量'}~{dto or '全量'}")
             env = dict(os.environ)
             env["PYTHONIOENCODING"] = "utf-8"
             env["PYTHONUTF8"] = "1"
-            proc = subprocess.run(
-                cmd, cwd=str(ROOT), capture_output=True, env=env,
-                # 不用 text=True：打包后的子进程在无控制台时按系统编码（GBK）输出，
-                # 统一按 utf-8 解会把中文日志全变成乱码，出错了也读不出原因。
-                timeout=300,
+            _t_calc0 = time.time()          # 只算子进程本身，不含等订单那段时间
+            # 用 Popen 而不是 subprocess.run：run 会一直阻塞，用户点「停止」
+            # 也只能干等它算完（大店两三分钟）。Popen 留个句柄，停止时能直接掐。
+            _proc = subprocess.Popen(
+                cmd, cwd=str(ROOT),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                 # 不弹黑窗口：桥在后台跑，每核算一次冒一个窗口很吓人
                 creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
                                if os.name == "nt" else 0),
             )
+            with _PROC_LOCK:
+                _RUNNING_PROC[shop_id] = {"proc": _proc, "at": _t_calc0,
+                                          "run_id": ""}
+            try:
+                _out_b, _err_b = _proc.communicate(timeout=300)
+            except subprocess.TimeoutExpired:
+                _proc.kill()
+                _out_b, _err_b = _proc.communicate()
+                _append_log("[run] 核算超时 300 秒，已终止子进程")
+            finally:
+                with _PROC_LOCK:
+                    _was_killed = shop_id in _KILLED
+                    _KILLED.discard(shop_id)
+                    _RUNNING_PROC.pop(shop_id, None)
+            # 被停止掐掉的：Windows 返回码是 1，光看它会被当成「算错了」，
+            # 所以以 _KILLED 标记为准。
+            _killed = _was_killed or (_proc.returncode is not None
+                                      and _proc.returncode < 0)
 
             def _dec(raw: bytes) -> str:
                 for enc in ("utf-8", "gbk"):
@@ -3500,11 +4189,25 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                 return raw.decode("utf-8", "replace")
 
-            stdout = _dec(proc.stdout or b"")
-            stderr = _dec(proc.stderr or b"")
+            stdout = _dec(_out_b or b"")
+            stderr = _dec(_err_b or b"")
+
+            if _killed:
+                # 用户点了停止、子进程被掐：这不是失败，别在界面上报红。
+                # 临时报表已经由 finally 清掉，这里只回一句「已停止」。
+                _append_log("[run] 已按停止终止核算（子进程被杀）")
+                _json(self, {"ok": False, "stopped": True,
+                             "error": "已按停止终止，这一次不算失败"})
+                return
 
             summary = None
-            for line in reversed(stdout.strip().splitlines()):
+            # 先看子进程写的摘要文件（打包版唯一可靠的来源）
+            try:
+                if _sum_path.is_file():
+                    summary = json.loads(_sum_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                summary = None
+            for line in ([] if summary else reversed(stdout.strip().splitlines())):
                 line = line.strip()
                 if line.startswith("{") and line.endswith("}"):
                     try:
@@ -3512,8 +4215,13 @@ class Handler(BaseHTTPRequestHandler):
                     except json.JSONDecodeError:
                         continue
                     break
+            try:
+                if _sum_path.is_file():
+                    _sum_path.unlink()
+            except OSError:
+                pass
 
-            if proc.returncode == 0 and summary:
+            if _proc.returncode == 0 and summary:
                 if out.exists():
                     out = safeio.swap_report(
                         out, final_out,
@@ -3565,6 +4273,18 @@ class Handler(BaseHTTPRequestHandler):
                 summary["report_name"] = out.name
                 summary["store_name"] = store_name
                 summary["shop_id"] = shop_id
+                # 这一轮已经算出来了，店里那条「等订单」的待补就该撤掉。
+                # 不撤的话，桥的补算线程过几秒会再算一遍同一份报表 ——
+                # 实测 2026-11-04 13:46 DXM：13:46:15 扩展算完、13:46:21 桥又补算，
+                # 同一份表覆盖两遍、历史多一笔，用户看着像"跑了两轮"。
+                # 只有「运行」这条路上的成功才算把待补兑现了。
+                # 重算用的是本机现成的数据，它顺手把待补摘掉的话，
+                # 新订单落地后就没人再算了——2026-11-05 实测就是栽在这里。
+                if _fresh_wanted:
+                    try:
+                        _pending_drop(str(shop_id or store_name))
+                    except Exception:  # noqa: BLE001
+                        pass
                 if _replace:
                     summary["replaced"] = True
                 # 这一轮哪几类表沿用了当天早些时候取的那批（没有重新去平台导）。
@@ -3616,9 +4336,30 @@ class Handler(BaseHTTPRequestHandler):
                     summary["copied_to"] = str(copied)
                     _append_log(f"[run] 已复制到 {copied}")
 
+                _mark_calc_done(_ck)
+                # 卡片上的「核算 / 出报表」跟着变绿。订单补回回调这条入口
+                # 不经过扩展，没人替我们报进度——不补这一下，报表已经躺在
+                # 「报表」页里，卡片还停在「等订单：到了自动算」。
+                try:
+                    _mark_steps_done(shop_id, out.name,
+                                     mark_orders=bool(payload.get("fresh")),
+                                     elapsed=time.time() - _t_calc0)
+                except Exception:  # noqa: BLE001
+                    pass
                 _json(self, {"ok": True, **summary})
             else:
                 tail = "\n".join((stdout + "\n" + stderr).strip().splitlines()[-12:])
+                # 退出码 3 = 数据不全/区间不对，程序自己拒绝出表（见 src/cli.py）。
+                # 这不是"失败"，是**拦住了**：必须原样把理由给到界面，
+                # 否则用户只看到一句"核算失败"，转头就以为程序坏了。
+                if _proc.returncode == 3:
+                    _lines = [ln.strip(" ·\t") for ln in (stdout or "").splitlines()
+                              if ln.strip().startswith("·")]
+                    _brief = "数据不全，这次没有出报表：" + ("；".join(_lines[:6]) or tail[:300])
+                    _append_log(f"[run] 已拦截：{_brief}")
+                    _json(self, {"ok": False, "blocked": True, "error": _brief,
+                                 "reasons": _lines[:8], "returncode": 3})
+                    return
                 # 堆栈对人没用。认得出的情况直接说他能听懂的那句。
                 if "没识别出订单表" in tail or "没有可读的数据目录" in tail:
                     brief = "没有识别出订单表：先在扩展里取一次订单；如果该时段本来就没订单，换日期再算"
@@ -3634,7 +4375,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     brief = tail or "核算失败"
                 _append_log(f"[run] 失败：{brief.splitlines()[-1] if brief else 'unknown'}")
-                _json(self, {"ok": False, "error": brief, "returncode": proc.returncode})
+                _json(self, {"ok": False, "error": brief, "returncode": _proc.returncode})
         except subprocess.TimeoutExpired:
             _append_log("[run] 失败：核算超时（5 分钟）")
             _json(self, {"ok": False, "error": "核算超过 5 分钟没跑完，已中断。"
@@ -3842,7 +4583,11 @@ def _dispatch_rule(rule: dict, when: datetime | None = None) -> dict:
         # 空值也要写：否则上一条计划留下的目录会被下一条「继承」，
         # 报表莫名其妙跑到别的文件夹里。
         _AUTO_DL[sid] = dl
-        job = _enqueue(sid, rng, auto=True, with_formula=rule.get("with_formula"))
+        # 定时启动同样属于「运行」：一律重新取数，不复用当天的旧数据。
+        # 计划任务本来就在固定时刻跑，它要的是那一刻的真实状态，
+        # 复用上午导的那份等于把早上的数字当晚上的结果。
+        job = _enqueue(sid, rng, auto=True, with_formula=rule.get("with_formula"),
+                       force=True)
         jobs.append(job["id"])
 
     shown = "、".join(names.get(i, i) for i in ids[:8])

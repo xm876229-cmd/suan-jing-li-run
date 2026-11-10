@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -66,6 +66,8 @@ class Params:
     fx_note: str = ""
     # 费率项的中文名（rates.json 的 labels 段），公式里可以直接用中文引用
     cn_labels: dict = field(default_factory=dict)
+    # 广告表按什么币种算：空=自动识别，LOCAL=不换算，或任意币种代码（USD/THB…）
+    ads_currency: str = ""
 
 
 @dataclass
@@ -146,6 +148,7 @@ def load_rates(path: Path) -> tuple[dict[str, Params], Switches]:
             other_fee=_f(c, "other_fee"),
             currency=str(c.get("currency") or ""),
             region=str(c.get("region") or ""),
+            ads_currency=str(c.get("ads_currency") or ""),
             rates_verified=bool(c.get("rates_verified", True)),
             cn_labels=dict(data.get("labels") or {}),
         )
@@ -321,6 +324,13 @@ class ProductMetrics:
     creator_commission: float = ZERO
     ad_spend: float = ZERO
     lines: int = 0
+    # 订单结构统计：各**分摊订单数**（一个订单 4 行、3 行属 A 链接就是 0.75 单）。
+    # 这四个是「事实」，不受任何口径开关影响——勾不勾售后，取消单数都该看得见。
+    # 报表上的「售前取消单数 / 售后取消单数 / 各种占比」全从这里来。
+    ord_pre_cancel: float = ZERO
+    ord_post_cancel: float = ZERO
+    ord_normal: float = ZERO
+    ord_refunded: float = ZERO
     # 公式算出来的净利。由 config/formulas.json 的 net 决定；
     # 为 None 时退回下面的默认算法（保证没有配置也能跑）。
     net_value: float | None = None
@@ -383,6 +393,9 @@ class CalcResult:
     kind_labels: dict = field(default_factory=dict)
     # 总开关：本次是否整张表都不算 0 元样品单（报表口径页要写明）
     exclude_zero_amount: bool = False
+    # 成本缺失：多少行、哪些编码。报表汇总页要红字点名，不能只写进异常页
+    missing_cost_rows: int = 0
+    missing_cost_codes: dict = field(default_factory=dict)
     # 另一套口径的结果，用来在报表里做「含样品 / 去样品」对比。
     # 键是商品ID，值是那套口径下算出来的整组指标（GMV/成本/发单费/净利…）。
     # 只有一份口径时（比如没传 fcfg）就是 None，报表上不出现对比列。
@@ -412,6 +425,10 @@ class CalcResult:
                 net_any = True
             t.gmv += p.gmv
             t.buyer_paid += p.buyer_paid
+            t.ord_normal += p.ord_normal
+            t.ord_refunded += p.ord_refunded
+            t.ord_pre_cancel += p.ord_pre_cancel
+            t.ord_post_cancel += p.ord_post_cancel
             t.fee_base_gmv += p.fee_base_gmv
             t.fee_base_paid += p.fee_base_paid
             for k, d in p.by_kind.items():
@@ -458,11 +475,22 @@ class CalcResult:
 #   成本就被低估，净利被高估。所以收入、成本、订单数、计费基数必须分开控。
 #
 # 一行订单可能同时符合多个类别，按这个优先级归一类：
-#   已取消 > 退货退款 > 0元样品 > 未付款 > 正常
-KINDS = ("cancelled", "refunded", "zero_amount", "unpaid", "normal")
+#   取消（售前/售后） > 退货退款 > 0元样品 > 未付款 > 正常
+#
+# 2026-11-04 起「取消」拆成三类（用户定的）：
+#   cancelled           售前取消：没打包、没出单号，货没动，什么费用都不该算
+#   cancelled_shipped   售后取消·已发货：有单号且已发货，货真发出去了，
+#                       发单费和商品成本实打实花了（用户要求算这两项）
+#   cancelled_unshipped 售后取消·未发货：有单号但没发货（已打包待揽收）。
+#                       默认**什么都不算**，因为货还在仓库、能不能拦截不好说；
+#                       要不要算由店主在「计算参数」里自己勾（多给一个选择）
+KINDS = ("cancelled", "cancelled_shipped", "cancelled_unshipped",
+         "refunded", "zero_amount", "unpaid", "normal")
 
 KIND_LABELS = {
-    "cancelled": "已取消订单",
+    "cancelled": "售前取消订单",
+    "cancelled_shipped": "售后取消订单（已发货）",
+    "cancelled_unshipped": "售后取消订单（未发货）",
     "refunded": "退货退款订单",
     "zero_amount": "0 元样品单",
     "unpaid": "未付款订单",
@@ -482,7 +510,16 @@ ALL_OFF = {"income": False, "cost": False, "order_count": False, "fee_base": Fal
 #   0 元样品：收入本来就是 0，成本与发单费照算；平台抽成不算（没有成交额）
 #   未付款：什么都没发生，全不算
 DEFAULT_ORDER_FILTER: dict[str, dict[str, bool]] = {
-    "cancelled": {"income": False, "cost": True, "order_count": True, "fee_base": True},
+    # 售前取消：什么都没发生（货没出库、单号都没有），四项全关
+    "cancelled": dict(ALL_OFF),
+    # 售后取消·已发货：货已经发出去又被取消 → 算成本、算发单费（订单数），
+    # 不算收入、不算平台抽成基数
+    "cancelled_shipped": {"income": False, "cost": True,
+                          "order_count": True, "fee_base": False},
+    # 售后取消·未发货：2026-11-04 店主确认「也勾上」——包裹已打包出单号，
+    # 包材、打包人工、货值都已经发生，所以成本与发单费照算
+    "cancelled_unshipped": {"income": False, "cost": True,
+                            "order_count": True, "fee_base": False},
     "refunded": {"income": False, "cost": True, "order_count": True, "fee_base": True},
     "zero_amount": {"income": True, "cost": True, "order_count": True, "fee_base": False},
     "unpaid": {"income": False, "cost": False, "order_count": False, "fee_base": False},
@@ -498,12 +535,33 @@ _LEGACY_KEYS = {
 }
 
 
+def _has_logistics(l: OrderLine) -> bool:
+    """有没有物流信息（单号或物流商）。有 = 已经打包出单了。"""
+    return bool((l.tracking_id or "").strip() or (l.shipping_provider or "").strip())
+
+
+def _was_shipped(l: OrderLine) -> bool:
+    """单据上有没有真正的发货/签收时间。"""
+    return bool((l.shipped_time or "").strip() or (l.delivered_time or "").strip())
+
+
 def order_kind(l: OrderLine, refund_keywords: tuple[str, ...] = ("return", "refund")) -> str:
-    """判断一行订单属于哪一类（决定用哪组口径开关）。"""
+    """判断一行订单属于哪一类（决定用哪组口径开关）。
+
+    取消要分售前/售后（2026-11-04）：
+      有物流单号或物流商  → 已经打包出单，属售后；再看有没有发货时间
+      两者都没有          → 售前取消，货没动
+
+    「有单号但没发货时间」单独一类，是因为它介于两者之间：
+    包裹打好了、单号出了，但还没揽收，货可能还在仓库。
+    到底算不算成本/发单费，店主比程序清楚，所以交给他在参数表里勾。
+    """
     if l.is_cancelled:
         c = (l.cancel or "").lower()
         if any(k in c for k in refund_keywords):
             return "refunded"
+        if _has_logistics(l):
+            return "cancelled_shipped" if _was_shipped(l) else "cancelled_unshipped"
         return "cancelled"
     if l.gmv == 0 and l.order_amount == 0:
         return "zero_amount"
@@ -599,6 +657,9 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
     names: dict[str, str] = {}
     no_pid = 0
     missing_cost_lines = 0
+    # 缺成本的编码 → 行数。只统计「本次口径里真的要算成本」的行：
+    # 售前取消、未付款本来就不算成本，把它们算进提醒里只会天天喊狼来了。
+    missing_cost_codes: Counter = Counter()
     # 这批订单的日期是「日/月」还是「月/日」，跟 filter_by_date 用同一套判断，
     # 否则会出现「按日/月筛选了，但缺时间的行按另一套算」的错位。
     _dorder = date_order((l.created if date_field == "created" else l.paid) for l in lines[:300])
@@ -639,6 +700,16 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
         kind = order_kind(l, refund_kw)
         sw_k = kfilter[kind]
         kind_stats[kind] += 1
+
+        # 订单结构：无论什么口径都照实记，报表上要能一眼看出取消结构
+        if kind == "normal":
+            m.ord_normal += l.allocated_orders
+        elif kind == "refunded":
+            m.ord_refunded += l.allocated_orders
+        elif kind == "cancelled":
+            m.ord_pre_cancel += l.allocated_orders
+        elif kind in ("cancelled_shipped", "cancelled_unshipped"):
+            m.ord_post_cancel += l.allocated_orders
 
         # 取消 / 退货金额：只是统计量（用来在报表上说明「退了多少钱」），
         # 不受口径开关影响，否则对账时看不出退了多少
@@ -690,6 +761,7 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
             m.items += l.qty
             if l.cost_total_cny is None:
                 missing_cost_lines += 1
+                missing_cost_codes[l.seller_sku or l.sku_id or "（无编码）"] += 1
             else:
                 m.cost_local += l.cost_total_cny * params.cny_to_local
 
@@ -704,11 +776,20 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
 
     # 有广告花费或达人佣金、但本期没有订单的商品
     # 钱已经花了，不能因为"没出单"就从报表里消失，否则总成本被低估
+    #
+    # 但「花了 0 元」的不算：平台导出的广告表会把历史链接、已下架的老链接
+    # 也一并返回（Spend=0.0），佣金表同理。以前这些链接每条都单独立一行，
+    # 报表尾部多出几十行全零（2026-11-05 MYT-V1 有 24 行），
+    # 把真数据挤到下面，还让人以为「下架的链接也算进本报表」。
     orphans: list[str] = []
     for pid in set(data.ads) | set(data.commissions):
-        if pid and pid not in buckets:
-            buckets[pid] = ProductMetrics(product_id=pid)
-            orphans.append(pid)
+        if not pid or pid in buckets:
+            continue
+        if (abs(float(data.ads.get(pid, ZERO) or ZERO)) < 1e-9
+                and abs(float(data.commissions.get(pid, ZERO) or ZERO)) < 1e-9):
+            continue
+        buckets[pid] = ProductMetrics(product_id=pid)
+        orphans.append(pid)
 
     # ── 参数表：GMV、买家实付、订单数、件数、商品成本、各项费用，全在这张表里 ──
     #
@@ -845,7 +926,9 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
                 f"处理办法：重新取一次商品数据（商品SKU表），新上架的 SKU 才会进映射"
             )
     if missing_cost_lines:
-        issues.append(f"{missing_cost_lines} 行订单缺成本，按 0 计，这些行的净利会偏高")
+        _top = "、".join(k for k, _ in missing_cost_codes.most_common(5))
+        issues.append(f"{missing_cost_lines} 行订单缺成本（{len(missing_cost_codes)} 个编码），"
+                      f"按 0 计，这些行的净利会偏高；主要是：{_top}")
     if untimed:
         if dfrom or dto:
             issues.append(
@@ -905,7 +988,9 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
                       kind_labels=dict(fcfg.get("kinds") or KIND_LABELS),
                       exclude_zero_amount=bool(cc.get("exclude_zero_amount")),
                       cfg_with_sample=cfg_with_sample,
-                      cfg_without_sample=cfg_without_sample)
+                      cfg_without_sample=cfg_without_sample,
+                      missing_cost_rows=missing_cost_lines,
+                      missing_cost_codes=dict(missing_cost_codes))
 
 
 def compute(data: RawData, params: Params, switches: Switches,

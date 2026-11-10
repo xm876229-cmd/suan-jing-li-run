@@ -30,6 +30,7 @@ if not getattr(sys, "frozen", False):
         sys.path.insert(0, str(_root))
 
 from src import paths  # noqa: E402
+from src import platform_os  # noqa: E402
 
 APP_TITLE = "净利助手"
 
@@ -87,16 +88,47 @@ def _no_window_flags() -> int:
         return 0
     return getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
-def bridge_running() -> bool:
-    """桥在不在跑。绕开系统代理——有的抓包软件会把 127.0.0.1 也转发，
-    结果「桥明明开着，程序说连不上」这种问题极难查。"""
+def bridge_health(timeout: float = 2.0) -> dict:
+    """端口上那个桥的自报身份；没有桥就返回空 dict。
+
+    绕开系统代理——有的抓包软件会把 127.0.0.1 也转发，
+    结果「桥明明开着，程序说连不上」这种问题极难查。
+    """
     import json
     import urllib.request
     try:
         op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with op.open(f"http://127.0.0.1:{_port()}/health", timeout=2) as r:
-            return json.loads(r.read().decode("utf-8")).get("ok") is True
+        with op.open(f"http://127.0.0.1:{_port()}/health", timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8"))
+            return d if isinstance(d, dict) else {}
     except Exception:
+        return {}
+
+
+def bridge_running() -> bool:
+    """桥在不在跑（不关心是谁的）。"""
+    return bridge_health().get("ok") is True
+
+
+def bridge_is_mine() -> bool:
+    """端口上的桥是不是**本程序目录**起的。
+
+    必须区分：电脑上同时装免安装版和安装版时，两边都有桥、都有自己的
+    配置和数据。先启动的那个抢到 8765，后启动的程序如果只看「端口通不通」
+    就会连到别人的数据 —— 界面一切正常，店铺和报表却是另一套。
+    """
+    info = bridge_health()
+    if not info.get("ok"):
+        return False
+    return _same_dir(str(info.get("root") or ""), str(paths.ROOT))
+
+
+def _same_dir(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    try:
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -159,6 +191,30 @@ def _serve_daemon() -> int:
     """守护者：拉起桥，桥退出就重拉。"""
     import subprocess
     import time
+
+    # 先看端口上是谁。三种情况：
+    #   ① 没有桥 → 正常起
+    #   ② 本目录的桥已在 → 直接返回（再起一个守护者只会互相打架）
+    #   ③ 别的目录的桥占着端口 → 接管：关掉它、起本目录的
+    # 第 ③ 种是必须处理的：不处理的话子进程 bind 失败退出、守护者又拉起来，
+    # 无限循环刷日志，而用户以为「程序开着」——实际连的是另一个版本的数据。
+    info = bridge_health()
+    if info.get("ok"):
+        _other = str(info.get("root") or "")
+        if _same_dir(_other, str(paths.ROOT)):
+            print(f"取数服务已在运行（端口 {_port()}，本程序目录）")
+            return 0
+        print(f"端口 {_port()} 上是**另一个版本**的取数服务：")
+        print(f"    {_other}")
+        print(f"    本程序目录：{paths.ROOT}")
+        print("  两个版本各有各的配置和数据，不能共用一个服务。现在关掉它、换成当前目录的…")
+        killed = _kill_bridge_on_port(_port())
+        if killed:
+            print("  已关闭 PID：" + "、".join(killed))
+        for _ in range(40):
+            if not bridge_running():
+                break
+            time.sleep(0.25)
 
     env = dict(os.environ)
     env["JINGLI_BRIDGE_CHILD"] = "1"
@@ -315,6 +371,31 @@ def _kill_bridge_on_port(port: int) -> list[str]:
     只认 jingli.exe / python，别的程序碰巧占用时一律不动，避免误杀。
     """
     killed: list[str] = []
+    if sys.platform == "darwin":
+        # macOS：没有 netstat/taskkill，用 lsof 找监听者。
+        # 同样只杀「自己人」（jingli / python），别误伤别人的服务。
+        try:
+            out = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                                 capture_output=True, text=True, timeout=15).stdout
+        except Exception:  # noqa: BLE001
+            return killed
+        me = str(os.getpid())
+        for ln in out.splitlines()[1:]:
+            parts = ln.split()
+            if len(parts) < 2 or not parts[1].isdigit():
+                continue
+            pid, cmd = parts[1], parts[0].rsplit("/", 1)[-1].lower()
+            if pid == me or pid in killed:
+                continue
+            if not cmd.startswith(("jingli", "python")):
+                continue
+            try:
+                subprocess.run(["kill", "-TERM", pid], capture_output=True,
+                               timeout=10)
+                killed.append(pid)
+            except Exception:  # noqa: BLE001
+                pass
+        return killed
     if os.name != "nt":
         return killed
     try:
@@ -365,9 +446,17 @@ def cmd_bridge(argv: list[str]) -> int:
     force = any(a.lower() in ("--force", "-f", "restart", "重启桥") for a in argv)
 
     if bridge_running() and not force:
-        print(f"取数桥已在运行（端口 {_port()}）")
-        print("  想强制换成本目录这个桥：双击「修复-扩展连不上时点我.bat」，或 jingli.exe bridge --force")
-        return 0
+        if bridge_is_mine():
+            print(f"取数桥已在运行（端口 {_port()}，本程序目录）")
+            print("  想重启：双击「修复-扩展连不上时点我.bat」，或 jingli.exe bridge --force")
+            return 0
+        # 端口被别的目录的桥占着：不能当成「已经在跑」直接返回，
+        # 否则本程序会一直连另一个版本的数据（界面看不出任何异常）。
+        _other = str(bridge_health().get("root") or "")
+        print(f"端口 {_port()} 上是另一个版本的取数服务：{_other or '（未报告路径）'}")
+        print(f"   本程序目录：{paths.ROOT}")
+        print("  两个版本各有各的配置和数据。正在关掉它、换成当前目录的…")
+        force = True
 
     if force:
         print("先关闭占用端口的旧桥…")
@@ -475,15 +564,38 @@ def cmd_doctor() -> int:
 # ---------------- 菜单 ----------------
 
 def _load_stores() -> list[dict]:
+    """菜单用的店铺清单：先读 stores.json，里面没有就扫 数据/店铺/*/meta.json。
+
+    为什么要有第二条：0.24.55 起随包不再带开发机的店铺清单
+    （stores.json 的 stores 留空，避免把别人的 shop_id 发出去），
+    但菜单只认这份文件的话会变成「一家店都没有」，只能手填国家。
+    店铺身份本来就以 meta.json 为准，扫一遍就能补回来。
+    """
     from src import safeio
+    out: list[dict] = []
     try:
         d = safeio.read_json(paths.STORES_FILE, default={}) or {}
-        if not isinstance(d, dict):
-            return []
-        return [s for s in (d.get("stores") or [])
-                if isinstance(s, dict) and s.get("enabled", True)]
+        if isinstance(d, dict):
+            out = [s for s in (d.get("stores") or [])
+                   if isinstance(s, dict) and s.get("enabled", True)]
     except Exception:  # noqa: BLE001
-        return []
+        out = []
+    if out:
+        return out
+    try:
+        for meta in sorted((paths.DATA / "店铺").glob("*/meta.json")):
+            m = safeio.read_json(meta, default={}) or {}
+            sid = str(m.get("shop_id") or "")
+            if not sid:
+                continue
+            out.append({
+                "id": sid,
+                "name": str(m.get("shop_name") or meta.parent.name),
+                "country": str(m.get("country") or ""),
+            })
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def _load_countries() -> list[str]:
@@ -589,18 +701,17 @@ def _menu_extension_help() -> None:
     print("  3. 点「加载已解压的扩展程序」，选择这个目录：")
     print(f"     {paths.EXTENSION}")
     print("\n装好后，扩展面板上选日期点「立即运行」即可。")
-    try:
-        os.startfile(paths.EXTENSION)  # noqa: S606
-    except Exception:
-        pass
+    platform_os.open_path(paths.EXTENSION)
 
 
 def _open(p: Path) -> None:
     try:
         p.mkdir(parents=True, exist_ok=True)
-        os.startfile(p)  # noqa: S606
-    except Exception as e:
+    except OSError as e:
         print(f"打开失败：{e}")
+        return
+    if not platform_os.open_path(p):
+        print(f"打开失败：{p}")
 
 
 def _menu_config() -> None:
@@ -629,10 +740,8 @@ def _menu_config() -> None:
     print(f"\n在浏览器里打开：{url}")
     print("  每个参数一行，勾选它算哪些订单类别；")
     print("  改完点「试算」立刻看到净利变化，满意再点「保存配置」。")
-    try:
-        os.startfile(url)  # noqa: S606
-    except Exception as e:  # noqa: BLE001
-        print(f"自动打开失败（{e}），请手动把上面的地址粘到浏览器里。")
+    if not platform_os.open_path(url):
+        print("自动打开失败，请手动把上面的地址粘到浏览器里。")
 
 
 def menu() -> int:
@@ -708,9 +817,44 @@ def menu() -> int:
             return 0
 
 
+def _report_crash() -> None:
+    """把未捕获异常写成日志，并用一个原生弹窗说人话。
+
+    为什么要这个：打包版是 --windowed（没有控制台），PyInstaller 会直接弹
+    「Failed to execute script jingli」+ 一大段 traceback。用户只看到一堆
+    File "...", line ... 根本不知道发生了什么，也不知道去哪找日志。
+    实测 2026-11-04 我传错一个目录参数就弹了一次，被当成程序坏了。
+    """
+    import traceback
+    from datetime import datetime
+    try:
+        d = paths.DATA / "日志"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / f"异常_{datetime.now():%Y%m%d_%H%M%S}.log"
+        f.write_text(traceback.format_exc(), encoding="utf-8")
+        where = str(f)
+    except Exception:  # noqa: BLE001
+        where = "（日志没写成）"
+    msg = ("程序这次没跑完，已经记下原因：\n\n"
+           f"{where}\n\n"
+           "常见原因：数据目录里没有订单表、配置被改坏、文件被占用。\n"
+           "把上面那个日志文件发给开发者即可定位。")
+    platform_os.alert(msg, "净利助手 - 出错了")
+
+
 def main(argv: list[str] | None = None) -> int:
     _relax_stdout()
     argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        return _dispatch(argv)
+    except SystemExit:
+        raise
+    except BaseException:  # noqa: BLE001
+        _report_crash()
+        return 1
+
+
+def _dispatch(argv: list[str]) -> int:
 
     # 不带参数 = 打开窗口。
     # 双击程序应该看到界面，而不是一个要输数字的黑框。

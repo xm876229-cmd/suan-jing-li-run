@@ -1,0 +1,9 @@
+# macOS 版所需依赖（Windows 用 requirements.txt）
+# 界面窗口在 macOS 上走 WKWebView，靠 pyobjc 绑定；不装 pyobjc 会起不了窗。
+
+openpyxl>=3.1          # 读写 Excel 报表
+pywebview>=5.0         # 原生窗口，macOS 后端是 WKWebView
+
+pyobjc-core>=10.0 ; sys_platform == "darwin"
+pyobjc-framework-Cocoa>=10.0 ; sys_platform == "darwin"
+pyobjc-framework-WebKit>=10.0 ; sys_platform == "darwin"
