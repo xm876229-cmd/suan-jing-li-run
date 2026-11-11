@@ -1307,6 +1307,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <p>算净利要用的东西都在这：<b>收入口径</b>、<b>订单扣款</b>、<b>店铺花费</b>、<b>商品成本</b>，最后一页是<b>计算公式</b>。
            加一项扣款只在「订单扣款」里加，它会自动进费用合计，不用再回来改公式。</p></div>
 
+      <div id="calc-trial" style="margin-bottom:12px"></div>
       <div class="tools" id="ptabs" style="margin-bottom:14px"></div>
 
       <div class="pane" data-pane="income">
@@ -1337,6 +1338,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
       <div class="pane" data-pane="fees" hidden>
         <div id="fee-audit" style="margin-bottom:12px"></div>
+        <div id="fee-overview" style="margin-bottom:12px"></div>
 <div class="card"><h2>预设<span class="hint">和计算参数页共用同一套预设</span></h2>
         <div class="body">
           <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
@@ -2815,6 +2817,121 @@ function auditFees(){
     </div>`;
 }
 
+/* ---------------- 扣款项总览（P2） ---------------- */
+/* 一行一个扣款项：费率、是否计入净利、参与哪些订单类别、表达式。
+   目的只有一个——「有没有哪一项漏了」一眼能看出来，不用去三张表里对。 */
+const FEE_ROWS = [
+  { id: 'dispatch',            label: '发单费',      field: 'dispatch_fee_cny', pct: false },
+  { id: 'platform_commission', label: '平台佣金',    field: 'platform_commission', pct: true },
+  { id: 'tx_fee',              label: '交易手续费',  field: 'tx_fee', pct: true },
+  { id: 'cashback',            label: '奖金返现',    field: 'cashback', pct: true },
+  { id: 'super_coupon',        label: '超级优惠券',  field: 'super_coupon', pct: true },
+  { id: 'growth_fee',          label: '商家成长',    field: 'growth_fee', pct: true },
+  { id: 'logistics',           label: '物流费',      field: 'logistics', pct: true },
+  { id: 'order_service',       label: '订单服务费',  field: 'order_service', pct: false },
+];
+
+function rateSummary(field, pct){
+  const out = [];
+  Object.keys(rateRows || {}).forEach(c => {
+    const v = Number((rateRows[c] || {})[field] || 0);
+    if(!v) return;
+    out.push(c + ' ' + (pct ? (v * 100).toFixed(2) + '%' : v));
+  });
+  return out.length ? out.join(' · ') : '<span class="muted">未设置</span>';
+}
+
+function renderFeeOverview(){
+  const box = $('#fee-overview');
+  if(!box) return;
+  const params = rowsOf();
+  const rows = FEE_ROWS.map(f => {
+    const p = params.find(x => x && x.id === f.id);
+    const on = p ? (p.enabled !== false) : false;
+    const kinds = p && Array.isArray(p.kinds) && p.kinds.length ? (p.kinds.length + ' 类') : '全部';
+    return `<tr>
+      <td>${esc(f.label)}<div class="pid">${esc(f.id)}</div></td>
+      <td class="muted" style="font-size:12.5px">${rateSummary(f.field, f.pct)}</td>
+      <td style="text-align:center">
+        <input type="checkbox" data-ov-on="${esc(f.id)}" ${on ? 'checked' : ''}
+               ${p ? '' : 'disabled title="参数表里还没有这一项"'}>
+      </td>
+      <td class="muted" style="text-align:center;font-size:12.5px">${p ? kinds : '—'}</td>
+      <td class="mono" style="font-size:11.5px;color:#6b7b76">${p ? esc(p.expr || '') : '（缺这一项）'}</td>
+    </tr>`;
+  }).join('');
+  box.innerHTML = `<div class="card" style="margin:0"><h2>扣款项总览
+      <span class="hint">一行一项；勾掉 = 这项不进净利</span></h2>
+    <div class="body tight"><div class="tbl-wrap"><table class="cfg-tbl">
+      <thead><tr><th style="width:150px">扣款项</th><th>费率（各国）</th>
+        <th style="width:70px">计入净利</th><th style="width:76px">订单类别</th>
+        <th style="width:34%">表达式</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div></div>`;
+  box.querySelectorAll('[data-ov-on]').forEach(cb => cb.onchange = () => {
+    const p = rowsOf().find(x => x && x.id === cb.dataset.ovOn);
+    if(!p) return;
+    p.enabled = cb.checked;
+    renderParams();
+    renderFeeOverview();
+    scheduleTrial();
+    toast(cb.checked ? '已计入净利，记得保存配置' : '已从净利里去掉，记得保存配置');
+  });
+}
+
+/* ---------------- 常驻试算条（P3） ---------------- */
+let _trialT = null, _trialSeq = 0;
+function scheduleTrial(){
+  const page = $('#view-calc');
+  if(!page || page.hidden) return;
+  clearTimeout(_trialT);
+  _trialT = setTimeout(runTrial, 400);
+}
+async function runTrial(){
+  const bar = $('#calc-trial');
+  if(!bar) return;
+  const seq = ++_trialSeq;
+  bar.innerHTML = `<div style="background:#f4f7f6;border:1px solid #e3ece8;border-radius:10px;
+      padding:9px 14px;font-size:12.5px;color:#6b7b76">试算中…</div>`;
+  try{
+    const cur1 = cur();
+    const r = await fetch('/api/config/preview', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({params: paramPayload(), country: scope,
+                            by_country: collectByCountry(), formulas: fmls,
+                            order_fields: cur1.order_fields, cost_fields: cur1.cost_fields,
+                            exclude_zero_amount: !!cur1.exclude_zero_amount})});
+    const j = await r.json();
+    if(seq !== _trialSeq) return;
+    if(!j.ok){
+      bar.innerHTML = `<div style="background:#fff6e8;border:1px solid #f0dcbb;border-radius:10px;
+        padding:9px 14px;font-size:12.5px;color:#8a5a00">试算不了：${esc(j.error || '')}</div>`;
+      return;
+    }
+    const b = j.before, a = j.after, d = j.delta;
+    const up = d.net > 0.005, down = d.net < -0.005;
+    const color = up ? '#c0392b' : (down ? '#1f7a53' : '#6b7b76');
+    bar.innerHTML = `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+        background:#f4f7f6;border:1px solid #e3ece8;border-radius:10px;padding:9px 14px;font-size:12.5px">
+        <span style="color:#6b7b76">试算（未保存）</span>
+        <span>净利 <b class="mono">${fmt2(b.net)}</b>
+          <span style="color:#9aa8a3">→</span>
+          <b class="mono" style="color:${color}">${fmt2(a.net)}</b></span>
+        <span style="color:${color}">${up ? '+' : ''}${fmt2(d.net)}</span>
+        <span class="muted">净利率 ${b.net_rate}% → ${a.net_rate}%</span>
+        <span class="muted">按「${esc(j.country || '通用')}」费率</span>
+      </div>`;
+  }catch(e){
+    if(seq === _trialSeq) bar.innerHTML = '';
+  }
+}
+
+/* 只在 change（失焦/勾选）时试算，不在每次按键时算：
+   preview 要重读订单数据，大店（5 万多行）每敲一个字算一次会把界面拖住。 */
+document.addEventListener('change', e => {
+  const el = e.target;
+  if(el && el.closest && el.closest('#view-calc')) scheduleTrial();
+});
+
 function wireSpendLinks(){
   const a = $('#spend-go-import'), b = $('#spend-go-overview');
   if(a) a.onclick = () => go('import');
@@ -4284,7 +4401,7 @@ function renderAll(){
   renderDropZero();
   renderPTabs();
   renderParams(); renderOrderFields(); renderFormulas(); renderVars(); renderReportColumns();
-  renderIncomeFx(); auditFees();
+  renderIncomeFx(); auditFees(); renderFeeOverview();
 }
 
 /* 总开关：去除 0 元样品订单 */
@@ -5582,6 +5699,7 @@ async function loadRates(){
     feeFields = [...set];
     renderRates();
     auditFees();
+    renderFeeOverview();
     // 表里那两列汇率是「配置里的兜底值」；真正参与核算的是 T-1 的价。
     // 不把这件事显示出来，人会以为程序根本没联网抓汇率。
     try{
