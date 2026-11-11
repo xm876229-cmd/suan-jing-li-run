@@ -1006,26 +1006,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
           <path d="M4.2 8h15.6l-1.3 11.4a2 2 0 01-2 1.8H7.5a2 2 0 01-2-1.8z"/>
           <path d="M8.6 8V6.1a3.4 3.4 0 016.8 0V8"/>
         </svg><span>店铺</span></a>
-      <a href="#/costs" data-view="costs">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
-             stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 3l8.6 4.5L12 12 3.4 7.5z"/>
-          <path d="M3.4 12.4L12 16.9l8.6-4.5"/>
-          <path d="M3.4 16.9L12 21.4l8.6-4.5"/>
-        </svg><span>成本表</span></a>
 <div class="grp">设置</div>
-      <a href="#/params" data-view="params">
+      <a href="#/calc" data-view="calc">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
              stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3.6 7.5h9.2M18.4 7.5h2M3.6 16.5h3.8M12.6 16.5h7.8"/>
-          <circle cx="15.6" cy="7.5" r="2.4"/><circle cx="9.8" cy="16.5" r="2.4"/>
-        </svg><span>计算参数</span></a>
-      <a href="#/rates" data-view="rates">
+          <rect x="4.4" y="3.4" width="15.2" height="17.2" rx="2.4"/>
+          <path d="M8 7.6h8M8 12h2.6M12.2 12h2.6M16.4 12h.1M8 16.4h2.6M12.2 16.4h2.6M16.4 16.4h.1"/>
+        </svg><span>计算中心</span></a>
+      <a href="#/fields" data-view="fields">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
              stroke-linecap="round" stroke-linejoin="round">
-          <path d="M5.2 18.8L18.8 5.2"/>
-          <circle cx="7.7" cy="7.7" r="2.6"/><circle cx="16.3" cy="16.3" r="2.6"/>
-        </svg><span>费率</span></a>
+          <rect x="3.6" y="4.6" width="16.8" height="14.8" rx="2"/>
+          <path d="M3.6 9.2h16.8M9.4 9.2v10.2"/>
+        </svg><span>取数识别</span></a>
       <a href="#/settings" data-view="settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
              stroke-linecap="round" stroke-linejoin="round">
@@ -1202,7 +1195,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <p>两个房间分开放：<b>自动报表</b>是驾驶舱取数、卡片「重算」跑出来的；<b>手动报表</b>是「手动核算」跑出来的。
            两边都能按店铺筛、都能下载到自己指定的位置。点「查看」直接在界面里看汇总和费用拆解。</p></div>
 
-      <div class="card"><h2><span id="rep-room-title">自动报表</span><span class="hint" id="rep-hint"></span></h2>
+      <div class="card" id="rep-main"><h2><span id="rep-room-title">自动报表</span><span class="hint" id="rep-hint"></span></h2>
         <div class="body" style="padding:14px 20px 0">
           <div class="chips" id="rep-rooms" style="margin-bottom:10px">
             <button data-room="auto" class="on">自动报表</button>
@@ -1239,6 +1232,43 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </div>
         <div class="body tight" id="rep-list"><div class="empty">加载中…</div></div>
       </div>
+          <div id="rep-cols" hidden>
+
+      <div class="card"><h2>报表列（汇总页）
+        <span class="hint">勾选要展示哪些列；想改名就在「自定义标题」里写</span></h2>
+        <div class="body">
+          <div class="row" style="gap:20px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+            <label class="switch" style="margin:0">
+              <input type="checkbox" id="rcols-all">
+              <span><b>全选展示</b><em>取消勾选 = 不展示这一列</em></span>
+            </label>
+            <label class="switch" style="margin:0">
+              <input type="checkbox" id="rcol-total-on">
+              <span><b>显示合计行</b><em>关掉后汇总页不出现「合计」那一行</em></span>
+            </label>
+            <div style="font-size:13px;color:var(--text-2)" id="rcol-total-pos">
+              合计行位置：
+              <label style="margin:0 4px;cursor:pointer"><input type="radio" name="rcol-total" value="bottom" checked> 表格底部</label>
+              <label style="margin:0 4px;cursor:pointer"><input type="radio" name="rcol-total" value="top"> 表格顶部（首行）</label>
+            </div>
+          </div>
+          <div class="tbl-wrap">
+            <table class="cfg-tbl" id="rcoltbl"><thead><tr>
+              <th style="width:54px">展示</th>
+              <th style="width:104px">顺序（可拖）</th>
+              <th style="width:160px">默认标题</th>
+              <th>自定义标题（留空=用默认，如 毛利率 → 链接毛利率）</th>
+              <th style="width:84px">类型</th>
+            </tr></thead><tbody id="rcols-body"></tbody></table>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:8px 0 0">
+            货币类列（GMV / 成本 / 毛利 / 各项费用 / 净利）会自动带上该国货币代码（如 MYR / PHP），改了名也会带。
+            每个国家都能单独配：切到上面「参数表」的国家下拉即可。
+          </p>
+        </div>
+      </div>
+      
+      </div>
     </section>
 
     <section class="page" id="view-stores" hidden>
@@ -1272,13 +1302,115 @@ _TEMPLATE = r"""<!DOCTYPE html>
       </div></div></div>
     </section>
 
-    <section class="page" id="view-params" hidden>
-      <div class="head"><h1>计算参数</h1>
-        <p>每一项就是一条公式。公式里能写的东西，点下面的方块插进去就行——<b>不用记英文</b>。</p></div>
+    <section class="page" id="view-calc" hidden>
+      <div class="head"><h1>计算中心</h1>
+        <p>算净利要用的东西都在这：<b>收入口径</b>、<b>订单扣款</b>、<b>店铺花费</b>、<b>商品成本</b>，最后一页是<b>计算公式</b>。
+           加一项扣款只在「订单扣款」里加，它会自动进费用合计，不用再回来改公式。</p></div>
 
       <div class="tools" id="ptabs" style="margin-bottom:14px"></div>
 
-      <div class="pane" data-pane="params">
+      <div class="pane" data-pane="income">
+        <div class="card"><h2>收入口径<span class="hint">GMV 和「实付」是两回事</span></h2>
+          <div class="body">
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+              <div style="flex:1;min-width:260px;background:#f6f9f8;border:1px solid #e2ece8;border-radius:10px;padding:12px 14px">
+                <div style="font-size:12px;color:#7c8b86;margin-bottom:6px">GMV（收入）</div>
+                <div class="mono" style="font-size:13px">Σ折扣前小计 − Σ卖家折扣</div>
+                <div style="font-size:12.5px;color:#7c8b86;margin-top:6px">各项费率都按这个数算：平台佣金、物流费、商家成长、奖金返现…</div>
+              </div>
+              <div style="flex:1;min-width:260px;background:#f6f9f8;border:1px solid #e2ece8;border-radius:10px;padding:12px 14px">
+                <div style="font-size:12px;color:#7c8b86;margin-bottom:6px">实付（买家实付）</div>
+                <div class="mono" style="font-size:13px">买家实际付款金额</div>
+                <div style="font-size:12.5px;color:#7c8b86;margin-top:6px">只有「交易手续费」用这个基数</div>
+              </div>
+            </div>
+            <p class="muted" style="font-size:12.5px;margin:10px 0 0">列名对不上（表头变了）就去 <b>取数识别</b> 改。</p>
+          </div>
+        </div>
+        <div class="card"><h2>汇率<span class="hint">所有金额按这个折成当地币</span></h2>
+          <div class="body tight" id="income-fx"><div class="empty">读取中…</div></div>
+          <div class="body" style="padding-top:0">
+            <p class="muted" style="font-size:12.5px;margin:0">要改汇率：去「订单扣款」页，每个国家下面有「人民币本地 / 美元本地」两栏。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="pane" data-pane="fees" hidden>
+<div class="card"><h2>预设<span class="hint">和计算参数页共用同一套预设</span></h2>
+        <div class="body">
+          <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+            <div class="field" style="width:210px"><label>选一个预设</label>
+              <select id="pr-list" style="min-width:200px"></select></div>
+            <div class="field" style="width:190px"><label>保存到</label>
+              <select id="pr-scope"></select></div>
+            <div class="field" style="width:190px"><label>预设名</label>
+              <input type="text" id="pr-name" placeholder="如：马来费率"></div>
+            <button class="primary" id="pr-apply">应用</button>
+            <button class="ghost" id="pr-save" style="width:auto;padding:7px 15px;margin:0">保存为预设</button>
+            <button class="ghost" id="pr-del" style="width:auto;padding:7px 15px;margin:0">删除</button>
+          </div>
+          <label class="switch" style="margin-top:11px">
+            <input type="checkbox" id="pr-rates" checked>
+            <span><b>连各国费率一起存</b>
+              <em>费率页的这份预设默认连费率一起装；不勾就只存参数口径。</em></span>
+          </label>
+          <p class="muted" id="pr-desc" style="font-size:12px;margin:9px 0 0"></p>
+          <div class="note" id="pr-note"></div>
+        </div>
+      </div>
+      <div class="card"><h2>国家费率<span class="hint" id="rate-hint"></span></h2>
+        <div class="body tight"><div class="tbl-wrap">
+          <table class="cfg-tbl" id="rtbl"><thead id="rhead"></thead><tbody id="rbody"></tbody></table>
+          <datalist id="adscur-opts">
+            <option value="LOCAL">本地币（不换算）</option>
+            <option value="USD">美元 USD</option>
+            <option value="MYR">马币 MYR</option>
+            <option value="PHP">比索 PHP</option>
+            <option value="THB">泰铢 THB</option>
+            <option value="SGD">新币 SGD</option>
+            <option value="IDR">印尼盾 IDR</option>
+            <option value="VND">越南盾 VND</option>
+            <option value="CNY">人民币 CNY</option>
+            <option value="EUR">欧元 EUR</option>
+            <option value="GBP">英镑 GBP</option>
+          </datalist>
+        </div></div></div>
+      <div class="card"><h2>操作<span class="hint">汇率的自动抓取在「设置」里</span></h2><div class="body">
+        <div class="tools"><button class="primary" id="btn-rate-save">保存费率</button>
+          <button class="mini" id="btn-rate-add">＋ 新增国家</button>
+          <button class="mini" id="btn-fee-add">＋ 新增费率项</button></div>
+        <div class="kv" style="margin-top:18px;border:1px solid var(--line);border-radius:10px;overflow:hidden">
+          <div>汇率方向</div><div><b>1 人民币 = 多少本地货币</b>。马来西亚填 0.61，意思是 1 元人民币换 0.61 马币</div>
+          <div>发单费</div><div>按<b>人民币</b>定价（国内结算），核算时 × 汇率换成本地货币。
+            所以改汇率，发单费会自动跟着变。「发单费(本地)」那列是算出来的，不用填</div>
+          <div>订单服务费</div><div>每单固定收多少，直接填<b>本地货币</b>（马来西亚 0.54、菲律宾 5）。
+            它和发单费分开算，报表里也是两列</div>
+          <div>其余费率</div><div>写小数，比如 <b>0.081</b> 表示 8.1%，都是按成交额比例收的</div>
+          <div>增删费率项</div><div>「＋ 新增费率项」给所有国家加一列；列标题右上角的 × 删掉整列。
+            新增的项在「计算参数」里用 <span class="mono">params.字段名</span> 引用</div>
+        </div>
+      </div></div>
+      <div class="card"><h2>费率项的中文名<span class="hint">起了名之后，公式里直接写中文</span></h2>
+        <div class="body tight"><div class="tbl-wrap">
+          <table class="cfg-tbl" id="cnltbl"><thead><tr>
+            <th style="width:230px">费率项</th>
+            <th style="width:260px">中文名（公式里可用）</th>
+            <th style="width:230px">公式里就这么写</th>
+          </tr></thead><tbody id="cnlbody"></tbody></table>
+        </div></div>
+        <div class="body" style="padding-top:0">
+          <p class="muted" style="font-size:12.5px;margin:0">
+            记不住英文也没关系：在这里给每个费率项起个中文名，
+            「计算参数」的公式里就能直接写 <span class="mono">平台佣金</span>、
+            <span class="mono">交易手续费</span>，不用再写 <span class="mono">params.platform_commission</span>。
+            改完点「保存费率」生效。
+          </p>
+        </div>
+      </div>
+    
+        <details style="margin-top:14px">
+          <summary style="cursor:pointer;font-size:13px;color:#0f6e56;padding:6px 0">高级：每一项具体怎么算（表达式 / 参与哪些订单类别 / 预设）</summary>
+
       <div class="card"><h2>预设<span class="hint">一整套口径的命名快照，随时切回</span></h2>
         <div class="body">
           <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
@@ -1380,122 +1512,33 @@ _TEMPLATE = r"""<!DOCTYPE html>
           </div>
           <div class="vars" id="vars"></div>
         </div></div>
+      
+        </details>
       </div>
 
-      <div class="pane" data-pane="headers" hidden>
-      <div class="card"><h2>表头识别<span class="hint">每个表一套：程序靠这些列找数；标题可加多个候选，按顺序试</span></h2>
-        <div class="body tight">
-          <div class="tools" id="oftabs" style="margin-bottom:10px"></div>
-          <div class="tbl-wrap">
-          <table class="cfg-tbl" id="oftbl"><thead><tr>
-            <th style="width:210px">用途</th><th>表里的标题（多个候选一行一个，按顺序试）</th>
-          </tr></thead><tbody id="ofbody"></tbody></table>
-          </div>
-        </div>
-        <div class="body" style="padding-top:0">
-          <p class="muted" id="ofnote" style="font-size:12.5px;margin:0 0 6px"></p>
-          <p class="muted" style="font-size:12.5px;margin:0">
-            这一栏只用来判断「这行订单算不算取消/退货/未付款」「属于哪条链接」「按哪个编码对成本」。
-            金额怎么算，全在参数表的公式里，不在这里。
-          </p>
-        </div>
-      </div>
-      </div>
-
-      <div class="pane" data-pane="reports" hidden>
-      <div class="card"><h2>报表列（汇总页）
-        <span class="hint">勾选要展示哪些列；想改名就在「自定义标题」里写</span></h2>
-        <div class="body">
-          <div class="row" style="gap:20px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
-            <label class="switch" style="margin:0">
-              <input type="checkbox" id="rcols-all">
-              <span><b>全选展示</b><em>取消勾选 = 不展示这一列</em></span>
-            </label>
-            <label class="switch" style="margin:0">
-              <input type="checkbox" id="rcol-total-on">
-              <span><b>显示合计行</b><em>关掉后汇总页不出现「合计」那一行</em></span>
-            </label>
-            <div style="font-size:13px;color:var(--text-2)" id="rcol-total-pos">
-              合计行位置：
-              <label style="margin:0 4px;cursor:pointer"><input type="radio" name="rcol-total" value="bottom" checked> 表格底部</label>
-              <label style="margin:0 4px;cursor:pointer"><input type="radio" name="rcol-total" value="top"> 表格顶部（首行）</label>
+      <div class="pane" data-pane="spend" hidden>
+        <div class="card"><h2>店铺花费<span class="hint">广告与联盟佣金，取自店铺后台</span></h2>
+          <div class="body">
+            <div class="row" style="gap:14px;flex-wrap:wrap;align-items:flex-start">
+              <div style="flex:1;min-width:260px">
+                <div style="font-weight:500;font-size:13.5px;margin-bottom:6px">广告花费</div>
+                <p class="muted" style="font-size:12.5px;margin:0;line-height:1.7">取数时从广告后台按商品导出，直接按商品 ID 归到链接，不做分摊。缺表时按 0 算，净利偏高，「异常」页会点名。</p>
+              </div>
+              <div style="flex:1;min-width:260px">
+                <div style="font-weight:500;font-size:13.5px;margin-bottom:6px">联盟佣金（达人佣金）</div>
+                <p class="muted" style="font-size:12.5px;margin:0;line-height:1.7">取联盟佣金表，按商品 ID 汇总；缺表时同样是 0，不报错但净利偏高。</p>
+              </div>
+            </div>
+            <div class="row" style="margin-top:14px;gap:8px">
+              <button class="primary" id="spend-go-import" style="width:auto;padding:7px 15px;margin:0">去「导入数据」补表</button>
+              <button class="ghost" id="spend-go-overview" style="width:auto;padding:7px 15px;margin:0">看驾驶舱里的取数状态</button>
             </div>
           </div>
-          <div class="tbl-wrap">
-            <table class="cfg-tbl" id="rcoltbl"><thead><tr>
-              <th style="width:54px">展示</th>
-              <th style="width:104px">顺序（可拖）</th>
-              <th style="width:160px">默认标题</th>
-              <th>自定义标题（留空=用默认，如 毛利率 → 链接毛利率）</th>
-              <th style="width:84px">类型</th>
-            </tr></thead><tbody id="rcols-body"></tbody></table>
-          </div>
-          <p class="muted" style="font-size:12.5px;margin:8px 0 0">
-            货币类列（GMV / 成本 / 毛利 / 各项费用 / 净利）会自动带上该国货币代码（如 MYR / PHP），改了名也会带。
-            每个国家都能单独配：切到上面「参数表」的国家下拉即可。
-          </p>
-        </div>
-      </div>
-      </div>
-
-      <div class="pane" data-pane="formula" hidden>
-      <div class="card"><h2>净利是怎么算出来的<span class="hint">只有三行，加费用不用动这里</span></h2>
-        <div class="body">
-          <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <div style="flex:1;min-width:240px;background:#f6f9f8;border:1px solid #e2ece8;border-radius:10px;padding:12px 14px">
-              <div style="font-size:12px;color:#7c8b86;margin-bottom:6px">① 净利</div>
-              <div class="mono" style="font-size:13.5px">GMV − 商品成本 − 费用合计</div>
-            </div>
-            <div style="flex:1;min-width:240px;background:#f6f9f8;border:1px solid #e2ece8;border-radius:10px;padding:12px 14px">
-              <div style="font-size:12px;color:#7c8b86;margin-bottom:6px">② 费用合计</div>
-              <div class="mono" style="font-size:13.5px">参数表里所有费用项自动相加</div>
-              <div style="font-size:12px;color:#7c8b86;margin-top:6px">发单费、平台佣金、物流费、商家成长…都在里面</div>
-            </div>
-            <div style="flex:1;min-width:240px;background:#fff8ee;border:1px solid #f0dfc4;border-radius:10px;padding:12px 14px">
-              <div style="font-size:12px;color:#a0824d;margin-bottom:6px">③ 要加/减一项费用</div>
-              <div style="font-size:13px;line-height:1.6">去<b>「参数表」</b>加一行，它会自动进「费用合计」<br>
-              <b>不需要</b>回来改下面的公式</div>
-            </div>
-          </div>
-          <p class="muted" style="font-size:12.5px;margin:10px 0 0">
-            只有改口径时才动下面。比如「广告不算进净利」，就把「费用合计」写成
-            <span class="mono">费用项合计 - 广告花费</span>。
-          </p>
         </div>
       </div>
 
-      <div class="card"><h2>公式<span class="hint">中文直接写；点下面的变量会插到光标处</span></h2>
-        <div class="body tight"><div class="tbl-wrap">
-          <table class="cfg-tbl" id="ftbl"><thead><tr>
-            <th style="width:170px">结果</th><th>公式</th><th style="width:40px"></th>
-          </tr></thead><tbody id="fbody"></tbody></table>
-        </div></div>
-        <div class="body" style="padding-top:0">
-          <div id="ftray" style="display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 10px"></div>
-          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-            <button class="ghost" id="freset" style="padding:5px 10px;font-size:12.5px">恢复默认三行</button>
-            <span class="muted" style="font-size:12.5px">先点一下要改的输入框，再点变量</span>
-          </div>
-        </div>
-      </div>
-      </div>
-
-      <div class="card"><h2>操作<span class="hint">试算不会保存</span></h2><div class="body">
-        <div class="tools">
-          <button class="primary" id="btn-preview">试算看净利变化</button>
-          <button id="btn-save">保存配置</button>
-          <button class="mini" id="btn-all-on">全部类别都勾上</button>
-          <button class="mini" id="btn-all-off">全部类别都取消</button>
-          <button class="mini" id="btn-add">＋ 新增参数</button></div>
-        <div class="diff" id="diff"><h3>试算结果</h3><div id="diff-body"></div></div>
-      </div></div>
-    </section>
-
-    <section class="page" id="view-costs" hidden>
-      <div class="head"><h1>成本表</h1>
-        <p>商品成本 = 件数 × 该编码的成本。成本不常变，导一次就行，新增商品时补一条。</p></div>
-
-      <div class="card"><h2>概况<span class="hint" id="cost-hint"></span></h2><div class="body">
+      <div class="pane" data-pane="costs" hidden>
+<div class="card"><h2>概况<span class="hint" id="cost-hint"></span></h2><div class="body">
         <div class="stats-line" id="cost-stats"></div>
         <div class="tools" style="margin-top:14px">
           <button id="btn-cost-check">拿订单核一遍</button>
@@ -1557,85 +1600,89 @@ _TEMPLATE = r"""<!DOCTYPE html>
           </div>
         </div>
       </div>
-    </section>
-
-    <section class="page" id="view-rates" hidden>
-      <div class="head"><h1>费率</h1>
-        <p>每个国家的佣金、发单费、手续费都在这改。改完点保存，下次核算就用新费率。</p></div>
-      <div class="card"><h2>预设<span class="hint">和计算参数页共用同一套预设</span></h2>
-        <div class="body">
-          <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
-            <div class="field" style="width:210px"><label>选一个预设</label>
-              <select id="pr-list" style="min-width:200px"></select></div>
-            <div class="field" style="width:190px"><label>保存到</label>
-              <select id="pr-scope"></select></div>
-            <div class="field" style="width:190px"><label>预设名</label>
-              <input type="text" id="pr-name" placeholder="如：马来费率"></div>
-            <button class="primary" id="pr-apply">应用</button>
-            <button class="ghost" id="pr-save" style="width:auto;padding:7px 15px;margin:0">保存为预设</button>
-            <button class="ghost" id="pr-del" style="width:auto;padding:7px 15px;margin:0">删除</button>
-          </div>
-          <label class="switch" style="margin-top:11px">
-            <input type="checkbox" id="pr-rates" checked>
-            <span><b>连各国费率一起存</b>
-              <em>费率页的这份预设默认连费率一起装；不勾就只存参数口径。</em></span>
-          </label>
-          <p class="muted" id="pr-desc" style="font-size:12px;margin:9px 0 0"></p>
-          <div class="note" id="pr-note"></div>
-        </div>
+    
       </div>
-      <div class="card"><h2>国家费率<span class="hint" id="rate-hint"></span></h2>
-        <div class="body tight"><div class="tbl-wrap">
-          <table class="cfg-tbl" id="rtbl"><thead id="rhead"></thead><tbody id="rbody"></tbody></table>
-          <datalist id="adscur-opts">
-            <option value="LOCAL">本地币（不换算）</option>
-            <option value="USD">美元 USD</option>
-            <option value="MYR">马币 MYR</option>
-            <option value="PHP">比索 PHP</option>
-            <option value="THB">泰铢 THB</option>
-            <option value="SGD">新币 SGD</option>
-            <option value="IDR">印尼盾 IDR</option>
-            <option value="VND">越南盾 VND</option>
-            <option value="CNY">人民币 CNY</option>
-            <option value="EUR">欧元 EUR</option>
-            <option value="GBP">英镑 GBP</option>
-          </datalist>
-        </div></div></div>
-      <div class="card"><h2>操作<span class="hint">汇率的自动抓取在「设置」里</span></h2><div class="body">
-        <div class="tools"><button class="primary" id="btn-rate-save">保存费率</button>
-          <button class="mini" id="btn-rate-add">＋ 新增国家</button>
-          <button class="mini" id="btn-fee-add">＋ 新增费率项</button></div>
-        <div class="kv" style="margin-top:18px;border:1px solid var(--line);border-radius:10px;overflow:hidden">
-          <div>汇率方向</div><div><b>1 人民币 = 多少本地货币</b>。马来西亚填 0.61，意思是 1 元人民币换 0.61 马币</div>
-          <div>发单费</div><div>按<b>人民币</b>定价（国内结算），核算时 × 汇率换成本地货币。
-            所以改汇率，发单费会自动跟着变。「发单费(本地)」那列是算出来的，不用填</div>
-          <div>订单服务费</div><div>每单固定收多少，直接填<b>本地货币</b>（马来西亚 0.54、菲律宾 5）。
-            它和发单费分开算，报表里也是两列</div>
-          <div>其余费率</div><div>写小数，比如 <b>0.081</b> 表示 8.1%，都是按成交额比例收的</div>
-          <div>增删费率项</div><div>「＋ 新增费率项」给所有国家加一列；列标题右上角的 × 删掉整列。
-            新增的项在「计算参数」里用 <span class="mono">params.字段名</span> 引用</div>
-        </div>
-      </div></div>
-      <div class="card"><h2>费率项的中文名<span class="hint">起了名之后，公式里直接写中文</span></h2>
-        <div class="body tight"><div class="tbl-wrap">
-          <table class="cfg-tbl" id="cnltbl"><thead><tr>
-            <th style="width:230px">费率项</th>
-            <th style="width:260px">中文名（公式里可用）</th>
-            <th style="width:230px">公式里就这么写</th>
-          </tr></thead><tbody id="cnlbody"></tbody></table>
-        </div></div>
-        <div class="body" style="padding-top:0">
-          <p class="muted" style="font-size:12.5px;margin:0">
-            记不住英文也没关系：在这里给每个费率项起个中文名，
-            「计算参数」的公式里就能直接写 <span class="mono">平台佣金</span>、
-            <span class="mono">交易手续费</span>，不用再写 <span class="mono">params.platform_commission</span>。
-            改完点「保存费率」生效。
+
+<div class="pane" data-pane="formula" hidden>
+      <div class="card"><h2>净利是怎么算出来的<span class="hint">只有三行，加费用不用动这里</span></h2>
+        <div class="body">
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <div style="flex:1;min-width:240px;background:#f6f9f8;border:1px solid #e2ece8;border-radius:10px;padding:12px 14px">
+              <div style="font-size:12px;color:#7c8b86;margin-bottom:6px">① 净利</div>
+              <div class="mono" style="font-size:13.5px">GMV − 商品成本 − 费用合计</div>
+            </div>
+            <div style="flex:1;min-width:240px;background:#f6f9f8;border:1px solid #e2ece8;border-radius:10px;padding:12px 14px">
+              <div style="font-size:12px;color:#7c8b86;margin-bottom:6px">② 费用合计</div>
+              <div class="mono" style="font-size:13.5px">参数表里所有费用项自动相加</div>
+              <div style="font-size:12px;color:#7c8b86;margin-top:6px">发单费、平台佣金、物流费、商家成长…都在里面</div>
+            </div>
+            <div style="flex:1;min-width:240px;background:#fff8ee;border:1px solid #f0dfc4;border-radius:10px;padding:12px 14px">
+              <div style="font-size:12px;color:#a0824d;margin-bottom:6px">③ 要加/减一项费用</div>
+              <div style="font-size:13px;line-height:1.6">去<b>「参数表」</b>加一行，它会自动进「费用合计」<br>
+              <b>不需要</b>回来改下面的公式</div>
+            </div>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:10px 0 0">
+            只有改口径时才动下面。比如「广告不算进净利」，就把「费用合计」写成
+            <span class="mono">费用项合计 - 广告花费</span>。
           </p>
         </div>
       </div>
+
+      <div class="card"><h2>公式<span class="hint">中文直接写；点下面的变量会插到光标处</span></h2>
+        <div class="body tight"><div class="tbl-wrap">
+          <table class="cfg-tbl" id="ftbl"><thead><tr>
+            <th style="width:170px">结果</th><th>公式</th><th style="width:40px"></th>
+          </tr></thead><tbody id="fbody"></tbody></table>
+        </div></div>
+        <div class="body" style="padding-top:0">
+          <div id="ftray" style="display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 10px"></div>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <button class="ghost" id="freset" style="padding:5px 10px;font-size:12.5px">恢复默认三行</button>
+            <span class="muted" style="font-size:12.5px">先点一下要改的输入框，再点变量</span>
+          </div>
+        </div>
+      </div>
+      </div>
+
+      <div class="card"><h2>操作<span class="hint">试算不会保存</span></h2><div class="body">
+        <div class="tools">
+          <button class="primary" id="btn-preview">试算看净利变化</button>
+          <button id="btn-save">保存配置</button>
+          <button class="mini" id="btn-all-on">全部类别都勾上</button>
+          <button class="mini" id="btn-all-off">全部类别都取消</button>
+          <button class="mini" id="btn-add">＋ 新增参数</button></div>
+        <div class="diff" id="diff"><h3>试算结果</h3><div id="diff-body"></div></div>
+      </div></div>
+    
     </section>
 
-    <section class="page" id="view-settings" hidden>
+    <section class="page" id="view-fields" hidden>
+      <div class="head"><h1>取数识别</h1>
+        <p>每个导出的表，程序靠标题去认列。平台改了列名，就在这里加一条候选标题，不用改代码。</p></div>
+<div class="pane" data-pane="headers">
+      <div class="card"><h2>表头识别<span class="hint">每个表一套：程序靠这些列找数；标题可加多个候选，按顺序试</span></h2>
+        <div class="body tight">
+          <div class="tools" id="oftabs" style="margin-bottom:10px"></div>
+          <div class="tbl-wrap">
+          <table class="cfg-tbl" id="oftbl"><thead><tr>
+            <th style="width:210px">用途</th><th>表里的标题（多个候选一行一个，按顺序试）</th>
+          </tr></thead><tbody id="ofbody"></tbody></table>
+          </div>
+        </div>
+        <div class="body" style="padding-top:0">
+          <p class="muted" id="ofnote" style="font-size:12.5px;margin:0 0 6px"></p>
+          <p class="muted" style="font-size:12.5px;margin:0">
+            这一栏只用来判断「这行订单算不算取消/退货/未付款」「属于哪条链接」「按哪个编码对成本」。
+            金额怎么算，全在参数表的公式里，不在这里。
+          </p>
+        </div>
+      </div>
+      </div>
+
+      
+    </section>
+<section class="page" id="view-settings" hidden>
       <div class="head"><h1>设置</h1>
         <p>报表叫什么名字、存到哪、汇率怎么取，都在这里定。</p></div>
       <div class="card"><h2>报表文件名</h2><div class="body">
@@ -2686,15 +2733,61 @@ $('#recalc-go') && ($('#recalc-go').onclick = async () => {
   loadStatus(); loadTrend();
 });
 
+/* 收入口径页的汇率表：只读展示，改汇率仍在「订单扣款」里 */
+async function renderIncomeFx(){
+  const box = $('#income-fx');
+  if(!box) return;
+  try{
+    const r = await (await fetch('/api/rates')).json();
+    const cs = r.countries || {};
+    const keys = Object.keys(cs);
+    if(!keys.length){ box.innerHTML = '<div class="empty">还没有国家费率</div>'; return; }
+    const rows = keys.map(k => {
+      const c = cs[k] || {};
+      const cur = c.currency || '—';
+      const cny = c.cny_to_local, usd = c.usd_to_local;
+      return `<tr><td>${esc(k)}</td><td>${esc(cur)}</td>
+        <td class="mono">${cny == null ? '—' : (1 / cny).toFixed(4)}</td>
+        <td class="mono">${usd == null ? '—' : (1 / usd).toFixed(4)}</td></tr>`;
+    }).join('');
+    box.innerHTML = `<table class="cfg-tbl"><thead><tr>
+        <th>国家</th><th>币种</th><th>1 元人民币 =</th><th>1 美元 =</th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+  }catch(e){
+    box.innerHTML = '<div class="empty">汇率读取失败</div>';
+  }
+}
+
+function wireSpendLinks(){
+  const a = $('#spend-go-import'), b = $('#spend-go-overview');
+  if(a) a.onclick = () => go('import');
+  if(b) b.onclick = () => go('overview');
+}
+
 function go(view){
   // 老链接（#/run 之类已删掉的页面）不能变成一片空白：找不到就回驾驶舱
   if(!document.getElementById('view-' + view)) view = 'overview';
   document.querySelectorAll('.page').forEach(p => p.hidden = p.id !== 'view-' + view);
   document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.view === view));
   if(view === 'reports') loadReports();
-  if(view === 'params'){ loadParams(); presetScopes('ps'); loadPresets('ps'); }
-  if(view === 'rates'){ loadRates(); presetScopes('pr'); loadPresets('pr'); }
-  if(view === 'costs') loadCosts();
+  // 老链接不能失效：成本表/费率/计算参数都并进「计算中心」了，进来落到对应页签
+  const CALC_ALIAS = { params: 'fees', rates: 'fees', costs: 'costs' };
+  if(CALC_ALIAS[view]){
+    const want = CALC_ALIAS[view];
+    view = 'calc';
+    document.querySelectorAll('.page').forEach(p => p.hidden = p.id !== 'view-calc');
+    document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.view === 'calc'));
+    pTab = want;
+  }
+  if(view === 'calc'){
+    loadParams(); presetScopes('ps'); loadPresets('ps');
+    loadRates(); presetScopes('pr'); loadPresets('pr');
+    loadCosts();
+    setPTab(pTab || 'income');
+    wireSpendLinks();
+    renderIncomeFx();
+  }
+  if(view === 'fields'){ loadParams(); }
   if(view === 'settings') loadSettings();
   if(view === 'plan') loadPlan();
   if(view === 'debug') loadDebug();
@@ -3106,6 +3199,10 @@ function repInRoom(){
 }
 
 async function loadReports(){
+  const _main = $('#rep-main'), _cols = $('#rep-cols');
+  if(_main) _main.hidden = false;
+  if(_cols) _cols.hidden = true;
+  const _note = $('#rep-note'); if(_note) _note.hidden = false;
   try{
     const j = await (await fetch('/api/reports')).json();
     repAll = j.items || [];
@@ -3117,10 +3214,23 @@ async function loadReports(){
     if(rooms){
       rooms.innerHTML =
         `<button data-room="auto" class="${repRoom === 'auto' ? 'on' : ''}">自动报表（${autoN}）</button>`
-        + `<button data-room="manual" class="${repRoom === 'manual' ? 'on' : ''}">手动报表（${manN}）</button>`;
+        + `<button data-room="manual" class="${repRoom === 'manual' ? 'on' : ''}">手动报表（${manN}）</button>`
+        + `<button data-room="columns" class="${repRoom === 'columns' ? 'on' : ''}">展示列设置</button>`;
       rooms.querySelectorAll('[data-room]').forEach(b => b.onclick = () => {
         repRoom = b.dataset.room;
         repStore = '';
+        if(repRoom === 'columns'){
+          // 只切视图，不用重新读列表
+          const main = $('#rep-main'), cols = $('#rep-cols');
+          if(main) main.hidden = true;
+          if(cols) cols.hidden = false;
+          const t = $('#rep-room-title'); if(t) t.textContent = '展示列设置';
+          const n = $('#rep-note'); if(n) n.hidden = true;
+          renderReportColumns();
+          rooms.querySelectorAll('[data-room]').forEach(x =>
+            x.classList.toggle('on', x.dataset.room === 'columns'));
+          return;
+        }
         loadReports();          // 切房间要重读：下载目录也跟着换
       });
     }
@@ -4090,15 +4200,16 @@ function switchScope(next){
 
 /* 计算参数页顶部分段：一屏只看一类内容，避免所有卡片挤在一页 */
 const PTABS = [
-  { key: 'params',  label: '参数表' },
-  { key: 'headers', label: '表头识别' },
-  { key: 'reports', label: '报表列' },
-  { key: 'formula', label: '净利公式' },
+  { key: 'income',  label: '收入口径' },
+  { key: 'fees',    label: '订单扣款' },
+  { key: 'spend',   label: '店铺花费' },
+  { key: 'costs',   label: '商品成本' },
+  { key: 'formula', label: '计算公式' },
 ];
-let pTab = 'params';
+let pTab = 'income';
 function setPTab(k){
   pTab = k;
-  document.querySelectorAll('#view-params .pane').forEach(p => {
+  document.querySelectorAll('#view-calc .pane').forEach(p => {
     p.hidden = p.dataset.pane !== k;
   });
   renderPTabs();
@@ -4116,6 +4227,7 @@ function renderAll(){
   renderDropZero();
   renderPTabs();
   renderParams(); renderOrderFields(); renderFormulas(); renderVars(); renderReportColumns();
+  renderIncomeFx();
 }
 
 /* 总开关：去除 0 元样品订单 */
@@ -4877,7 +4989,7 @@ function checkFml(i){
   Object.keys(FORMULA_CN).forEach(x => known.add(FORMULA_CN[x]));
   ['gmv','paid','qty','orders','order_count','items','cost_cny','cost',
    'cost_unit','refund','commission','ads','net','gross_profit',
-   'total_fees','net_rate'].forEach(x => known.add(x));
+   'total_fees','net_rate','fees_total','费用项合计'].forEach(x => known.add(x));
 
   const unknown = [];
   (raw.match(/[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*|[一-龥]+/g) || []).forEach(t => {
