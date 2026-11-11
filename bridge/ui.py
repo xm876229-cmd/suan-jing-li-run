@@ -1336,6 +1336,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       </div>
 
       <div class="pane" data-pane="fees" hidden>
+        <div id="fee-audit" style="margin-bottom:12px"></div>
 <div class="card"><h2>预设<span class="hint">和计算参数页共用同一套预设</span></h2>
         <div class="body">
           <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
@@ -1523,10 +1524,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
               <div style="flex:1;min-width:260px">
                 <div style="font-weight:500;font-size:13.5px;margin-bottom:6px">广告花费</div>
                 <p class="muted" style="font-size:12.5px;margin:0;line-height:1.7">取数时从广告后台按商品导出，直接按商品 ID 归到链接，不做分摊。缺表时按 0 算，净利偏高，「异常」页会点名。</p>
+                <div style="margin-top:8px;font-size:12.5px">
+                  公式里写：<span class="mono" style="background:#eef5f2;padding:2px 6px;border-radius:6px">广告花费</span>
+                  <span class="muted">（内部名 ads）</span>
+                </div>
               </div>
               <div style="flex:1;min-width:260px">
                 <div style="font-weight:500;font-size:13.5px;margin-bottom:6px">联盟佣金（达人佣金）</div>
                 <p class="muted" style="font-size:12.5px;margin:0;line-height:1.7">取联盟佣金表，按商品 ID 汇总；缺表时同样是 0，不报错但净利偏高。</p>
+                <div style="margin-top:8px;font-size:12.5px">
+                  公式里写：<span class="mono" style="background:#eef5f2;padding:2px 6px;border-radius:6px">联盟佣金</span>
+                  或 <span class="mono" style="background:#eef5f2;padding:2px 6px;border-radius:6px">达人佣金</span>
+                  <span class="muted">（内部名 affiliate / commission）</span>
+                </div>
               </div>
             </div>
             <div class="row" style="margin-top:14px;gap:8px">
@@ -1636,6 +1646,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
           </tr></thead><tbody id="fbody"></tbody></table>
         </div></div>
         <div class="body" style="padding-top:0">
+          <div id="fee-detail" style="margin:0 0 12px"></div>
           <div id="ftray" style="display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 10px"></div>
           <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
             <button class="ghost" id="freset" style="padding:5px 10px;font-size:12.5px">恢复默认三行</button>
@@ -1928,7 +1939,10 @@ const RATE_META = ['currency', 'rates_verified', 'dispatch_fee_local', 'dispatch
   '_dispatch_note', 'region', 'cny_to_local', 'usd_to_local', 'ads_currency'];
 const RATE_LABELS = {
   platform_commission: '平台佣金', tx_fee: '交易手续费', cashback: '奖金返现',
-  super_coupon: '超级优惠券', growth_fee: '商家成长', logistics: '物流'
+  super_coupon: '超级优惠券', growth_fee: '商家成长', logistics: '物流',
+  // 下面几项原来没写中文名，界面上直接露出英文 id（用户截图里问「这个是什么」的就是它）
+  dispatch_fee_cny: '发单费单价', order_service: '订单服务费',
+  cny_to_local: '人民币本地', usd_to_local: '美元本地'
 };
 let feeFields = [];
 let rows = [], formulas = {}, rateRows = {}, storesCache = [];
@@ -2756,6 +2770,49 @@ async function renderIncomeFx(){
   }catch(e){
     box.innerHTML = '<div class="empty">汇率读取失败</div>';
   }
+}
+
+/** 漏项自检：费率填了非 0，但净利的费用项里没有它 → 顶部点名。
+ *  2026-11-10 漏算物流费就是这种情况：费率页填 5.5%，公式里没这一项，
+ *  报表看着正常、净利偏高。结构上没法保证人不忘，就把「忘」变成可见的提示。 */
+function auditFees(){
+  const box = $('#fee-audit');
+  if(!box) return;
+  const map = {
+    dispatch: 'dispatch_fee_cny', platform_commission: 'platform_commission',
+    tx_fee: 'tx_fee', cashback: 'cashback', super_coupon: 'super_coupon',
+    growth_fee: 'growth_fee', logistics: 'logistics', order_service: 'order_service',
+  };
+  const have = new Set(rowsOf().filter(r => r && r.id).map(r => r.id));
+  const names = {
+    dispatch: '发单费', platform_commission: '平台佣金', tx_fee: '交易手续费',
+    cashback: '奖金返现', super_coupon: '超级优惠券', growth_fee: '商家成长',
+    logistics: '物流费', order_service: '订单服务费',
+  };
+  const missed = [];
+  Object.keys(rateRows || {}).forEach(country => {
+    const c = rateRows[country] || {};
+    Object.keys(map).forEach(pid => {
+      const v = Number(c[map[pid]] || 0);
+      if(!v) return;
+      if(pid === 'super_coupon' && !c.__sc_on) {
+        // 开关关着就是按 0 计，不算漏
+        return;
+      }
+      if(!have.has(pid)){
+        const t = names[pid] + '（' + country + ' ' + (v * 100).toFixed(2) + '%）';
+        if(!missed.includes(t)) missed.push(t);
+      }
+    });
+  });
+  if(!missed.length){ box.innerHTML = ''; return; }
+  box.innerHTML = `<div style="background:#fff6e8;border:1px solid #f0dcbb;border-radius:10px;padding:10px 14px">
+      <div style="font-weight:500;font-size:13px;color:#8a5a00;margin-bottom:4px">
+        ⚠ 这些费率填了，但净利的费用项里没有它，等于没扣</div>
+      <div style="font-size:12.5px;color:#8a5a00;line-height:1.7">${missed.slice(0, 8).map(esc).join('、')}</div>
+      <div style="font-size:12px;color:#a0824d;margin-top:4px">
+        展开下方「高级：每一项具体怎么算」，加一条同名费用项即可；加完这里会自动消失。</div>
+    </div>`;
 }
 
 function wireSpendLinks(){
@@ -4227,7 +4284,7 @@ function renderAll(){
   renderDropZero();
   renderPTabs();
   renderParams(); renderOrderFields(); renderFormulas(); renderVars(); renderReportColumns();
-  renderIncomeFx();
+  renderIncomeFx(); auditFees();
 }
 
 /* 总开关：去除 0 元样品订单 */
@@ -4861,7 +4918,9 @@ function renderReportColumns(){
 
 function renderFormulas(){
   const keys = Object.keys(fmls);
-  $('#fbody').innerHTML = keys.map((k, i) => `<tr>
+  // 费用合计不单独占一行：用户看不到它里面到底加了什么，反而更困惑。
+  // 合计值仍由引擎算（total_fees 留在配置里），这里只在下方列出「包含哪些项」。
+  $('#fbody').innerHTML = keys.map((k, i) => k === 'total_fees' ? '' : `<tr>
     <td><span style="font-size:12.5px">${esc(FORMULA_CN[k] || k)}</span>
         <div class="pid">${esc(k)}</div></td>
     <td class="expr-cell">
@@ -4902,6 +4961,7 @@ function renderFormulas(){
     delete fmls[k];
     renderFormulas();
   });
+  renderFeeDetail();
   renderFormulaTray();
   const rst = $('#freset');
   if(rst) rst.onclick = () => {
@@ -4920,6 +4980,26 @@ function renderFormulas(){
 /** 公式页底部的「可用变量」：点一下插到当前输入框的光标处。
  *  为什么要这个：用户不知道能写什么，只能猜参数名（"新加的参数去哪加"就是这么来的）。
  *  这里把能用的名字直接摆出来，点一下就插进去。 */
+/** 公式页的「费用项合计包含什么」：只读列出，回答"都合计了哪些东西"。
+ *  净利公式里只有「费用项合计」一个词，看不到明细确实让人不放心——
+ *  这里把参数表里所有费用项摊开，改一项这里就跟着变。 */
+function renderFeeDetail(){
+  const box = $('#fee-detail');
+  if(!box) return;
+  const skip = new Set(['gmv', 'cost', 'order_count', 'items', 'buyer_paid']);
+  const items = rowsOf().filter(r => r && r.id && !skip.has(r.id));
+  if(!items.length){
+    box.innerHTML = '<div class="muted" style="font-size:12.5px">参数表里还没有费用项</div>';
+    return;
+  }
+  const chips = items.map(r =>
+    `<span style="display:inline-block;padding:3px 9px;margin:0 6px 6px 0;border-radius:7px;
+        background:#f2f7f5;border:1px solid #dcebe5;font-size:12.5px">${esc(r.label || r.id)}</span>`).join('');
+  box.innerHTML = `<div style="font-size:12.5px;color:#5f6f6a;margin-bottom:6px">
+      「费用项合计」= 下面这 ${items.length} 项相加（加一项费用，它会自动进来）：</div>
+    <div>${chips}</div>`;
+}
+
 function renderFormulaTray(){
   const tray = $('#ftray');
   if(!tray) return;
@@ -5501,6 +5581,7 @@ async function loadRates(){
     });
     feeFields = [...set];
     renderRates();
+    auditFees();
     // 表里那两列汇率是「配置里的兜底值」；真正参与核算的是 T-1 的价。
     // 不把这件事显示出来，人会以为程序根本没联网抓汇率。
     try{
