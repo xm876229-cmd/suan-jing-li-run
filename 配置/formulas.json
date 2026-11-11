@@ -462,7 +462,7 @@
  "formulas": {
   "gross_profit": "GMV - 商品成本",
   "total_fees": "费用项合计",
-  "net": "GMV - 商品成本 - 费用项合计",
+  "net": "GMV - 商品成本 - 发单费 - 平台佣金 - 交易手续费 - 广告花费 - 达人佣金 - 奖金返现 - 订单服务费 - 超级优惠券 - 商家成长 - 物流费",
   "net_rate": "净利 / GMV"
  },
  "report_columns": [

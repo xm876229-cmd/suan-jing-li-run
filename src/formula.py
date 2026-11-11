@@ -357,10 +357,14 @@ DEFAULTS: dict = {
     "by_country": {},
     "formulas": {
         "gross_profit": "gmv - cost",
-        # 费用合计 = 参数表里所有费用项之和（自动，不用逐项列）
+        # 费用合计仍保留（报表的「费用拆解」与历史数据要用），但净利不再引用它：
+        # 老板看不到「费用合计」里面到底加了什么，宁可见到逐项列出来。
         "total_fees": "fees_total",
-        # 净利 = GMV - 成本 - 费用合计。加一项费用只改参数表，这里永远不用动。
-        "net": "gmv - cost - fees_total",
+        # 净利 = 逐项扣减。加一项费用时，界面会自动把它追加到这一行（见补齐功能），
+        # 漏了没加也会在「计算中心 → 订单扣款」顶部点名。
+        "net": ("gmv - cost - dispatch - platform_commission - tx_fee"
+                " - affiliate - ads - cashback - order_service"
+                " - super_coupon - growth_fee - logistics"),
         "net_rate": "net / gmv",
     },
 }
