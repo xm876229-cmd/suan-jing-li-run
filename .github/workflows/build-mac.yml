@@ -93,7 +93,7 @@ jobs:
           echo "== 可执行文件架构 =="
           file "$BIN"
           ARCH="$(lipo -archs "$BIN")"
-          echo "架构：$ARCH"
+          echo "架构：${ARCH}"
           echo "== 资源断言 =="
           MISS=0
           chk_dir() { if [ -d "$1" ]; then echo "  OK   $2"; else echo "  MISS $2 -> $1"; MISS=1; fi; }
@@ -107,10 +107,10 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_DIR/Contents/Info.plist"
           PLIST_VER="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Contents/Info.plist")"
           SRC_VER="$(python3 -c "import json;print(json.load(open('浏览器扩展/manifest.json',encoding='utf-8'))['version'])")"
-          echo "Info.plist 版本：$PLIST_VER ｜ manifest.json 版本：$SRC_VER"
+          echo "Info.plist 版本：${PLIST_VER} ｜ manifest.json 版本：${SRC_VER}"
           echo "== 源码模式冒烟：导入全部模块 =="
           python3 -c "import sys;sys.path.insert(0,'.');import src.paths,src.calc,src.report,src.loader,src.setup_core,src.platform_os;print('import ok')"
-          if [ "$ARCH" != "arm64" ]; then echo "::error::架构不对：$ARCH"; exit 1; fi
+          if [ "$ARCH" != "arm64" ]; then echo "::error::架构不对：${ARCH}"; exit 1; fi
           if [ "$MISS" != "0" ]; then echo "::error::资源不齐，Mac 版会缺文件"; exit 1; fi
           if [ "$PLIST_VER" != "$SRC_VER" ]; then echo "::error::Info.plist 版本与 manifest.json 不一致"; exit 1; fi
 
@@ -128,14 +128,14 @@ jobs:
           ls -la "$D" || true
           CONF=$(ls "$D/配置" 2>/dev/null | wc -l | tr -d ' ')
           COST=$(wc -l < "$D/数据/成本/master.csv" 2>/dev/null || echo 0)
-          echo "配置个数：$CONF"
-          echo "成本表行数：$COST"
+          echo "配置个数：${CONF}"
+          echo "成本表行数：${COST}"
           if [ "${CONF:-0}" -lt 8 ]; then
-            echo "::error::默认配置没播种（只有 $CONF 个），首次运行会没有费率"
+            echo "::error::默认配置没播种（只有 ${CONF} 个），首次运行会没有费率"
             exit 1
           fi
           if [ "${COST:-0}" -gt 0 ] && [ "${COST:-0}" -lt 100 ]; then
-            echo "::error::默认成本表不完整（$COST 行）"
+            echo "::error::默认成本表不完整（${COST} 行）"
             exit 1
           fi
           if [ "${COST:-0}" -eq 0 ]; then
@@ -146,19 +146,26 @@ jobs:
           "$BIN" serve > /tmp/jingli-serve.log 2>&1 &
           SERVE_PID=$!
           # 三个接口都要真的回内容，不能「selfcheck 通了就默认别的也行」。
+          # 坑（2026-11-15 踩到两次）：
+          #   ① 变量后面紧跟中文标点会出事 —— "$name（" 里 bash 把中文首字节
+          #      当成了变量名的一部分，报 `name?: unbound variable`。
+          #      所以一律写 ${name}，别裸写 $name 再接中文。
+          #   ② curl 连不上时根本没创建输出文件，`wc -c < "$out"` 的重定向
+          #      在执行前就失败了（2>/dev/null 拦不住重定向错误）。先判断文件在不在。
           probe() {
-            name="$1"; path="$2"; out="$3"; code=""; size=0
+            pname="$1"; ppath="$2"; pout="$3"; pcode=""; psize=0
             for i in $(seq 1 20); do
-              code=$(curl -s -o "$out" -w '%{http_code}' --max-time 6 "http://127.0.0.1:8765$path" || true)
-              size=$(wc -c < "$out" 2>/dev/null | tr -d ' ')
-              if [ "$code" = "200" ] && [ "${size:-0}" -gt 20 ]; then
-                echo "  OK   $name（HTTP $code，${size} 字节）"
-                head -c 220 "$out"; echo
+              pcode=$(curl -s -o "$pout" -w '%{http_code}' --max-time 6 "http://127.0.0.1:8765${ppath}" || true)
+              psize=0
+              if [ -f "$pout" ]; then psize=$(wc -c < "$pout" | tr -d ' '); fi
+              if [ "${pcode}" = "200" ] && [ "${psize:-0}" -gt 20 ]; then
+                echo "  OK   ${pname}（HTTP ${pcode}，${psize} 字节）"
+                head -c 220 "$pout"; echo
                 return 0
               fi
               sleep 1
             done
-            echo "  FATAL $name 打不通（最后 HTTP ${code:-无}，${size:-0} 字节）"
+            echo "  FATAL ${pname} 打不通（最后 HTTP ${pcode:-无}，${psize:-0} 字节）"
             return 1
           }
           FAIL=0
