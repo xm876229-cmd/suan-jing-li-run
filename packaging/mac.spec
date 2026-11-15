@@ -23,7 +23,13 @@ STAGE = ROOT / "build" / "mac_stage"  # 中间产物仍放 build/（该目录不
 ICON = STAGE / "icon.icns"
 
 datas = [
-    (str(ROOT / "浏览器扩展"), "."),
+    # dst 必须写**目录名**，不能写 "."。
+    # 写 "." 时 PyInstaller 会把目录内容摊平到 Frameworks 根下：
+    # background.js / inject.js / manifest.json 散了一地，而程序是按
+    # `resource_root()/浏览器扩展` 找的，结果 Mac 版一个扩展都找不到
+    # （2026-11-15 CI 日志里看到的就是这个：Frameworks 下有 background.js，
+    #   却没有「浏览器扩展」这个目录）。
+    (str(ROOT / "浏览器扩展"), "浏览器扩展"),
     (str(ROOT / "文档"), "."),
     (str(ROOT / "assets"), "."),
     (str(STAGE / "默认配置"), "默认配置"),
