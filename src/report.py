@@ -299,11 +299,49 @@ def _summary_specs(res: CalcResult, fees, ratios, has_alt, enabled,
     return specs
 
 
+def merge_report_columns(default_keys: list[str], saved: list[str] | None,
+                         seen: list[str] | None = None) -> list[str]:
+    """把「用户勾过的列」和「后来新增的列」合起来。
+
+    为什么需要 seen（2026-11-15 踩到）：
+        配置里存的是**勾选结果**，不是"历来见过哪些列"。参数表后来加了
+        交易手续费 / 物流费 / 商家成长 / 超级优惠券这些费用项，报表列却还是
+        老的那三个（发单费、广告费、联盟佣金），新费用项一列都不出——
+        用户看到的就是「费率展示又没了」。
+        光有 saved 分不清「新增的列」和「用户主动取消的列」，
+        所以另存一份 seen（历来出现过的全部列键）：新增 = default - seen，
+        一律默认启用；用户真取消过的列在 seen 里，不会被强行拉回来。
+    """
+    if not saved:
+        return list(default_keys)          # 没存过 = 全选
+
+    allow = set(default_keys)
+    keep = [k for k in saved if k in allow]
+    known = set(seen or saved)
+    add = [k for k in default_keys if k not in known]
+    if not add:
+        return keep or list(default_keys)
+
+    # 新增列按「默认顺序里的前一个兄弟」定位，不要一股脑追加到末尾。
+    # 追加到末尾会把「排名」甩到最后一列——它就是 default_keys 的第一个，
+    # 用户会以为顺序乱了（2026-11-15 实测）。
+    pos = {k: i for i, k in enumerate(default_keys)}
+    for k in add:
+        idx = -1
+        for prev in reversed(default_keys[:pos[k]]):
+            if prev in keep:
+                idx = keep.index(prev)
+                break
+        keep.insert(idx + 1, k)
+    return keep or list(default_keys)
+
+
 def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
              report_columns: list[str] | None = None,
              total_position: str = "bottom",
              report_titles: dict | None = None,
-             with_formula: bool = False) -> None:
+             with_formula: bool = False,
+             report_columns_seen: list[str] | None = None) -> None:
     # 一条链接（商品ID）一行：同一链接下的多个 SKU 合并，
     # 不同链接即使卖家编码相同也绝不合并——卖家编码可在多条链接间复用，
     # 只有商品ID 是链接的唯一标识。
@@ -315,12 +353,7 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
 
     # 用户可勾选要展示的列；没配置就展示全部（含款式编码、各费用、净利等）。
     default_keys = _default_report_columns(fees, ratios, has_alt)
-    if report_columns:
-        enabled = [k for k in report_columns if k in default_keys]
-        if not enabled:
-            enabled = default_keys
-    else:
-        enabled = default_keys
+    enabled = merge_report_columns(default_keys, report_columns, report_columns_seen)
     # 排名以前是强制的（怕表格空着不好看），但它是纯装饰列：
     # 用户不需要的时候应该能关掉（2026-11-04 反馈）。
     # 上面已经保证 enabled 非空，所以去掉这段不会出现空表。
@@ -800,8 +833,12 @@ def _summary(ws: Worksheet, res: CalcResult, subtitle: str,
                 L = _cl2(k)
                 return f"SUM({L}3:{L}{last})" if L else None
 
+            # alt_net / alt_diff 是「样品对比」那两列（净利（对比口径）/
+            # 样品差额）。它们每行都是钱，加起来就是合计，但以前不在白名单里
+            # → 合计行写成常数 → 体检报「合计行有 2 列是常数（S,T）」，
+            # 用户把这两列勾上之后切口径不会联动（2026-11-13 实测）。
             _SUMMABLE2 = {"gmv", "orders", "items", "cost", "net", "net_cny",
-                          "fee_total", "buyer_paid"}
+                          "fee_total", "buyer_paid", "alt_net", "alt_diff"}
             for ci2, sp in enumerate(specs, 1):
                 key = sp["key"]
                 f = None
@@ -933,13 +970,29 @@ def _fee_breakdown(ws: Worksheet, res: CalcResult, subtitle: str) -> None:
     _title(ws, "费用拆解（长表，可直接透视）", subtitle, span=6)
     _head(ws, ["商品ID", "款式编码", "费用项", "金额", "占GMV", "占费用合计"])
     fees = fee_items(res)
+
+    # 哪些费用项要展示：**整张表不是全 0** 的都展示。
+    #
+    # 以前是「这一项在这个商品上为 0 就跳过」，于是超级优惠券（开关关着、
+    # 只在少数商品上有钱）整组消失，明细里有这一列、费用拆解里却查不到，
+    # 对账时以为程序漏算了（2026-11-12 用户反馈）。
+    # 现在按「全表」判断：只要有一个商品不为 0，每个商品都列这一项（0 也写出来），
+    # 这样明细里出现的任何一项费用，在费用拆解里都能找到对应行。
+    # 整张表一分钱都没有的项（比如没开超级优惠券且费率 0）仍然不列，
+    # 免得给每家店都堆一串永远为 0 的行。
+    totals: dict[str, float] = {fid: 0.0 for fid, _n in fees}
+    for p in res.products:
+        for fid, _n in fees:
+            totals[fid] += float((p.fees or {}).get(fid, 0.0))
+    shown = [(fid, name) for fid, name in fees if abs(totals.get(fid, 0.0)) >= 1e-9]
+
     row = 3
     for p in res.products:
-        vals_map = [(name, float((p.fees or {}).get(fid, 0.0))) for fid, name in fees]
+        vals_map = [(name, float((p.fees or {}).get(fid, 0.0))) for fid, name in shown]
         total_fee = sum(v for _, v in vals_map) or 0
+        if abs(total_fee) < 1e-9:
+            continue          # 这个商品一分钱费用都没有，整组跳过（列出来全是 0 行没意义）
         for name, val in vals_map:
-            if abs(val) < 1e-9:
-                continue
             vals = [p.product_id, p.style_codes, name, val,
                     (val / p.gmv if p.gmv else 0),
                     (val / total_fee if total_fee else 0)]
@@ -1154,10 +1207,48 @@ def _kind_of(l: OrderLine, refund_kw: tuple) -> str:
 
 # 能按「订单行」精确算的费用项。广告费/达人佣金是按链接整期取的，摊到行上只能是
 # 估算，所以不在明细里列（列了会让人以为是平台真实扣款）。
-_ROW_FEE_IDS = ("dispatch", "platform_commission", "tx_fee", "cashback", "order_service")
+_ROW_FEE_IDS = ("dispatch", "platform_commission", "tx_fee", "cashback",
+                "order_service", "super_coupon", "growth_fee", "logistics")
 _ROW_FEE_CN = {"dispatch": "发单费", "platform_commission": "平台佣金",
                "tx_fee": "交易手续费", "cashback": "奖金返现",
-               "order_service": "订单服务费"}
+               "order_service": "订单服务费", "super_coupon": "超级优惠券",
+               "growth_fee": "商家成长", "logistics": "物流费"}
+
+# 行级的「原始量」和整期取数的两项，不是扣款项，明细里不单列列。
+_ROW_INPUT_IDS = {"gmv", "buyer_paid", "order_count", "items"}
+_PERIOD_ONLY_FEES = {"ads", "affiliate"}
+
+# 参数表里自己加的扣款项（如「仓储费」）也要能在明细里看到，
+# 否则汇总的费用合计比明细多一块，对不上账。
+_FEE_EXPR_CACHE: dict[str, str] = {}
+
+
+def _row_fee_value(expr: str, gmv, paid, orders, items, params) -> float:
+    """按参数表里那一行的表达式，算「这一行」该扣多少（本地货币）。
+
+    走的是核算同一个引擎（compile_expr + safe_eval），所以明细的
+    「费用合计」和汇总的净利永远是一套算法，不会各算各的。
+    """
+    key = str(expr or "").strip()
+    if not key:
+        return ZERO
+    code = _FEE_EXPR_CACHE.get(key)
+    if code is None:
+        from src import formula as _f
+        try:
+            aliases = _f.rate_aliases(getattr(params, "cn_labels", None) or {})
+            code, _g = _f.compile_expr(key, [], aliases)
+        except Exception:      # noqa: BLE001 —— 算不出的就不列，别把报表搞崩
+            return ZERO
+        _FEE_EXPR_CACHE[key] = code
+    from src import formula as _f
+    ctx = {"gmv": gmv, "paid": paid, "orders": orders, "qty": items,
+           "cost_unit": ZERO, "cost": ZERO, "fees_total": ZERO, "params": params}
+    try:
+        val, _used = _f.safe_eval(code, ctx)
+    except Exception:          # noqa: BLE001
+        return ZERO
+    return val
 
 
 def _row_fee_items(cfg: list[dict]) -> list[tuple[str, str]]:
@@ -1172,9 +1263,21 @@ def _row_fee_items(cfg: list[dict]) -> list[tuple[str, str]]:
         if not isinstance(it, dict):
             continue
         fid = str(it.get("id") or "").strip()
-        if fid in _ROW_FEE_IDS and fid not in labels:
-            labels[fid] = str(it.get("label") or _ROW_FEE_CN[fid])
-            order.append(fid)
+        if not fid or fid in labels:
+            continue
+        # 原始量（GMV/实付/订单数/件数）不是扣款；
+        # 广告/联盟是整期取数的，摊到行上只能估算，列了会被当成平台真实扣款。
+        if fid in _ROW_INPUT_IDS or fid in _PERIOD_ONLY_FEES:
+            continue
+        # 带 role 的是「报表列」那几项（GMV/商品成本/订单数/件数/买家实付），
+        # 它们是收入的来源或成本，不是扣款项。商品成本混进费用合计，
+        # 净利就等于把成本扣了两遍。
+        if it.get("role"):
+            continue
+        if it.get("enabled") is False:
+            continue
+        labels[fid] = str(it.get("label") or _ROW_FEE_CN.get(fid) or fid)
+        order.append(fid)
     for fid in _ROW_FEE_IDS:
         if fid not in labels:
             labels[fid] = _ROW_FEE_CN[fid]
@@ -1182,27 +1285,36 @@ def _row_fee_items(cfg: list[dict]) -> list[tuple[str, str]]:
     return [(fid, labels[fid]) for fid in order]
 
 
+def _param_item(cfg: list[dict], fid: str) -> dict | None:
+    for it in cfg or []:
+        if isinstance(it, dict) and str(it.get("id") or "").strip() == fid:
+            return it
+    return None
+
+
 def _row_fees(l: OrderLine, kind: str, params: Params, cfg: list[dict]) -> dict[str, float]:
     """这一行在某一套口径下的各项订单级费用（**本地货币**）。
 
-    跟 _row_net 共用同一套判定，不能各写一份：两边一岔开，明细里
+    跟 _row_net 共用同一份结果，不能各写一份：两边一岔开，明细里
     「GMV − 成本 − 费用合计」就跟净利差一个说不清的数。
+
+    每一项都按参数表里**那一行自己的表达式**算（走同一个引擎），
+    所以以后在「计算项」里新增一个扣款项，明细这里自动就有，
+    不用再回来改白名单——以前只认死名单里的 5 项，物流费/商家成长/
+    超级优惠券明明扣了却没有列，汇总和明细对不上账。
     """
-    fx = params.cny_to_local
     gmv = l.gmv if _in_kinds(cfg, "gmv", kind) else ZERO
     paid = l.allocated_paid if _in_kinds(cfg, "buyer_paid", kind) else ZERO
     orders = l.allocated_orders if _in_kinds(cfg, "order_count", kind) else ZERO
+    items = l.qty if _in_kinds(cfg, "items", kind) else ZERO
     out: dict[str, float] = {}
-    if _in_kinds(cfg, "dispatch", kind):
-        out["dispatch"] = orders * params.dispatch_fee_cny * fx
-    if _in_kinds(cfg, "platform_commission", kind):
-        out["platform_commission"] = gmv * params.platform_commission
-    if _in_kinds(cfg, "tx_fee", kind):
-        out["tx_fee"] = paid * params.tx_fee
-    if _in_kinds(cfg, "cashback", kind):
-        out["cashback"] = gmv * params.cashback
-    if _in_kinds(cfg, "order_service", kind):
-        out["order_service"] = orders * params.order_service
+    for fid, _lab in _row_fee_items(cfg):
+        it = _param_item(cfg, fid) or {}
+        if it.get("enabled") is False:
+            continue                     # 停用的项不扣钱，也不出现在明细
+        if not _in_kinds(cfg, fid, kind):
+            continue
+        out[fid] = _row_fee_value(it.get("expr"), gmv, paid, orders, items, params)
     return out
 
 
@@ -1605,13 +1717,14 @@ def build_report(res: CalcResult, lines: list[OrderLine], out_path: Path,
                  with_formula: bool = False,
                  report_columns: list[str] | None = None,
                  total_position: str = "bottom",
-                 report_titles: dict | None = None) -> Path:
+                 report_titles: dict | None = None,
+                 report_columns_seen: list[str] | None = None) -> Path:
     wb = Workbook()
     ws = wb.active
     ws.title = "汇总"
     _summary(ws, res, subtitle, report_columns=report_columns,
              total_position=total_position, report_titles=report_titles,
-             with_formula=with_formula)
+             with_formula=with_formula, report_columns_seen=report_columns_seen)
 
     _fee_breakdown(wb.create_sheet("费用拆解"), res, subtitle)
     _daily(wb.create_sheet("日趋势"), lines, res, subtitle)

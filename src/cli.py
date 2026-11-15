@@ -654,8 +654,14 @@ def main(argv: list[str] | None = None) -> int:
         "数据来源": source,
         "区间": period,
         "时间字段": "订单创建时间" if args.date_field == "created" else "付款时间",
-        "订单行数": str(res.line_count),
-        "订单数": str(res.order_count),
+        # 这两个是**数**，不是说明文字。写成文本的话：
+        #   · Excel 里不能参与计算（SUM 当 0），还左对齐看着别扭；
+        #   · WPS 会把它们当「文本型数字」标黄。
+        # 订单数是按订单平分出来的合计，可能是 3506.0 —— 整数值就写 int，
+        # 真有小数（平分到 0.5 单）就保留两位。
+        "订单行数": int(res.line_count),
+        "订单数": (int(res.order_count) if float(res.order_count).is_integer()
+                   else round(float(res.order_count), 2)),
         "店铺": store_note or "-",
         "成本表": f"{costs_path.name}（{costs_note}）" if costs_path else "未提供，成本按 0 计",
         "映射表": f"{map_path.name}（{map_note}）" if map_path else "未提供",
@@ -683,7 +689,8 @@ def main(argv: list[str] | None = None) -> int:
                         with_formula=_want_formula,
                         report_columns=cc.get("report_columns"),
                         total_position=cc.get("report_total_position", "bottom"),
-                        report_titles=cc.get("report_titles"))
+                        report_titles=cc.get("report_titles"),
+                        report_columns_seen=cc.get("report_columns_seen"))
 
     # ── 顺手把「带公式版」也生成好，缓存起来 ──
     #
@@ -716,7 +723,8 @@ def main(argv: list[str] | None = None) -> int:
                          with_formula=True,
                          report_columns=cc.get("report_columns"),
                          total_position=cc.get("report_total_position", "bottom"),
-                         report_titles=cc.get("report_titles"))
+                         report_titles=cc.get("report_titles"),
+                         report_columns_seen=cc.get("report_columns_seen"))
         except Exception as e:  # noqa: BLE001
             # 缓存失败绝不能影响主报表：主报表已经写好了
             print(f"[warn] 带公式版缓存失败（不影响主报表）：{e}", file=sys.stderr)

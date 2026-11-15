@@ -15,17 +15,73 @@ const ui = fs.readFileSync(path.join(root, 'bridge', 'ui.py'), 'utf8');
 function grab(name) {
   const re = new RegExp(`(async\\s+)?function\\s+${name}\\s*\\([^)]*\\)\\s*\\{`);
   const m = ui.match(re);
-  if (!m) throw new Error('没找到函数 ' + name);
-  let i = m.index + m[0].length;
-  let depth = 1;
-  for (; i < ui.length && depth > 0; i++) {
-    if (ui[i] === '{') depth++;
-    else if (ui[i] === '}') depth--;
+  if (m) {
+    let i = m.index + m[0].length;
+    let depth = 1;
+    for (; i < ui.length && depth > 0; i++) {
+      if (ui[i] === '{') depth++;
+      else if (ui[i] === '}') depth--;
+    }
+    return ui.slice(m.index, i);
   }
-  return ui.slice(m.index, i);
+  // 不是 function 声明，而是单行箭头/函数表达式：`const _reEsc = s => ...;`
+  // ui.py 里这类小工具不少（_reEsc 就被 scanExpr 用着），以前只认 function
+  // 声明，抽到一半就 ReferenceError。
+  // 只认「等号右边就是参数列表 + =>」的函数表达式，例如
+  //   const _reEsc = s => String(s).replace(...);
+  // 不能只看「整行含 =>」：`const g = PARAM_GROUPS.find(x => ...)` 这种普通语句
+  // 也含箭头函数，会被误当函数抽走，eval 时炸「PARAM_GROUPS is not defined」。
+  const re2 = new RegExp(
+    `(?:const|let|var)\\s+${name}\\s*=\\s*`
+    + `(?:\\([^)]*\\)|async\\s+)?[A-Za-z_$][\\w$]*\\s*=>\\s*[^;\\n]*;`);
+  const m2 = ui.match(re2);
+  if (m2) return m2[0];
+  throw new Error('没找到函数 ' + name);
 }
 
-// 从 HTML 里抠出 <script> 块，取里面的全局常量（FIELD_VARS / FORMULA_CN）
+// 把 ui.py 里的函数连它的依赖一起抽出来。
+//
+// 以前是手写列表 `[grab('checkExpr'), grab('checkFml')]`：ui.py 那边只要
+// 多抽一层（比如 checkExpr 里开始调 scanExpr、scanExpr 又调 knownNames），
+// 这里就 ReferenceError —— 自检直接崩，等于这个检查项从此空转。
+// 现在按「被调用的标识符」自动往下抽，找不到的（String/Number 这些内置）
+// 就跳过。这样上面加函数，这里不用跟着改。
+// 这些名字由 new Function 的参数注入（测试用的假数据）。
+// 抽依赖时必须跳过它们，否则会把 ui.py 里的同名实现也抽进来、把假数据覆盖掉
+// （cur / rowsOf 一被覆盖就去读 ui.py 里的全局 scopeData，直接 ReferenceError）。
+const INJECTED = new Set([
+  'document', 'esc', 'headers', 'varRates', 'rateCn', 'rateLabels',
+  'rowsOf', 'cur', 'FIELD_VARS', 'FORMULA_CN', 'fmls', 'RATE_LABELS', 'rateCnServer',
+]);
+
+function grabWithDeps(names) {
+  const seen = new Set();
+  const out = [];
+  const queue = [...names];
+  while (queue.length) {
+    const n = queue.shift();
+    if (seen.has(n) || INJECTED.has(n)) continue;
+    seen.add(n);
+    let src;
+    try { src = grab(n); } catch (e) { continue; }   // 内置函数 / 不在 ui.py 里
+    out.push(src);
+    // 不能只找「名字后面跟 (」：`names.map(_reEsc)` 里 _reEsc 是当参数传的，
+    // 不是调用，那样就漏了（实测 scanExpr 依赖 _reEsc 就是这么漏掉的）。
+    // 改成把所有标识符都当候选，grab 得到（真是 ui.py 里的函数）才收，
+    // 关键字和内置对象 grab 不到，自动跳过。
+    const KW = new Set(['function','return','const','let','var','if','else','for',
+      'while','do','switch','case','break','continue','new','typeof','instanceof',
+      'in','of','try','catch','finally','throw','async','await','yield','class',
+      'this','null','undefined','true','false','void','delete','super']);
+    const ids = src.match(/[A-Za-z_$][\w$]*/g) || [];
+    for (const dep of ids) {
+      if (dep === n || seen.has(dep) || INJECTED.has(dep) || KW.has(dep)) continue;
+      queue.push(dep);
+    }
+  }
+  return out.join('\n\n');
+}
+
 function scriptBody() {
   const m = ui.match(/<script>([\s\S]*?)<\/script>/);
   if (!m) throw new Error('没找到 script 块');
@@ -96,15 +152,17 @@ const document = {
   querySelectorAll: () => [],
 };
 
-const code = [
-  grab('checkExpr'),
-  grab('checkFml'),
-].join('\n\n');
+const code = grabWithDeps(['checkExpr', 'checkFml']);
+
+// builtinCN 在线上是运行时由 /api/config 填的全局量（ui.py 里 `let builtinCN = {}`），
+// 测试里当参数注入，避免去抽那个定义（抽了也还是空对象）。
+const builtinCN = { gmv: 'GMV', order_count: '订单数', buyer_paid: '买家实付' };
 
 const fn = new Function(
   'document', 'esc', 'headers', 'varRates', 'rateCn', 'rateLabels',
   'rowsOf', 'cur', 'FIELD_VARS', 'FORMULA_CN', 'fmls', 'RATE_LABELS', 'rateCnServer',
-  code + '\nreturn {checkExpr, checkFml};'
+  'builtinCN',
+  code + '\nreturn {checkExpr, checkFml, scanExpr, knownNames};'
 );
 
 // FIELD_VARS / FORMULA_CN 从真实 HTML 里抠出来执行
@@ -114,7 +172,8 @@ const constFn = new Function(constSrc + '\nreturn {FIELD_VARS, FORMULA_CN};');
 const { FIELD_VARS, FORMULA_CN } = constFn();
 
 const api = fn(document, esc, headers, varRates, rateCn, rateLabels,
-               rowsOf, cur, FIELD_VARS, FORMULA_CN, fmls, RATE_LABELS, rateCnServer);
+               rowsOf, cur, FIELD_VARS, FORMULA_CN, fmls, RATE_LABELS, rateCnServer,
+               builtinCN);
 
 let failed = 0;
 function check(label, cond, extra) {
@@ -224,6 +283,35 @@ console.log('\n【英文老公式仍要能用】');
 rows[3].expr = 'orders * params.dispatch_fee_cny * params.cny_to_local';
 api.checkExpr(3);
 check('英文公式不报不认识', !(hints['3'] || '').includes('不认识'), '提示=' + hints['3']);
+// 挖掉名字时要把 `params.` 前缀一起挖掉，否则剩下的孤立 `params` 会被当成
+// 「用量」写进提示里（以前就是这样，只是被上面那条「不认识」先盖住了）
+check('提示里不出现孤立的 params 前缀',
+      !/(^|[^.\w])params([^.\w]|$)/.test(hints['3'] || ''), '提示=' + hints['3']);
+
+console.log('\n【中文公式里也要能认出费率名（计算项表格靠它配对）】');
+{
+  // 计算项表格右边那列「用了哪些费率」= scanExpr().used 过滤一遍费率名。
+  // 以前只匹配 params.xxx，用户把公式改成中文写法后整列都变成「不含费率」。
+  const c1 = api.scanExpr('本行买家实付 * 交易手续费率');
+  check('中文写法认得出交易手续费率', (c1.used || []).includes('交易手续费率'),
+        'used=' + JSON.stringify(c1.used));
+  const c2 = api.scanExpr('本行订单数 * 发单费单价 * 人民币汇率');
+  check('一行多个费率都认得出',
+        (c2.used || []).includes('发单费单价') && (c2.used || []).includes('人民币汇率'),
+        'used=' + JSON.stringify(c2.used));
+  // 英文写法命中的是英文键（`tx_fee`），中文写法命中的是中文名（`交易手续费率`），
+  // 两种都算「认出来了」——表格那边用 name→id 表统一映射。
+  const c3 = api.scanExpr('paid * params.tx_fee');
+  check('英文写法也认得出',
+        (c3.used || []).some(n => n === 'tx_fee' || n === '交易手续费率'),
+        'used=' + JSON.stringify(c3.used));
+  const c4 = api.scanExpr('本行GMV');
+  check('纯基础量不该混进费率', !(c4.used || []).some(n => n.endsWith('率')),
+        'used=' + JSON.stringify(c4.used));
+  // 长名优先：不能被拆成「交易手续费」+「率」
+  const c5 = api.scanExpr('本行买家实付 * 交易手续费率');
+  check('长名不被截断', !(c5.unknown || []).length, 'unknown=' + JSON.stringify(c5.unknown));
+}
 
 console.log(failed ? `\n✗ 有 ${failed} 项没过` : '\n✓ 全部通过');
 process.exit(failed ? 1 : 0);

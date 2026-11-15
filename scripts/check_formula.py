@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import re
 import subprocess
 import sys
@@ -169,7 +170,27 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  · 用 {shop} {frm}~{to} 出一份带公式报表…")
     tmp = Path(tempfile.mkdtemp(prefix="jingli_formula_"))
     out = tmp / "check.xlsx"
-    ok, net = _render(shop, sid, country, frm, to, out)
+
+    # 核算是会**改写配置**的：补全 report_columns、把 label 对齐引擎认的名字
+    # （实测「达人佣金」被写成「联盟佣金」、多出 ratio:affiliate 列）。
+    # 体检跑的是 release 正本那份配置，跑完不还原就等于「校验把被测对象改了」——
+    # 2026-11-12 实测：verify 跑完 release 的 formulas.json 就变了，
+    # 跟随包默认配置对不上，直接卡住发布（还差点当成打包坏了）。
+    cfg_dir = APP_DIR / "配置"
+    cfg_bak = tmp / "cfg_backup"
+    had_cfg = cfg_dir.is_dir()
+    if had_cfg:
+        shutil.copytree(cfg_dir, cfg_bak)
+    try:
+        ok, net = _render(shop, sid, country, frm, to, out)
+    finally:
+        if had_cfg and cfg_bak.is_dir():
+            for f in cfg_bak.glob("*.json"):
+                dst = cfg_dir / f.name
+                # 内容没变就别写：写了 mtime 会跳，虽然有内容比对兜着，
+                # 但「校验跑完文件时间变了」本身就容易让人误会。
+                if not dst.is_file() or dst.read_bytes() != f.read_bytes():
+                    dst.write_bytes(f.read_bytes())
     if not ok:
         print("  ✗ 报表没生成出来，体检做不了")
         return 1
@@ -231,7 +252,9 @@ def _sweep_columns(shop, sid, country, frm, to, tmp: Path) -> list[str]:
                                              for h in hdr.values() if h):
                 bad.append("取消「商品ID」后没有被自动补回（带公式版会算不出来）")
     finally:
-        cfg_path.write_bytes(backup.read_bytes())
+        # 内容没变就别写：mtime 一跳，外面会以为配置被改了
+        if not cfg_path.is_file() or cfg_path.read_bytes() != backup.read_bytes():
+            cfg_path.write_bytes(backup.read_bytes())
     return bad
 
 

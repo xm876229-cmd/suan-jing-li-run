@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,64 @@ def config_path() -> Path:
     return paths.CONFIG / "formulas.json"
 
 
+# 报表「汇总」页的列目录：基础列固定，费用/占比列跟着参数表走。
+# 标题规则必须和 src/report.py 的 _summary_specs 一致，否则界面叫「广告费比」、
+# 报表里叫别的，人对不上。
+_REPORT_BASE_COLS = [
+    ("rank", "排名", "text"), ("style", "款式编码", "text"),
+    ("product", "链接（商品ID）", "text"), ("name", "商品名称", "text"),
+    ("gmv", "GMV", "money"), ("orders", "订单数", "int"),
+    ("pre_cancel_orders", "售前取消单数", "int"),
+    ("post_cancel_orders", "售后取消单数", "int"),
+    ("post_cancel_share", "售后取消占比", "pct"),
+    ("all_cancel_share", "取消占总单比", "pct"),
+    ("post_cancel_total_share", "售后占总单比", "pct"),
+    ("items", "件数", "int"), ("aov", "客单价", "money"),
+    ("buyer_paid", "买家实付", "money"), ("cost", "成本", "money"),
+    ("gross_profit", "毛利", "money"), ("gross_margin", "链接毛利率", "pct"),
+]
+_REPORT_TAIL_COLS = [
+    ("fee_total", "费用合计", "money"), ("net_rate", "净利率", "pct"),
+    ("net", "净利", "money"), ("net_cny", "净利", "money"),
+    ("alt_net", "净利（对比）", "money"), ("alt_diff", "样品差额", "money"),
+]
+_ROLE_KEYS = {"gmv", "cost", "order_count", "items", "buyer_paid"}
+_RATIO_SPECIAL = {"dispatch": "发单费占比", "ads": "广告费比"}
+
+
+def report_catalog(params: list) -> list[dict]:
+    """按参数表推出「汇总页可选列」的完整清单。
+
+    为什么要后端算一份（2026-11-15）：
+        前端原本自己从 params 推费用列，但「报表 → 展示列设置」是独立视图，
+        它渲染时前端那份 params 有可能还没到位，结果列表里一个费用列都没有，
+        而报表本身是有这些列的 —— 用户看到的就是「费率列又没了」。
+        现在后端直接把清单下发，前端优先用它，两边不会再算出两套。
+    """
+    out = [{"key": k, "header": h, "kind": t} for k, h, t in _REPORT_BASE_COLS]
+    fees: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for it in params or []:
+        if not isinstance(it, dict):
+            continue
+        fid = str(it.get("id") or "").strip()
+        if not fid or fid in seen:
+            continue
+        role = str(it.get("role") or "").strip()
+        if role in _ROLE_KEYS or fid in _ROLE_KEYS:
+            continue
+        seen.add(fid)
+        fees.append((fid, str(it.get("label") or fid)))
+    for fid, label in fees:
+        out.append({"key": "fee:" + fid, "header": label, "kind": "money"})
+    for fid, label in fees:
+        out.append({"key": "ratio:" + fid,
+                    "header": _RATIO_SPECIAL.get(fid) or (label + "占比"),
+                    "kind": "pct"})
+    out += [{"key": k, "header": h, "kind": t} for k, h, t in _REPORT_TAIL_COLS]
+    return out
+
+
 def read_config() -> dict:
     """读当前配置（带默认值兜底）。"""
     try:
@@ -37,8 +96,11 @@ def read_config() -> dict:
     except (OSError, json.JSONDecodeError):
         doc = {}
     cfg = formula.load_config(config_path())
+    _params = cfg.get("params") or []
     return {
-        "params": cfg.get("params") or [],
+        "params": _params,
+        # 汇总页可选列的完整清单（后端算好下发，前端别自己再推一遍）
+        "report_column_catalog": report_catalog(_params),
         "by_country": cfg.get("by_country") or {},
         "formulas": cfg.get("formulas") or {},
         "order_fields": cfg.get("order_fields") or {},
@@ -52,6 +114,10 @@ def read_config() -> dict:
         "kinds": cfg.get("kinds") or dict(KINDS),
         # 报表「汇总」页要展示哪些列（列键列表）、合计行放哪（top/bottom）、列标题怎么命名
         "report_columns": cfg.get("report_columns") or [],
+        # 历来出现过的全部列键。用来区分「后来新增的列」和「用户主动取消的列」：
+        # 没有它，参数表加了新费用项，报表里也不会多出那一列（2026-11-15 踩到）。
+        "report_columns_seen": (doc.get("report_columns_seen")
+                                or cfg.get("report_columns_seen") or []),
         # 列的顺序：直接从文件读（load_config 只回它认识的键，容易漏掉新加字段）
         "report_column_order": (doc.get("report_column_order")
                                 or cfg.get("report_column_order") or []),
@@ -61,6 +127,10 @@ def read_config() -> dict:
         "raw_note": doc.get("_readme") or [],
         # 最近一次订单表的真实表头：界面上写标题时可以直接点选
         "headers": order_headers().get("titles") or [],
+        # 引擎直接认的中文名（成本合计、费用项合计…）。
+        # 界面拿它来：① 判断公式里有没有写错名字 ② 「插入参数」下拉里列出来。
+        # 以前这两处各写一份硬编码，和 src/formula.py 一对不上就误报「不认识」。
+        "builtin_cn": dict(formula.BUILTIN_CN),
     }
 
 
@@ -100,6 +170,23 @@ def _clean_order_fields(fields: dict | None) -> dict:
     return clean
 
 
+def _rate_labels() -> dict:
+    """费率的中文名（rates.json 的 labels 段）。
+
+    公式里写的费率名，用的就是用户在费率表里改过的名字
+    （比如把 cny_to_local 叫成「人民币本地」）。保存前校验如果只认
+    内置默认名（「人民币汇率」），用户自己写得对的公式会被拦下来，
+    报一句「未知变量：人民币本地」——比不校验更让人摸不着头脑。
+    """
+    try:
+        from src import paths as _paths
+        doc = json.loads(_paths.RATES_FILE.read_text(encoding="utf-8"))
+        lab = doc.get("labels")
+        return lab if isinstance(lab, dict) else {}
+    except Exception:      # noqa: BLE001 —— 读不到就退回内置默认名
+        return {}
+
+
 def _check_formulas(params: list, formulas: dict) -> list[str]:
     """试算每一条公式，返回人话错误说明（空列表 = 都能算）。
 
@@ -123,7 +210,7 @@ def _check_formulas(params: list, formulas: dict) -> list[str]:
     # 费率写成 params.xxx，校验时给个「什么字段都有、都是 1」的对象
     ctx["params"] = SimpleNamespace(**{k: 1.0 for k in _f.DEFAULT_RATE_CN})
 
-    aliases = _f.rate_aliases(None)
+    aliases = _f.rate_aliases(_rate_labels())
     for fid, cn in _f.FORMULA_CN.items():      # FORMULA_CN 是 {id: 中文名}
         aliases.setdefault(cn, fid)
     for p in params or []:
@@ -150,6 +237,7 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
                 exclude_zero_amount: bool | None = None,
                 report_columns: list | None = None,
                 report_column_order: list | None = None,
+                report_columns_seen: list | None = None,
                 report_total_position: str | None = None,
                 report_titles: dict | None = None,
                 ads_fields: dict | None = None,
@@ -181,6 +269,17 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
                    ("affiliate_fields", affiliate_fields),
                    ("mapping_fields", mapping_fields)):
         out[_k] = _clean_order_fields(_v) if _v is not None else (old.get(_k) or {})
+    # 空参数表 / 空公式 = 配置报废（界面再也生成不出费用列、报表也没有明细列）。
+    # 2026-11-15 实测：release 的 formulas.json 就是这么被写空的
+    # （params/formulas/cost_fields 三块全成了 0），核算靠 formula.normalize()
+    # 的代码默认值兜住所以数字没错，但界面看不到任何费用项、报表少了 6 列。
+    # 以前这里是 `out["params"] = params`，空也照写，没有任何兜底。
+    if not params:
+        return {"ok": False, "error": "参数表是空的，拒绝保存（会清掉所有计算项，"
+                                     "报表将失去费用明细）。请刷新页面重新读取配置后再改。"}
+    if not (formulas or {}):
+        return {"ok": False, "error": "净利公式是空的，拒绝保存（净利将算不出来）。"
+                                     "请刷新页面重新读取配置后再改。"}
     out["params"] = params
     flag = old.get("exclude_zero_amount") if exclude_zero_amount is None else bool(exclude_zero_amount)
     if flag:
@@ -212,6 +311,16 @@ def save_config(params: list, formulas: dict, keep_readme: bool = True,
             pass  # 清空时不写键，配置更干净
     elif "report_columns" in old:
         out["report_columns"] = old["report_columns"]
+    # 历来出现过的列键：保存时由界面把当前列目录整份传上来。
+    # 有了它，以后参数表再加费用项，报表里才会自动多出那一列。
+    if report_columns_seen is not None:
+        seen = [str(x).strip() for x in report_columns_seen if str(x).strip()]
+        if seen:
+            out["report_columns_seen"] = sorted(set(seen))
+        elif "report_columns_seen" in old:
+            out["report_columns_seen"] = old["report_columns_seen"]
+    elif "report_columns_seen" in old:
+        out["report_columns_seen"] = old["report_columns_seen"]
     # 列的顺序（包含没勾的列），界面靠它稳定排列，拖动才不会被重渲染打回原样
     if report_column_order is not None:
         order = [str(x).strip() for x in report_column_order if str(x).strip()]
@@ -408,10 +517,36 @@ def preview(params: list, formulas: dict | None = None,
         trial_cfg["formulas"] = {**cfg_now.get("formulas", {}), **formulas}
     after = run(trial_cfg)
 
+    # 这次试算到底用了谁的数据——不写清楚，用户看到「净利 -45.33」根本不知道
+    # 是哪家店、哪段时间、多少行算出来的，没法判断可不可信。
+    src: dict = {}
+    try:
+        inbox = latest_inbox()
+        if inbox is not None:
+            # 表都在子目录里（订单表 / 广告表 / 联盟佣金表 / 商品映射），要递归找
+            all_files = [f for f in inbox.rglob("*") if f.is_file()]
+            all_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            # 报「最新的那张表」，不是它的 .srcmeta.json 元数据
+            data_files = [f for f in all_files
+                          if f.suffix.lower() in (".csv", ".xlsx", ".xls")]
+            newest = (data_files or all_files)[0] if all_files else None
+            src = {
+                "store": inbox.parent.name,
+                "files": len(all_files),
+                "lines": len(getattr(data, "orders", []) or []),
+                "newest_file": newest.name if newest else "",
+                "newest_time": (time.strftime("%m-%d %H:%M",
+                                              time.localtime(newest.stat().st_mtime))
+                                if newest else ""),
+            }
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "ok": True,
         "country": country,
         "currency": getattr(p, "currency", ""),
+        "source": src,
         # 费用 id → 中文名：试算明细要给人看，不能甩一串英文 id
         "fee_labels": {str(it.get("id")): str(it.get("label") or it.get("id"))
                        for it in (params or []) if isinstance(it, dict) and it.get("id")},

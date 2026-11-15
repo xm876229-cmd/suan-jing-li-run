@@ -479,6 +479,47 @@ def check_remote(tag: str) -> list[str]:
     return bad
 
 
+def check_ui_runtime() -> list[str]:
+    """界面脚本真跑一遍（Node + DOM 桩）。
+
+    为什么必须有这一项：2026-11-11 那次 `FEE_ROWS` 常量被误删但调用还在，
+    node --check 只查语法、check_ext 只查函数定义，都没拦住，
+    结果「订单扣款」页整块渲染失败，用户只看到一句「读取费率失败」。
+    这类错会整页白屏，必须在发布前跑。
+    """
+    try:
+        r = subprocess.run([sys.executable, "-m", "scripts.check_ui_runtime", "--quiet"],
+                           cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if r.returncode != 0:
+            tail = out.splitlines()[-6:] if out else ["（没有输出）"]
+            return ["界面脚本真跑没过（会出现空白页）：" + " / ".join(tail)]
+        return []
+    except subprocess.TimeoutExpired:
+        return ["界面脚本真跑超时"]
+    except Exception as e:  # noqa: BLE001
+        return [f"界面脚本检查跑不起来：{e}"]
+
+
+def check_ui_dom() -> list[str]:
+    """真实 DOM 结构检查（标签配平 / id 唯一 / 关键容器 / 嵌套关系）。
+
+    这项是补 `check_ui_runtime` 的盲区：那边用 DOM 桩跑逻辑，
+    `querySelector` 永远返回元素，查不出「HTML 里根本没有这个节点」。
+    2026-11-11 连出两次：pscope 丢失、fx-items 被套进 fx-formula 导致整块空白。
+    """
+    try:
+        r = subprocess.run([sys.executable, "-m", "scripts.check_ui_dom", "--quiet"],
+                           cwd=str(ROOT), capture_output=True, text=True, timeout=120)
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if r.returncode != 0:
+            tail = out.splitlines()[-8:] if out else ["（没有输出）"]
+            return ["界面 DOM 结构有问题：" + " / ".join(tail)]
+        return []
+    except Exception as e:  # noqa: BLE001
+        return [f"DOM 检查跑不起来：{e}"]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="发布校验")
     ap.add_argument("--tag", default="", help="要核对的版本号，如 v0.24.2；默认取扩展版本")
@@ -491,22 +532,25 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n=== 发布校验（{tag or '未知版本'}）===\n")
 
     problems: list[str] = []
-    print("[1/6] 版本源")
+    print("[1/7] 版本源")
     problems += check_versions(tag)
-    print("[2/6] 构建新鲜度")
+    print("[2/7] 构建新鲜度")
     problems += check_fresh(tag)
-    print("[3/6] 包内容")
+    print("[3/7] 包内容")
     problems += check_portable(ver)
     problems += check_setup()
-    print("[4/6] 随包配置与成本表（必须同步 release\\净利助手 正本）")
+    print("[4/7] 随包配置与成本表（必须同步 release\\净利助手 正本）")
     problems += check_bundled_config()
-    print("[5/6] 带公式报表体检（自引用 / 合计行常数 / 取消各列）")
+    print("[5/7] 带公式报表体检（自引用 / 合计行常数 / 取消各列）")
     problems += check_formula_health()
+    print("[6/7] 界面检查（脚本真跑 + DOM 结构）")
+    problems += check_ui_runtime()
+    problems += check_ui_dom()
     if not args.no_run:
-        print("[6/6] 真跑一遍")
+        print("[7/7] 真跑一遍")
         problems += check_runtime(ver)
     else:
-        print("[6/6] 真跑一遍（已跳过）")
+        print("[7/7] 真跑一遍（已跳过）")
     if args.remote:
         print("[远程] 与 GitHub 发布对比")
         problems += check_remote(tag)

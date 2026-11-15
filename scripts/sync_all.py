@@ -242,6 +242,82 @@ def _strip_schedules(path: Path) -> bool:
     return True
 
 
+def _merge_site_caps(src: dict, dst: dict) -> int:
+    """把正本的「站点能力」并进某个版本的活配置，用户自己加的站点原样留着。
+
+    为什么要并（2026-11-15 踩到）：
+        sites.json 里混着两类东西——
+          · 站点档案（域名 → 站点代码/国家/能力）属于程序口径，必须跟程序走
+          · 用户自己加的站点，必须留着
+        以前一份都不并，于是「PH 站的 ads_spec 改成 false」这种口径改动
+        永远到不了 release 和安装版：项目目录改了，跑着的还是旧值，
+        改了半天等于没改。而且这个字段会让 PH 站跳过 4 列接口兜底，
+        留在旧值上就等于悄悄砍掉一层保险。
+    """
+    src_sites = src.get("sites") or {}
+    dst_sites = dst.get("sites") or {}
+    n = 0
+    for key, s in src_sites.items():
+        if not isinstance(s, dict):
+            continue
+        d = dst_sites.get(key)
+        if not isinstance(d, dict):
+            dst_sites[key] = dict(s)
+            n += 1
+            continue
+        for field in ("region", "country", "ads_spec", "download_retry",
+                      "download_retry_gap"):
+            if field in s:
+                if d.get(field) != s[field]:
+                    d[field] = s[field]
+                    n += 1
+            elif field == "ads_spec" and field in d:
+                # 正本没写 ads_spec = 用 defaults（默认支持）：
+                # 活配置里残留的 false 必须删掉，否则那条兜底永远被跳过。
+                d.pop(field, None)
+                n += 1
+    for field, v in (src.get("defaults") or {}).items():
+        dd = dst.setdefault("defaults", {})
+        if dd.get(field) != v:
+            dd[field] = v
+            n += 1
+    dst["sites"] = dst_sites
+    return n
+
+
+def sync_site_caps() -> int:
+    """站点能力并进每个版本的活配置（`配置/sites.json`）。"""
+    src_f = CONFIG_SRC / "sites.json"
+    if not src_f.is_file():
+        return 0
+    try:
+        src = json.loads(src_f.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    total = 0
+    for t in targets():
+        f = Path(t["dir"]) / "配置" / "sites.json"
+        if not f.is_file():
+            continue
+        try:
+            dst = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            print(f"  {t['name']:<10} sites.json 读不出来，跳过（{f}）")
+            continue
+        n = _merge_site_caps(src, dst)
+        if not n:
+            continue
+        try:
+            from src import safeio
+            safeio.write_json(f, dst, indent=1)
+        except Exception:  # noqa: BLE001
+            f.write_text(json.dumps(dst, ensure_ascii=False, indent=1) + "\n",
+                         encoding="utf-8")
+        print(f"  {t['name']:<10} 站点能力同步 {n} 项（{f}）")
+        total += n
+    return total
+
+
 def sync_live_rules() -> int:
     """把正本里的订单类别并进每个版本自己那份活配置。"""
     src = CONFIG_SRC / "formulas.json"
@@ -376,6 +452,16 @@ def sync(build: bool) -> int:
             print("  各版本已经一致，无需改动")
     except Exception as e:  # noqa: BLE001
         print(f"  口径同步失败（忽略）：{e}")
+
+    # 站点能力（ads_spec / 国家 / 重试次数）也要并进每个版本的活配置：
+    # 它决定某一类表还能不能走接口兜底，留在旧值上等于悄悄砍掉一层保险。
+    try:
+        print("\n站点能力同步：")
+        _n = sync_site_caps()
+        if not _n:
+            print("  各版本已经一致，无需改动")
+    except Exception as e:  # noqa: BLE001
+        print(f"  站点能力同步失败（忽略）：{e}")
 
     # 另外两个版本如果不同步，就会出现「界面显示新名、文件夹还是旧名」。
     # 放在最后一步：前面同步配置时可能已经把 stores.json 覆盖成本机这份了。

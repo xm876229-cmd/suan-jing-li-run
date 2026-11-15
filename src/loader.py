@@ -373,41 +373,44 @@ MULTIPACK_RE = re.compile(r"^(?P<base>.+?)[-\s](?P<n>\d+)\s*[Pp][Cc][Ss]$")
 
 # 从卖家编码推导款式编码。
 #
-# 店铺后台下载的「链接资料」表里没有款式编码那一列（用户手工加的那列
-# 只有在模板里才有），但款式编码就藏在卖家编码的第一段里：
-#     V27-White-10Pcs      → V27
-#     V1【Set-LOVE】       → V1
-#     MY-J68-22cm+clip     → MY-J68
-#     M15*30pcs            → M15   （* 后面也是数量，不是编码的一部分）
-# 规则：取第一个分隔符（- * × 【 （ ( 空格）之前的部分，
-# 但「MY-J68」这种两段式要保留两段，所以先试「字母前缀-字母+数字」的整段。
-_STYLE_TWO_SEG = re.compile(r"^([A-Za-z]{1,3}-[A-Za-z]+\d*)(?=[\-*×\[【（(\s]|$)")
-_STYLE_FIRST_SEG = re.compile(r"^([^\-*×\[【（(\s]+)")
+# 规则照店主的 tq()（Excel 自定义函数）：**从左往右，取到「第一段数字结束」为止**。
+#     款式编码        卖家编码
+#     B9             B9-1.5m-White
+#     B11            B11-100/190cm-2PCS      ← 尺寸 100/190cm 不参与
+#     B110           B110-90cm-2PCS
+#     B2             B2-White*10PCS
+#     B145           B145-G/C/DSET
+#     MY-J68         MY-J68-22cm+clip
+#     51             51-(70*50*60)-Blue+1Diaper
+#     2410280001     2410280001（纯数字编码原样）
+#
+# 2026-11-11 修：老规则是「取第一个分隔符之前」，还把 `/` 当成多款式的分隔符，
+# 于是 `B11-100/190cm` 被拆成 `B11-100` 和 `190cm` 两段，
+# 同一条链接的款式编码被拼成 `120cm/190cm/50cm/90cm/B11/B2` —— 这就是
+# 用户说的「款式编码识别不准」。尺寸区间里的 `/` 不是款式分隔符。
+_STYLE_TQ = re.compile(r"^.*?\d+")
 
 
 def derive_style_code(seller_sku: str) -> str:
-    """从卖家编码推款式编码。推不出来就返回空，由调用方留空。"""
+    """从卖家编码取款式编码，和 tq() 一字不差：
+    一个数字都没有就返回空（不猜、不退回老规则）。"""
     s = str(seller_sku or "").strip()
     if not s:
         return ""
-    m = _STYLE_TWO_SEG.match(s)
-    if m:
-        return m.group(1).strip()
-    m = _STYLE_FIRST_SEG.match(s)
-    return m.group(1).strip() if m else ""
+    m = _STYLE_TQ.match(s)
+    return m.group(0).strip() if m else ""
 
 
 def derive_styles(seller_sku: str) -> list[str]:
-    """一个卖家编码里可能捆着好几个款式（MY-J33/J74/J28/J71-Beige）。
+    """一个卖家编码对应的款式编码列表。
 
-    整串直接推会得到「MY」这种半截编码，所以先按 / 、 拆开再逐个推。
+    tq 规则下每个编码只对应**一个**款式；这里保留「列表」的接口，
+    是因为调用处拿它去和映射表里的款式做并集。
+    老版本按 `/` 拆开逐个推，把尺寸区间（70/120cm）当成了第二个款式，
+    报表上的 `120cm/190cm/50cm/90cm/B11/B2` 就是这么来的。
     """
-    out: list[str] = []
-    for part in split_styles(seller_sku):
-        c = derive_style_code(part)
-        if c and c not in out:
-            out.append(c)
-    return out
+    c = derive_style_code(seller_sku)
+    return [c] if c else []
 
 
 @dataclass
@@ -1020,6 +1023,18 @@ def parse_ads(rows: list[tuple], usd_to_local: float = 1.0,
         else:
             _how = f"按 {_m} 折成本地币"
         issues.append(f"广告表货币分布：{detail}（{_how}）")
+    # 配置里指定的币种是**强制**的：表里写什么一律不看（4 列那份只写 LOCAL，
+    # 11 列那份写真实币种，两种都得听配置）。但两者不一致时要报一句：
+    # 配置填错会差几倍（USD 与 THB 差 33 倍），报表上看不出来。
+    _hard = (ads_currency or _ADS_CURRENCY or "AUTO").strip().upper()
+    if _hard not in ("", "AUTO", "LOCAL", "本地", "本地币"):
+        _odd = [k for k in currencies
+                if k and k.upper() not in ("", "LOCAL", "未标注", _hard)]
+        if _odd:
+            issues.append(
+                f"⚠ 广告表里写的是 {'、'.join(_odd[:3])}，但配置按 {_hard} 折算（以配置为准）。"
+                f"如果这个广告账户其实是按 {_odd[0]} 结算，请把「费率 → 该国 → 广告表币种」"
+                f"改成 {_odd[0]}，否则广告费会差几倍")
     if unknown:
         # 这条必须放最后：币种填错/汇率表里没有时，钱会静默变 0，比少算更危险。
         issues.append(f"⚠ 有 {unknown:,.2f} 的金额币种认不出（设置：{_m or '自动'}），"
@@ -1672,8 +1687,20 @@ def _pick_latest(items: list[tuple[Path, list[tuple]]], window, label: str,
 
     lo, hi = window
 
-    # ① 区间完全相等的才算候选；同样相等取导出时间最新的
+    # ① 区间必须**一字不差**：起点、终点都要对上；同样对得上取导出时间最新的
+    #
+    # 曾经为了兼容「终点写成次日」的表，这里容忍过 +1 天。但那个坑的根子不是
+    # 平台语义，是我们自己两条路命名不一致：B 路用 endDateExclusive（比末日多一天），
+    # A 路用 {{endDateCompact}}（末日）。已经在扩展里改成 shiftDate(endDateExclusive, -1)，
+    # 两条路都叫 11-05_11-11 了，容忍没必要留（2026-11-12 用户要求删掉）。
+    #
+    # 而且容忍本身是危险的：真拿错了邻月的表，差一天也看不出来，反而静默算错。
+    # 现在规则很硬：A 路没取到就是没取到，B 路必须自己把名字起对。
     exact = [s for s in stamped if s[3] and s[3][0] == lo and s[3][1] == hi]
+    if exact:
+            issues.append(
+                f"{label}：用 {exact[-1][1].name}（开区间写法，终点写的是次日；"
+                f"实际覆盖 {lo}~{hi}）")
     if exact:
         exact.sort(key=lambda x: (x[0], str(x[1])))
         pick = exact[-1]

@@ -553,7 +553,7 @@ async function apiPost(url, body, extraHeaders) {
   try {
     resp = await fetch(url, {
       method: "POST",
-      credentials: "include",
+      credentials: "include", signal: AbortSignal.timeout(60000),
       headers,
       body: JSON.stringify(body),
       signal: ctl.signal,
@@ -711,7 +711,7 @@ async function identifyShop(host, log, opts = {}) {
       const tried = [];
       for (const u of list) {
         try {
-          const resp = await fetch(u, { credentials: "include" });
+          const resp = await fetch(u, { credentials: "include", signal: AbortSignal.timeout(30000) });
           const t = await resp.text();
           if (!t || t.trim()[0] !== "{") { tried.push(`${u.split("?")[0]} 非 JSON`); continue; }
           const f = dig(JSON.parse(t), 0);
@@ -839,8 +839,12 @@ async function uploadToBridge(name, arrayBuffer, dir, shopOverride) {
     if (j.warning) appendTaskLog(`[上传] ${j.warning}`);
     return j;
   } catch (e) {
+    const _msg = (e && e.message) || "";
+    // 桥明确说「这张表不对」（例如导成了广告总览、没有商品 ID）：
+    // 换通道重传还是同一张表，重试只会多绕一圈，直接抛。
+    if (/总览|不能当广告表/.test(_msg)) throw e;
     // 老版本桥没有 /upload-raw（404 也走这儿）→ 退回 base64 再试一次
-    appendTaskLog(`[上传] 直传没成（${(e && e.message) || e}），改用 base64 重试`);
+    appendTaskLog(`[上传] 直传没成（${_msg}），改用 base64 重试`);
   }
 
   // 分块 base64，避免一次拼串把内存打爆
@@ -873,12 +877,75 @@ function stamp() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}_${p(d.getMinutes())}`;
 }
 
+/**
+ * 从平台导出记录里挑出「本次这个任务」的那条。
+ *
+ * **只能认本次的任务号**，不许退而求其次去拿「同区间已经生成好的旧任务」——
+ * 那样拿到的是上次那一刻的快照，这中间退的款、取消的单全看不到。
+ * 代码里原有约定：每次运行都重新生成，算净利宁可慢，也要反映当下。
+ * （2026-11-12 我一度加过「改用同区间已生成的任务」，实测两次订单文件
+ * 字节数完全相同，就是旧快照，已回滚。）
+ *
+ * 真正该修的是另一件事：待补记录里要存**最新的**任务号（见
+ * `mergePendingRecord`）——以前「运行→停止→运行」会让记录停在最早那个号上，
+ * 白等一个可能永远不生成的任务。
+ */
+function pickOrderRecord(list, it, okKey) {
+  return (list || []).find((x) => String(x.export_task_id) === String(it.taskId)
+                                  && okKey(x)) || null;
+}
+
+/**
+ * 待补记录：同一家店、同一个区间只留一条，**用最新的任务号覆盖旧的**。
+ *
+ * 为什么必须覆盖：点一次「运行」就建一个新任务，但记录只存一个号。
+ * 以前每轮各存一条，收的时候各自认各自的，最新的那条反而可能永远等不到；
+ * 实测 2026-11-12 Chroma Home 平台上 4 个任务，记录停在最早的
+ * 8132345590356266500 上，白等 9 分钟。
+ */
+function mergePendingRecord(fresh, item) {
+  const list = Array.isArray(fresh) ? fresh.slice() : [];
+  const same = (a, b) => sameRange(a, b);
+  const i = list.findIndex((x) => String(x.shop_id || "") === String(item.shop_id || "")
+    && same(x.range, item.range));
+  if (i < 0) {
+    if (list.some((x) => String(x.taskId) === String(item.taskId))) return list;
+    list.push(item);
+    return list;
+  }
+  // 保留了 at/shop_id/range，只换任务号和名字（新的那次运行才知道的）
+  list[i] = Object.assign({}, list[i], item, { taskId: String(item.taskId) });
+  return list;
+}
+
+/**
+ * 补订单收完该留哪些记录。
+ *
+ * 只从**最新**列表里摘掉「本次确实处理掉的」（gone），其余一律保留——
+ * 包括这一分钟里用户刚点运行、别处新写进来的那条。
+ *
+ * 为什么单独抽出来：以前这里是 `skSet({pendingOrders: keep})` 整体覆盖，
+ * keep 是进循环时的快照，新写进来的任务号不在里面，就被静默抹掉了。
+ * 现象是「点运行提交了任务，之后一直在等上一轮那个旧号」，很难从日志反推，
+ * 所以这段必须能被单独测（见 scripts/check_pending_race.js）。
+ *
+ * 读不到最新列表（cur 不是数组）时退回 keep：宁可多留一条，也别抹掉新的。
+ */
+function pendingAfterDrain(cur, gone, keep) {
+  if (!Array.isArray(cur)) return Array.isArray(keep) ? keep : [];
+  const drop = gone instanceof Set ? gone : new Set(gone || []);
+  return cur.filter((x) => !drop.has(String((x && x.taskId) || "")));
+}
+
 /** 记下"订单导出还在排队"，交给后台闹钟去收。 */
 async function rememberPendingOrder(item) {
   const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
   const fresh = (pendingOrders || []).filter((x) => Date.now() - (x.at || 0) < 2 * 3600 * 1000);
-  if (!fresh.some((x) => String(x.taskId) === String(item.taskId))) fresh.push(item);
-  await skSet({ pendingOrders: fresh.slice(-10) });
+  // 同店同区间只留一条，任务号用**最新的**覆盖旧的。
+  // 这样「运行→停止→运行」之后，收的是最后一次运行建的那个任务，
+  // 不会再去等上一轮那个可能永远不生成的任务。
+  const next = mergePendingRecord(fresh, item);
+  await skSet({ pendingOrders: next.slice(-10) });
 }
 
 /**
@@ -924,7 +991,7 @@ async function fetchBytesInTab(tabId, url) {
   const CHUNK = 4 * 1024 * 1024;
   const grab = () => runInTab(tabId, async (u) => {
     try {
-      const resp = await fetch(u, { credentials: "include" });
+      const resp = await fetch(u, { credentials: "include", signal: AbortSignal.timeout(60000) });
       if (!resp.ok) return { error: `HTTP ${resp.status}` };
       const b = await resp.arrayBuffer();
       window.__jlFile = new Uint8Array(b);
@@ -1029,11 +1096,19 @@ async function harvestPendingOrdersInner(log, shopId, onlyRange) {
   const { pendingOrders = [] } = await skGet({ pendingOrders: [] });
   if (!pendingOrders.length) return 0;
   const keep = [];
+  // 本次「确实处理掉了」的 taskId：收走的、过期的、域名不对的。
+  // 结尾只按这份名单去删，绝不用 keep 整体覆盖——这一分钟里用户可能刚点了
+  // 「运行」，rememberPendingOrder 写进来的新任务不在 keep 里，覆盖就等于
+  // 把最新那次的号抹掉（同一个 bug，谁中招只看读快照和处理完谁先谁后）。
+  const gone = new Set();
   let got = 0;
   // 这一轮补回来的都是哪几家、哪个区间（补完要挨个叫桥核算）
   const landed = [];
   for (const it of pendingOrders) {
-    if (Date.now() - (it.at || 0) > 2 * 3600 * 1000) continue;   // 太旧，丢弃
+    if (Date.now() - (it.at || 0) > 2 * 3600 * 1000) {   // 太旧，丢弃
+      gone.add(String(it.taskId));
+      continue;
+    }
     if (shopId && String(it.shop_id || "") !== String(shopId)) { keep.push(it); continue; }
     // 这一份是什么时候开始收的：上传落在它之后，桥拿它核对"是这次落的"
     const _t0 = Date.now();
@@ -1045,6 +1120,7 @@ async function harvestPendingOrdersInner(log, shopId, onlyRange) {
       const host = String(it.host || "").trim();
       if (!/tiktok\.com$/i.test(host)) {
         appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 记的域名不对（${host || "空"}），丢掉`);
+        gone.add(String(it.taskId));
         continue;
       }
       const recUrl = await buildUrl(host, "/api/fulfillment/order/export_record/get");
@@ -1076,8 +1152,10 @@ async function harvestPendingOrdersInner(log, shopId, onlyRange) {
       // 反过来，文件（GET 的 /easesafe/...）必须走页面：同源、要带 Cookie。
       const rec = await apiPost(recUrl, {});
       const list = (rec && rec.data && rec.data.export_records) || [];
-      const hit = list.find((x) => String(x.export_task_id) === String(it.taskId)
-                                 && x.file_key && !/^\d+$/.test(String(x.file_key)));
+      // 一个「真的生成好了」的记录：file_key 有值，且不是纯数字（纯数字是任务号，
+      // 拿去下载只会回 21016003「文件还在生成」）。
+      const okKey = (x) => !!(x && x.file_key && !/^\d+$/.test(String(x.file_key)));
+      const hit = pickOrderRecord(list, it, okKey);
       if (!hit) {
         const mine = list.find((x) => String(x.export_task_id) === String(it.taskId)) || {};
         appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 还没生成好`
@@ -1090,7 +1168,8 @@ async function harvestPendingOrdersInner(log, shopId, onlyRange) {
       }
       let url = "";
       try {
-        const dl = await apiPost(dlUrl, { file_key: hit.file_key, export_task_id: it.taskId });
+        const dl = await apiPost(dlUrl, { file_key: hit.file_key,
+                                          export_task_id: it.taskId });
         const d = (dl && dl.data) || {};
         url = d.download_url || d.url || d.file_url || findUrl(dl) || "";
       } catch (e) { /* 记录里通常还有直链，下面兜住 */ }
@@ -1120,6 +1199,7 @@ async function harvestPendingOrdersInner(log, shopId, onlyRange) {
       if (log) log(`   订单已自动补回：${saved.path}`);
       appendTaskLog(`[补订单] ${it.shop_name || it.shop_id} 已补回：${saved.path}`);
       got++;
+      gone.add(String(it.taskId));
       landed.push({ shop_id: it.shop_id, shop_name: it.shop_name,
                     range: it.range || {}, since: _t0 });
       // 立刻从 storage 里摘掉这条：整轮跑完才写回的话，中途被浏览器
@@ -1138,7 +1218,17 @@ async function harvestPendingOrdersInner(log, shopId, onlyRange) {
       keep.push(it);
     }
   }
-  await skSet({ pendingOrders: keep });
+  // 写回只删「本次确实处理掉的」，其余一律保留。
+  // 以前是 `skSet({ pendingOrders: keep })` 整体覆盖：这一分钟里新写进来的
+  // 任务（用户刚点运行提交的新任务号）不在快照里，会被当场抹掉，之后就一直
+  // 等上一轮的旧任务号。改成读最新列表、只摘掉 gone 里的那些。
+  try {
+    const cur = await skGet({ pendingOrders: [] });
+    await skSet({ pendingOrders: pendingAfterDrain(cur.pendingOrders, gone, keep) });
+  } catch (e) {
+    // 读不到最新列表才退回老办法；宁可多留一条，也别抹掉新的
+    await skSet({ pendingOrders: keep });
+  }
 
   // 补回来的订单，要有人去算。
   //
@@ -1323,7 +1413,7 @@ async function runOrders({ startMs, endMs }, log, opts = {}) {
     try {
       buf = await fetchBytesInPage(host, url);
     } catch (ePage) {
-      const fileResp = await fetch(url, { credentials: "include" });
+      const fileResp = await fetch(url, { credentials: "include", signal: AbortSignal.timeout(60000) });
       if (!fileResp.ok) {
         throw new Error(`下载失败 HTTP ${fileResp.status}`
           + `（页面里也取不到：${(ePage && ePage.message) || ePage}）`);
@@ -1421,7 +1511,7 @@ function findUrl(obj, depth = 0) {
 
 async function downloadAndUpload(url, name, log) {
   log(`下载中…`);
-  const resp = await fetch(url, { credentials: "include" });
+  const resp = await fetch(url, { credentials: "include", signal: AbortSignal.timeout(60000) });
   if (!resp.ok) throw new Error(`下载失败 HTTP ${resp.status}`);
   const buf = await resp.arrayBuffer();
   if (buf.byteLength < 512) throw new Error("下载到的文件太小，可能还没生成好");
@@ -1608,8 +1698,8 @@ async function runInPage(host, func, args, preferPath) {
     const msg = r.error || inner || "";
     if (!msg) return r;
     last = msg;
-    if (r.badTab
-        || /Failed to fetch|NetworkError|ERR_|about:blank|chrome-error/i.test(msg)) {
+    if (r.badTab || r.emptyFrame
+        || /Failed to fetch|NetworkError|ERR_|about:blank|chrome-error|空帧/i.test(msg)) {
       // 这个标签页用不了了（被浏览器冻结、注入不了、加载失败、已关闭）——换一个再试
       if (r.tabId) exclude.add(r.tabId);
       await sleep(1500);
@@ -1621,7 +1711,10 @@ async function runInPage(host, func, args, preferPath) {
   // 所有现成标签都不能用：开一个干净的后台标签再试一次。
   // （用户点插件时可能正停在 chrome://extensions，那种页永远注入不了）
   try {
-    const nt = await newAutoTab(`https://${host}/`);
+    // 有页面提示就开那一页：空帧重试时开首页没用（导出/列表接口
+    // 都只认「商品数据分析」页，首页发过去必被判 98001021）。
+    const _fallbackUrl = preferPath ? `https://${host}/${preferPath}` : `https://${host}/`;
+    const nt = await newAutoTab(_fallbackUrl);
     await waitTabReady(nt.id);
     await sleep(800);
     const r = await _runInPageOnce(host, func, args, preferPath, exclude);
@@ -1674,6 +1767,20 @@ async function _runInPageOnce(host, func, args, preferPath, exclude) {
       const all = (await chrome.tabs.query({ url: [`*://${host}/*`] })) || [];
       // 优先用用户正在看的那个标签页——它最不容易被浏览器冻结
       tab = all.find((t) => usable(t) && t.active) || all.find(usable) || null;
+      // 但**要是指定了页面（preferPath），就不能拿别的页面凑合**：
+      // 有些接口只认特定页面的上下文，从首页发出去连 body 都发不完：
+      // 2026-11-12 18:07 实测，SKU 导出这一次 page 记的是
+      // `https://seller-my.tiktok.com`（首页），status=None、reqBody=None，
+      // 而页面自己发的是 `/compass/product-analysis?...`，266ms 就返回了。
+      // 所以挑到不对的页时，先把它带到目标页再注入。
+      if (tab && preferPath && !String(tab.url || "").includes(preferPath.split("?")[0])) {
+        const wantUrl = `https://${host}/${preferPath}`;
+        try {
+          await chrome.tabs.update(tab.id, { url: wantUrl });
+          await waitTabReady(tab.id);
+          await sleep(800);
+        } catch (e) { /* 导航失败就用原来那页，让上层报错 */ }
+      }
     } catch (e) { /* 忽略 */ }
   }
   if (!tab) {
@@ -1704,7 +1811,14 @@ async function _runInPageOnce(host, func, args, preferPath, exclude) {
     const [res] = await chrome.scripting.executeScript({
       target: { tabId: tab.id }, func, args, world: "MAIN",
     });
-    return { result: res && res.result, tabId: tab.id };
+    // res 为空数组 = 这一帧没跑成（标签页刚好在切页面/被回收）。
+    // 以前直接把 undefined 当结果返回，上层看到的是「空对象」，
+    // 于是被误判成「平台没返回文件内容」，查了半天平台（2026-11-12 17:33 实测）。
+    // 现在标成错误，让 runInPage 换标签页重试。
+    if (!res || res.result === undefined) {
+      return { error: "页面没有返回结果（注入到空帧）", tabId: tab.id, emptyFrame: true };
+    }
+    return { result: res.result, tabId: tab.id };
   } catch (e) {
     const msg = String((e && e.message) || e);
     // 这句英文原文很难懂，翻成能照着做的提示
@@ -1766,6 +1880,11 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
   // 在这个页面里发请求，平台的判定和页面自己发的一致（否则会 98001021）。
   const r = await runInPage(host, async (u, s, e, sz, mp, tpl) => {
     const all = [];
+    // 总条数藏在响应里：data.list_control.next_pagination.total。
+    // 导出接口的 size 必须就是这个数（页面自己就是这么发的），
+    // 写死一个很大的值，平台照样回 code=0 + 文件地址，但生成的是空文件。
+    // （2026-11-12 实测：size=10000 时 51 次全是 bytes=0，白等 165 秒。）
+    let total = 0;
     // 页面发的是极简 body（没有 list_control）时，平台一次就返回全量，
     // 不需要翻页；硬加 list_control 反而会被拒。
     const tplPaging = !!(tpl && tpl.request && tpl.request.list_control);
@@ -1775,7 +1894,7 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
     // 取得到 → 是平台对这个接口的判定问题。两种情况以前分不清。
     let probe = "";
     try {
-      const pr = await fetch("/favicon.ico?j=" + Date.now(), { cache: "no-store" });
+      const pr = await fetch("/favicon.ico?j=" + Date.now(), { cache: "no-store", signal: AbortSignal.timeout(30000) });
       probe = `同源探针 ${pr.status}`;
     } catch (e2) {
       probe = `同源探针也失败：${(e2 && e2.name) || ""} ${(e2 && e2.message) || e2}`;
@@ -1812,7 +1931,7 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
       try {
         const resp = await fetch(u, {
           method: "POST",
-          credentials: "include",
+          credentials: "include", signal: AbortSignal.timeout(60000),
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
@@ -1837,9 +1956,12 @@ async function pagePullSku(host, start, endExclusive, size, maxPages) {
       }
       const items = (j.data && j.data.items) || [];
       all.push(...items);
-      if (items.length < sz) return { items: all, pages: page + 1 };
+      const _lc = (j.data && j.data.list_control) || {};
+      const _np = _lc.next_pagination || {};
+      if (_np.total != null) total = Number(_np.total) || 0;
+      if (items.length < sz) return { items: all, pages: page + 1, total };
     }
-    return { items: all, pages: mp, truncated: true };
+    return { items: all, pages: mp, truncated: true, total };
   }, [url, start, endExclusive, size, maxPages, tpl], await skuPageHint());
 
   if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
@@ -1908,7 +2030,7 @@ async function pagePullSkuFromProductList(host, log) {
       try {
         const resp = await fetch(u, {
           method: "POST",
-          credentials: "include",
+          credentials: "include", signal: AbortSignal.timeout(60000),
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ page, size: 200, is_need_toggle_status: true }),
         });
@@ -1945,7 +2067,21 @@ async function pagePullSkuFromProductList(host, log) {
 async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, waitMs = 1500, log = () => {}) {
   const exportUrl = await buildUrl(host, "/api/v2/insights/seller/ttp/product/sku/list/export");
 
-  const r = await runInPage(host, async (expUrl, s, e, tries, gap) => {
+  // 先探一次「总条数」：导出接口的 size 必须等于它。
+  // 这是页面自己发的写法（抓包实测 295 / 792 / 353，每家不同）；
+  // 以前写死 10000，平台回 code=0、也给文件地址，但文件是 0 字节。
+  let total = 0;
+  try {
+    const probe = await pagePullSku(host, start, endExclusive, 10, 1);
+    total = Number((probe && probe.total) || 0) || 0;
+    if (total) log(`   导出前探到总条数：${total} 条`);
+  } catch (e) {
+    log(`   探总条数没成（按 500 兜底）：${(e && e.message) || e}`);
+  }
+  const exportSize = total > 0 ? total : 500;
+
+  const exportInPage = async (expUrl, s, e, tries, gap, size) => {
+   try {
     const body = {
       request: {
         time_descriptor: { start: s, end: e },
@@ -1953,7 +2089,8 @@ async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, wai
         filter: {},
         // 页面自己用的是「总条数」一次导全（抓包里是 236）。
         // 这里给一个足够大的值，导出接口对 size 不敏感，不像 list 会超时。
-        list_control: { rules: [{ direction: 2, field: "sku_gmv" }], pagination: { size: 10000, page: 0 } },
+        // size 必须是总条数：页面自己发的就是「总条数」，给大了生成空文件。
+        list_control: { rules: [{ direction: 2, field: "sku_gmv" }], pagination: { size, page: 0 } },
       },
     };
     // 诊断信息：这条导出路径一直不明不白地失败，把平台的真实回应带回去，
@@ -1964,23 +2101,23 @@ async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, wai
     try {
       const resp = await fetch(expUrl, {
         method: "POST",
-        credentials: "include",
+        credentials: "include", signal: AbortSignal.timeout(60000),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       const text = await resp.text();
       j = JSON.parse(text);
     } catch (err) {
-      return { error: `创建导出失败：${(err && err.message) || err}` };
+      return { error: `创建导出失败：${(err && err.message) || err}`, _tag: "create-throw" };
     }
     if (!j || j.code !== 0) {
       diag.create = `code=${j && j.code} msg=${String((j && j.message) || "")}`;
-      return { error: `创建导出 code=${j && j.code} ${(j && j.message) || ""}`.trim(), diag };
+      return { error: `创建导出 code=${j && j.code} ${(j && j.message) || ""}`.trim(), diag, _tag: "create-code" };
     }
 
     const file = j.data && j.data.file;
     diag.create = `code=0 file=${String(file || "(无)").slice(0, 100)}`;
-    if (!file) return { error: "创建成功但没返回文件路径", diag };
+    if (!file) return { error: "创建成功但没返回文件路径", diag, _tag: "no-file" };
 
     const fileUrl = file.startsWith("http") ? file : `${location.origin}${file}`;
 
@@ -1989,11 +2126,13 @@ async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, wai
     // 就别在这儿干等两分钟（实测一次能白等 4 分钟）。
     for (let i = 0; i < tries; i++) {
       await new Promise((r2) => setTimeout(r2, gap));
-      // 等文件生成的时候也要能停：这里一等就是几十秒，不检查的话
-      // 点了停止要等整段轮询走完才收手。
-      throwIfStopped();
+      // 这里**不能**调 throwIfStopped()：本函数注入到页面主世界执行，
+      // 那是扩展作用域的函数，页面里不存在 → ReferenceError
+      // → Chrome 把它吞成空对象，外面只看到「平台没返回文件」。
+      // 2026-11-13 09:47 实测，加了 try/catch 才把这句话捞出来。
+      // 停止由调用方保证（外层重试前有检查），轮询本身有次数上限。
       try {
-        const fr = await fetch(fileUrl, { credentials: "include" });
+        const fr = await fetch(fileUrl, { credentials: "include", signal: AbortSignal.timeout(60000) });
         const ct = fr.headers.get("content-type") || "";
         if (i === 0) diag.poll = `status=${fr.status} ct=${ct.slice(0, 40)}`;
         if (fr.ok && !ct.includes("json")) {
@@ -2005,7 +2144,7 @@ async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, wai
             for (let k = 0; k < bytes.length; k += CH) {
               bin += String.fromCharCode.apply(null, bytes.subarray(k, k + CH));
             }
-            return { b64: btoa(bin), bytes: buf.byteLength, diag };
+            return { b64: btoa(bin), bytes: buf.byteLength, diag, _tag: "ok" };
           }
           if (i === 0) diag.poll += ` bytes=${buf.byteLength}(太小)`;
         } else if (i === 0 && fr.ok) {
@@ -2014,18 +2153,50 @@ async function pagePullSkuByExport(host, start, endExclusive, maxTries = 40, wai
         }
       } catch (err) { /* 还没生成好，继续等 */ }
     }
-    return { error: `等了约 ${Math.round(tries * (gap + 3500) / 1000)} 秒仍取不到导出文件`, diag };
-  }, [exportUrl, start, endExclusive, maxTries, waitMs]);
-
+    return { error: `等了约 ${Math.round(tries * (gap + 3500) / 1000)} 秒仍取不到导出文件`, diag, _tag: "timeout" };
+   } catch (e) {
+    // 页面里抛错也要把话带回来：Chrome 有时直接吞成空对象（{}），
+    // 外面只能猜是「标签页抖动」，其实是这里炸了（2026-11-12 18:07 实测）。
+    return { error: `页面内抛错：${(e && e.name) || ""} ${(e && e.message) || e}`, _tag: "throw" };
+   }
+  };
+  const _args = [exportUrl, start, endExclusive, maxTries, waitMs, exportSize];
+  // 带上页面提示：导出接口必须从「商品数据分析 → 按 SKU」这一页发，
+  // 随便挑一个 seller 标签页容易被判非法（98001021），也更容易撞上空帧。
+  const _hint = await skuPageHint();
+  let r = await runInPage(host, exportInPage, _args, _hint);
   if (r.missingTab) throw new Error(`没有开着的 ${host} 页面`);
-  const out0 = r.result || {};
+
+  // 有时这次调用连结果都没回来（注入/标签页抖动），跟平台无关：
+  // 表现是既没有 diag 也没有 error，只剩一句「没有返回文件内容」。
+  // 2026-11-12 17:20 实测：前面刚探完总条数，紧接着发导出就空手而归，
+  // 之前那次（不探总数）反而跑满了 165 秒才失败——顺序挨太紧。
+  // 所以这里隔 2 秒、换一次标签页再试，别让后台这条永远起不来。
+  let _out = r.result || {};
+  const _empty = !_out.b64 && !_out.error
+    && !(_out.diag && (_out.diag.create || _out.diag.poll));
+  if (_empty) {
+    log(`   导出调用没拿到结果（标签页抖动），隔 2 秒重试一次…${r.error ? " " + r.error : ""}`);
+    await sleep(2000);
+    try { throwIfStopped(); } catch (e) { throw e; }
+    const r2 = await runInPage(host, exportInPage, _args, _hint);
+    if (r2.missingTab) throw new Error(`没有开着的 ${host} 页面`);
+    r = r2;
+    _out = r2.result || {};
+  }
+  const out0 = _out;
   if (out0.diag && (out0.diag.create || out0.diag.poll)) {
     log(`   导出诊断：${out0.diag.create}${out0.diag.poll ? " ｜ 轮询 " + out0.diag.poll : ""}`);
   }
   if (r.error) throw new Error(r.error);
   const out = r.result || {};
   if (out.error) throw new Error(out.error);
-  if (!out.b64) throw new Error("导出接口没有返回文件内容");
+  if (!out.b64) {
+    throw new Error("导出接口没有返回文件内容" +
+      `（tag=${out._tag || "无"}｜原始返回：${JSON.stringify(out).slice(0, 140)}`
+      + `｜r 键：${Object.keys(r || {}).join(",") || "无"}`
+      + `｜result 类型：${typeof (r && r.result)}）`);
+  }
 
   const bin = atob(out.b64);
   const bytes = new Uint8Array(bin.length);
@@ -2054,8 +2225,12 @@ async function pagePullSkuRanged(host, start, endExclusive, log) {
     const rebound = new Set();   // 区间内改绑过的 SKU
     let failed = 0;
 
-    for (const s of segs) {
+    for (let si = 0; si < segs.length; si++) {
+      const s = segs[si];
       try {
+        // 每段几十秒，全程不吭声就像卡死了：把「第几段/共几段」报到卡片上。
+        await reportProgress("sku", "running",
+          { detail: `接口分段取 ${si + 1}/${segs.length}` });
         const r = await pagePullSku(host, s.start, s.end, 10, 400);
         for (const it of r.items || []) {
           const meta = (it && it.meta) || {};
@@ -2089,6 +2264,10 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   const host = await ensureHost("seller", log);
   const today = shiftDate(new Date().toISOString().slice(0, 10), 0);
   const done = [];
+  // 商品管理接口有没有成功（它成功就代表全量映射已到手，不必再分段）
+  let productListOk = false;
+  // 分段取有没有成功（映射是否已经拿到；跟 done 无关——页面导出也会往 done 里push）
+  let listRanged = false;
 
   // ① 商品管理全量：覆盖所有链接，包括当期没有销量的。
   //    这一份是「当前归属」，先把底铺全。
@@ -2098,6 +2277,7 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     const bytes = new TextEncoder().encode(JSON.stringify({ skus }));
     const saved = await uploadToBridge(`sku_list_商品管理_${today}.json`, bytes.buffer, "mapping");
     log(`   已保存：${saved.path}（${skus.length} 个 SKU）`);
+    productListOk = true;
     done.push(`商品管理 ${skus.length} 条`);
     // 同一批数据顺便存一份「链接资料」：报表的款式编码列靠它，
     // 不用再单独抓一次接口，也不用手工下载后台的表。
@@ -2111,19 +2291,26 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     log(`   商品管理接口失败：${(e && e.message) || e}`);
   }
 
-  // ①-a 直接点页面的「导出数据」，接住平台导出的那张表。
-  //
-  //   为什么优先这条：
-  //     · 接口返回的数据里**没有「卖家SKU」**，而报表的款式编码列靠它算；
-  //     · 导出的表才是后台「商品数据分析 → 按 SKU → 导出」的完整结果，
-  //       含全部 SKU（不受分页 10 条限制）。
-  //
-  //   用户要求：**每轮都按本次选区重新导一份**，不能因为「商品管理接口通了」
-  //   就跳过。那份接口数据是全量、不带区间的；区间内的归属只有这张表才准。
+  // 本轮实际落盘的主产物（导出表优先，没有就用分段 JSON）。
+  // 卡片最后一行要显示文件名——跟订单表/广告表/联盟佣金表一致。
+  // 以前完成时 detail 是空的，而桥侧「空 detail 不覆盖旧值」，
+  // 于是卡片一直停在最后一次「接口分段取 3/3」，看着像还在分段
+  // （2026-11-15 14:21 用户截图问）。
+  let skuSavedPath = "";
   let skuTableSaved = false;
-  {
+  // ①-a 页面点导出（第一顺位，产出 xlsx）：
+  //   它点的是平台自己的「导出数据 → 导出」按钮，产出的表**含已删除 SKU**，
+  //   是映射的权威来源。历史上 `sku_export_*.xlsx` 全是它产的。
+  //
+  //   2026-11-13 提到最前（原顺序：分段取 → 启 API 导出 → 页面导出）：
+  //   分段取一结束就启动的后台 API 导出是 100% 失败的（code=0 但 bytes=0），
+  //   要跑满 165 秒才报错，而那时页面导出早把表拿到、报表也出来了。
+  //   结果报表出来后两分多钟还冒一条「取不到导出文件」，看着像出了问题。
+  //   提前到第一位，成功就置 skuTableSaved，那条后台任务根本不会启动。
+  await reportProgress("sku", "running", { detail: "页面导出中（约 20 秒）" });
+  if (!skuTableSaved) {
     try {
-      log(`①-a 按区间 ${startDate} ~ ${shiftDate(endDateExclusive, -1)} 重新导出商品SKU表…`);
+      log(`①-a 按区间 ${startDate} ~ ${shiftDate(endDateExclusive, -1)} 导出商品SKU表…`);
       // 页面的 timeRange 结束日期是**开区间**：
       // 传 10-21 只导到 10-20（实测表头就是 10-01 ~ 10-20，少一天）。
       // 所以这里传「区间的次日」，让它正好覆盖到末日。
@@ -2133,12 +2320,20 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
       if (!got || !got.path) {
         // 不再退回「浏览器下载」那条：会弹「另存为」把自动化卡住。
         // 直接交给下面的 ①-b 分段取（快），它也不成再走 ①-c 深度抓取。
-        log(`   自动导出没成：${(got && got.error) || "未知原因"}；改用分段取`);
+        log(`   页面导出没成：${(got && got.error) || "未知原因"}；改用接口分段取`);
+        // 卡片上要说清「没失败、只是换了条路，要跑几分钟」。
+        // 以前这 5 分钟里卡片一直停在派单时的「已排上，等浏览器领任务」，
+        // 看着像卡死（2026-11-12 Chroma Home 实测 13:44:40 → 13:49:38）。
+        await reportProgress("sku", "running",
+          { detail: "页面导出没成，改接口分段取" });
       }
       if (got && got.path) {
         log(`   已接住导出表：${got.path}（${Math.round((got.bytes || 0) / 1024)} KB）`);
         done.push(`导出表 ${got.name || ""}`);
         skuTableSaved = true;
+        skuSavedPath = got.path;
+        await reportProgress("sku", "running",
+          { detail: String(got.path).split(/[\\/]/).pop() });
       } else {
         log(`   导出没成功：${(got && got.error) || "未知原因"}`);
       }
@@ -2146,16 +2341,20 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
       log(`   导出出错：${(e && e.message) || e}`);
     }
   }
-
-  // ①-b 兜底：list 接口分段。
-  //     放在深度抓取**前面**：实测这条 30 秒内能拿到（DXM 12:02:58→12:03:27 取到 231 条），
-  //     而深度抓取要挂调试器等页面自己发请求，等到 50 秒还是失败。先快后慢。
-  if (!done.length) {
+  // ①-b 接口分段取（映射来源）：这条是「商品数据分析 → 按 SKU」页面的**读接口**，
+  //     复刻页面自己发的请求，实测 30 秒内能拿到（DXM 12:02:58→12:03:27 取到 231 条）。
+  //     它产的是 JSON 映射（当前在售 SKU + 链接资料），跟页面导出那张 xlsx 是
+  //     两种不同产物，**不能因为页面导出成功就跳过**。
+  //     条件用 !productListOk（商品管理全量已到手才不必再分段），
+  //     不能用 !done.length —— 页面导出会往 done 里 push，那样分段就被跳过了。
+  if (!productListOk) {
     const all = await pagePullSkuRanged(host, startDate, endDateExclusive, log);
     if (all.length) {
       const bytes = new TextEncoder().encode(JSON.stringify({ data: { items: all } }));
       const saved = await uploadToBridge(`sku_list_${startDate}_${shiftDate(endDateExclusive, -1)}.json`, bytes.buffer, "mapping");
       log(`①-b 已保存：${saved.path}（${all.length} 条）`);
+      listRanged = true;
+      if (!skuSavedPath) skuSavedPath = saved.path;
       done.push(`list 分段 ${all.length} 条`);
       // 同一批数据顺便生成「链接资料」（链接 → 款式编码），
       // 免得再单独跑一次链接资料任务
@@ -2168,12 +2367,46 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     }
   }
 
+  // ② 区间导出：这是「数据分析 → 商品数据分析 → 按 SKU → 导出数据」同一条路，
+  //    也是链接归属的权威来源——已删除的 SKU 只有这份表里才有，
+  //    累积主表只是临时兜底，所以这条路必须走通。
+  //
+  //    诊断确认过：创建导出成功，轮询返回的确实是 xlsx，
+  //    只是刚创建时还是 0 字节，平台生成文件要 1~4 分钟。
+  //    之前阻塞在这里等，把一轮拖到 279 秒；现在改成后台轮询：
+  //    报表先用现有主表算出来，文件一好就自动入库，下次核算生效。
+  const bgTries = 30;      // 最多约 2 分钟（90 次实测拖到 8 分钟，白等）
+  const bgWait = 2000;
+  // 只启动一次：分段取完立刻启一次（那时标签页还停在分析页，注入必成），
+  // 末尾再调一次也不会重复排第二份。
+  let bgStarted = false;
+  const startBgExportOnce = () => {
+    if (bgStarted) return;
+    bgStarted = true;
+    pagePullSkuByExport(host, startDate, endDateExclusive, bgTries, bgWait, log)
+      .then((saved) => {
+        log(`② 商品SKU导出完成（后台）：${saved.path}`);
+        log(`   新映射已入库，再点一次「立即运行」即用新归属重新核算`);
+      })
+      .catch((e) => log(`② 商品SKU导出（后台）：${(e && e.message) || e}`));
+  };
+  // ★ 只在「页面点导出没成」时才启动这条后台 API 导出。
+  //   它 100% 失败（code=0 但文件 bytes=0），要跑满 165 秒才报错；
+  //   页面导出成功时再启动它，就是报表出来两分多钟后还冒一条假失败
+  //   （2026-11-13 10:30 实测）。
+  //   保留它是因为：万一页面导出哪天又 0/8，这条至少还有一丝机会。
+  if (!skuTableSaved) {
+    try { startBgExportOnce(); } catch (e) { /* 起不来不影响出表 */ }
+  }
+
   // ①-c 深度抓取：用 chrome.debugger 挂在商品分析页上，
   //     等页面自己发一次 sku/list，用 Network.getResponseBody 把响应体读出来。
   //     为什么排在最后：平台对这条接口校验极严，我们自己发一律 98001021；
   //     拿页面自己的响应对得上，但要等它发请求，实测挂了 53 秒还是没等到，
   //     而前面的分段取 30 秒就能拿到。所以只有在分段取失败时才走这条。
-  if (!done.length) {
+  //     条件用 !listRanged：页面导出成功也会往 done 里 push，
+  //     但映射（分段产物）可能还没拿到，那时仍然需要深抓取补映射。
+  if (!listRanged) {
     try {
       log("①-c 深度抓取页面自己的商品SKU响应（最后手段）…");
       const cap = await deepCaptureSku(host, await skuPageHint(), log);
@@ -2192,6 +2425,7 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
           const saved = await uploadToBridge(
             `sku_list_商品数据分析_${today}.json`, bytes2.buffer, "mapping");
           log(`   已保存：${saved.path}（${skus.length} 个 SKU）`);
+          if (!skuSavedPath) skuSavedPath = saved.path;
           done.push(`商品数据分析 ${skus.length} 条`);
           try {
             const linkSaved = await saveLinkInfoCsv(skus, today, log);
@@ -2206,32 +2440,12 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
     }
   }
 
-  // ② 区间导出：这是「数据分析 → 商品数据分析 → 按 SKU → 导出数据」同一条路，
-  //    也是链接归属的权威来源——已删除的 SKU 只有这份表里才有，
-  //    累积主表只是临时兜底，所以这条路必须走通。
-  //
-  //    诊断确认过：创建导出成功，轮询返回的确实是 xlsx，
-  //    只是刚创建时还是 0 字节，平台生成文件要 1~4 分钟。
-  //    之前阻塞在这里等，把一轮拖到 279 秒；现在改成后台轮询：
-  //    报表先用现有主表算出来，文件一好就自动入库，下次核算生效。
-  const bgTries = 30;      // 最多约 2 分钟（90 次实测拖到 8 分钟，白等）
-  const bgWait = 2000;
-  const startBgExport = () => {
-    // 放最后启动：它也要用同一个页面标签页，跟前面几步并发会互相干扰
-    // （表现是 Failed to fetch）
-    pagePullSkuByExport(host, startDate, endDateExclusive, bgTries, bgWait, log)
-      .then((saved) => {
-        log(`② 商品SKU导出完成（后台）：${saved.path}`);
-        log(`   新映射已入库，再点一次「立即运行」即用新归属重新核算`);
-      })
-      .catch((e) => log(`② 商品SKU导出（后台）：${(e && e.message) || e}`));
-  };
   // 故意不 await：不让这 1~4 分钟拖住报表
 
   if (skuTableSaved) {
     log("② 本轮已按区间导好商品SKU表，后台不再重复排一份");
   } else {
-    startBgExport();
+    startBgExportOnce();   // 前面已经启过就什么都不做
   }
 
   if (!done.length) {
@@ -2243,7 +2457,14 @@ async function runSkuStats({ startDate, endDateExclusive }, log, opts = {}) {
   }
   await skSet({ skuCache: { at: Date.now(), items: null } });
   log(`映射取数完成：${done.join(" + ")}`);
-  return { via: done.join(" + ") };
+  // 卡片上要显示文件名，跟订单表/广告表/联盟佣金表一致。
+  // 外层 done 上报用的是 shortDetail(返回值)，它只认 saved/path/files/rows/count；
+  // 这里既主动上报一次，也把 path 塞进返回值做双保险（万一以后外层改了）。
+  if (skuSavedPath) {
+    await reportProgress("sku", "running",
+      { detail: String(skuSavedPath).split(/[\\/]/).pop() });
+  }
+  return { via: done.join(" + "), path: skuSavedPath || "" };
 }
 
 // ---------------- 任务：链接资料 ----------------
@@ -2420,7 +2641,7 @@ async function pagePullAffiliateProducts(host, startSec, endSec, tz, log) {
       try {
         const resp = await fetch(u, {
           method: "POST",
-          credentials: "include",
+          credentials: "include", signal: AbortSignal.timeout(60000),
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
@@ -2557,7 +2778,12 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
   if (rows.length) {
     const csv = affiliateRowsToCsv(rows);
     const bytes = new TextEncoder().encode(csv);
-    const name = `Transaction_Analysis_Product_List_${startDate}_${endDateExclusive}.csv`;
+    // 文件名用**区间末日**，跟 A 路（配置/api_specs.json 里的
+    // {{startDateCompact}}_{{endDateCompact}}）对齐。
+    // 这里以前直接写 endDateExclusive（= 末日 + 1 天），于是同一个区间
+    // 两条路起出两个名字（11-11 / 11-12），核算侧差点把它判成「区间不对」
+    // 整份丢掉（2026-11-12 PHT-B1 实录）。名字起对，核算那边就不用容忍了。
+    const name = `Transaction_Analysis_Product_List_${startDate}_${shiftDate(endDateExclusive, -1)}.csv`;
     const saved = await uploadToBridge(name, bytes.buffer);
     log(`已保存：${saved.path}（${rows.length} 个商品）`);
     return { saved: saved.path, products: rows.length };
@@ -2716,7 +2942,7 @@ async function callApi(host, path, method, body) {
         headers: { "Content-Type": "application/json" },
       };
       if (m !== "GET" && m !== "HEAD" && b != null) opt.body = JSON.stringify(b);
-      const resp = await fetch(u, opt);
+      const resp = await fetch(u, Object.assign({}, opt, { signal: AbortSignal.timeout(60000) }));
       const text = await resp.text();
       let j = null;
       try { j = JSON.parse(text); } catch (e) { j = { _raw: text.slice(0, 2000) }; }
@@ -2806,7 +3032,7 @@ async function pagePullAdsProducts(host, startDate, endDate, log) {
     const post = async (body) => {
       const resp = await fetch(u, {
         method: "POST",
-        credentials: "include",
+        credentials: "include", signal: AbortSignal.timeout(60000),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
@@ -2961,33 +3187,50 @@ function adsRowsToCsv(rows) {
   return lines.join("\r\n");
 }
 
+/**
+ * 4 列「商品维度花费」直取（Product ID / Spend / Currency / Product name）。
+ *
+ * 优点：一次拿全，几秒就回，不用等平台生成文件。
+ * 缺点：Currency 只写 `LOCAL`（账号本位币），程序认不出是美元还是马币，
+ *       只能按「费率 → 该国 → 广告表币种」折算。填错，广告费就差几倍。
+ * 所以它现在是**兜底**：11 列的「商品维度报表」取不到才用它。
+ */
+async function pullAdsDirect(host, range, log) {
+  // 区间缺失时不能硬发：executeScript 的 args 里有 undefined 会报
+  // "Value is unserializable"，看不出是哪个参数的问题。
+  const startDate = range && range.startDate;
+  const endDate = range && (range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : range.to);
+  if (!startDate || !endDate) {
+    throw new Error("没有日期区间，不能直取");
+  }
+  log("直取商品维度广告数据（4 列，币种只写 LOCAL）…");
+  const res = await pagePullAdsProducts(host, startDate, endDate, log);
+  const csv = adsRowsToCsv(res.rows);
+  const bytes = new TextEncoder().encode(csv);
+  const name = `creative data for product campaigns (${startDate} 00 ~ ${endDate} 23).csv`;
+  const saved = await uploadToBridge(name, bytes.buffer);
+  log(`已保存：${saved.path}`);
+  return { via: "4 列直取", rows: res.rows.length, saved: saved.path };
+}
+
 async function runAds(range, log, opts = {}) {
   const quick = !!opts.quick;
   const host = await ensureHost("seller", log);
 
-  // 优先直取数据接口：一次拿全，不用等平台生成文件
+  // 直取 4 列接口：默认不让走了（见 TASKS.ads：11 列的报表优先），
+  // 只有 noDirect 之外的旧调用路径还会经过这里。
   if (!opts.noDirect) {
-    // 区间缺失时不能硬发：executeScript 的 args 里有 undefined 会报
-    // "Value is unserializable"，看不出是哪个参数的问题。
-    // 没有区间就只能走「下载已完成的导出任务」那条路。
     const startDate = range && range.startDate;
     const endDate = range && (range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : range.to);
     if (!startDate || !endDate) {
       log("没有日期区间，跳过接口直取（只能下载已完成的导出任务）");
     } else {
-    try {
-      log("直取商品维度广告数据…");
-      const res = await pagePullAdsProducts(host, startDate, endDate, log);
-      const csv = adsRowsToCsv(res.rows);
-      const bytes = new TextEncoder().encode(csv);
-      const name = `creative data for product campaigns (${range.startDate} 00 ~ ${endDate} 23).csv`;
-      const saved = await uploadToBridge(name, bytes.buffer);
-      log(`已保存：${saved.path}`);
-      return { via: "接口直取", rows: res.rows.length, saved: saved.path };
-    } catch (e) {
-      log(`接口直取失败：${(e && e.message) || e}`);
-      if (quick) return { skipped: true, reason: String((e && e.message) || e) };
-    }
+      try {
+        return await pullAdsDirect(host, range, log);
+      } catch (e) {
+        log(`接口直取失败：${(e && e.message) || e}`);
+        if (quick) return { skipped: true, reason: String((e && e.message) || e) };
+      }
     }
   }
 
@@ -2995,7 +3238,7 @@ async function runAds(range, log, opts = {}) {
   // 注意这里只看 quick：noDirect 的意思是「别先试直取接口」，不是「别导」。
   // 之前两个条件一起写，菲律宾这种 noDirect 的站点连页面导出都被跳过，
   // 直接掉到最后「查已完成任务」，而没人手动导过就是空等 5 分钟。
-  if (!quick) {
+  if (!quick && !opts.onlyQuery) {
     const startDate = range && range.startDate;
     const endDate = range && (range.endDateExclusive ? shiftDate(range.endDateExclusive, -1) : range.to);
     if (startDate && endDate) {
@@ -3332,7 +3575,7 @@ async function onDownloadComplete(delta) {
     return;
   }
   try {
-    const resp = await fetch(item.url, { credentials: "include" });
+    const resp = await fetch(item.url, { credentials: "include", signal: AbortSignal.timeout(60000) });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const buf = await resp.arrayBuffer();
     if (!buf || buf.byteLength < 64) throw new Error("文件太小，可能还没生成好");
@@ -3350,9 +3593,17 @@ async function onDownloadComplete(delta) {
   }
 }
 
-// 走「接口级导出」时，浏览器仍可能弹「另存为」——直接取消掉，
+// 走「页面点导出」时，浏览器仍可能弹「另存为」——直接取消掉，
 // 免得用户被一个对话框拦住（文件我们已经从接口取回来了）。
+//
+// 用计数而不是布尔：SKU / 广告 / 联盟是并行跑的，谁先跑完就把开关关掉，
+// 正在导出的那一路就漏出去了（2026-11-15 PHT-M2 弹框就是这个原因）。
+let _DL_HOLD = 0;
 let SUPPRESS_DL = false;
+const _dlHold = (on) => {
+  _DL_HOLD = Math.max(0, (_DL_HOLD || 0) + (on ? 1 : -1));
+  SUPPRESS_DL = _DL_HOLD > 0;
+};
 
 // 导出流程中浏览器如果真发起了下载：
 //   ① 把地址记下来（这就是我们要的文件地址）
@@ -3361,7 +3612,7 @@ let DL_SEEN = [];
 
 if (chrome.downloads && chrome.downloads.onCreated) {
   chrome.downloads.onCreated.addListener((item) => {
-    if (!SUPPRESS_DL || !item || !item.id) return;
+    if (!(_DL_HOLD > 0 || SUPPRESS_DL) || !item || !item.id) return;
     try {
       DL_SEEN.push({
         url: item.url || item.finalUrl || "",
@@ -3820,8 +4071,11 @@ async function exportSkuByButton(host, preferPath, log) {
  */
 async function installDownloadGuard(tabId) {
   try {
+    // allFrames 很关键：新版广告后台的导出按钮在 iframe 里，
+    // 只给主文档打补丁，iframe 里的 <a>.click()/dispatchEvent 照样会真下载、
+    // 照样弹「另存为」（2026-11-15 PHT-M2 实测）。
     await chrome.scripting.executeScript({
-      target: { tabId }, world: "MAIN",
+      target: { tabId, allFrames: true }, world: "MAIN",
       func: () => {
         if (window.__jlGuard) return;
         window.__jlGuard = true;
@@ -3840,20 +4094,28 @@ async function installDownloadGuard(tabId) {
           } catch (e) { /* 忽略 */ }
         };
 
+        // 「像文件」的统一判断：扩展包、blob、导出/下载接口都算。
+        // 不能只看 download 属性——平台的下载链接经常是 href 指向一个
+        // 返回附件头（Content-Disposition）的接口，没有 download 属性，
+        // 点了照样弹「另存为」。
+        const looksLikeFile = (u) => {
+          const s = String(u || "");
+          if (!s) return false;
+          if (s.startsWith("blob:")) return true;
+          if (/\.(xlsx|xls|csv|zip)(\?|$)/i.test(s)) return true;
+          return /\/(export|download|download_task|export_task)(\/|\?|$)/i.test(s);
+        };
+
         // ① 拦 <a> 点击：凡是「像文件」的链接都拦下来。
-        //    不能只看 download 属性——平台的下载链接经常是
-        //    href 指向一个返回附件头（Content-Disposition）的接口，
-        //    没有 download 属性，点了照样弹「另存为」。
         const origClick = HTMLAnchorElement.prototype.click;
         HTMLAnchorElement.prototype.click = function () {
           try {
             const href = this.href || "";
             const name = this.getAttribute("download") || "";
-            const isFile = this.hasAttribute("download")
-              || href.startsWith("blob:")
-              || /\.(xlsx|xls|csv|zip)(\?|$)/i.test(href)
-              || /\/(export|download|export_task|download_task)(\/|\?|$)/i.test(href);
-            if (isFile) { record(href, name); return; }   // 不真的点，浏览器就不会下载
+            if (this.hasAttribute("download") || looksLikeFile(href)) {
+              record(href, name);
+              return;   // 不真的点，浏览器就不会下载
+            }
           } catch (e) { /* 忽略 */ }
           return origClick.apply(this, arguments);
         };
@@ -3863,8 +4125,7 @@ async function installDownloadGuard(tabId) {
         window.open = function (u) {
           try {
             const href = String(u || "");
-            if (/\.(xlsx|xls|csv|zip)(\?|$)/i.test(href)
-              || /\/(export|download|export_task|download_task)(\/|\?|$)/i.test(href)) {
+            if (looksLikeFile(href)) {
               record(href, "");
               return null;
             }
@@ -3886,6 +4147,79 @@ async function installDownloadGuard(tabId) {
           } catch (e) { /* 忽略 */ }
           return u;
         };
+
+        // ③ 拦「派发的点击」：平台常写
+        //    a.dispatchEvent(new MouseEvent("click")) 来触发下载，
+        //    这条路不走 .click() 方法，① 完全拦不到——
+        //    2026-11-15 PHT-M2 就是从这里漏出去弹了「另存为」。
+        const origDispatch = EventTarget.prototype.dispatchEvent;
+        EventTarget.prototype.dispatchEvent = function (ev) {
+          try {
+            const tag = String((this && this.tagName) || "").toUpperCase();
+            if (tag === "A" && ev && ev.type === "click") {
+              const href = this.href || "";
+              const name = this.getAttribute("download") || "";
+              if (this.hasAttribute("download") || looksLikeFile(href)) {
+                record(href, name);
+                return true;      // 假装派发成功，实际不点
+              }
+            }
+          } catch (e) { /* 忽略 */ }
+          return origDispatch.apply(this, arguments);
+        };
+
+        // ④ 拦表单提交：老后台导出是 <form method=post> 提交后回文件。
+        const formIsFile = (form) => {
+          try {
+            const act = String((form && form.action) || "");
+            if (!looksLikeFile(act) && !/export|download/i.test(act)) return false;
+            record(act, "");
+            return true;
+          } catch (e) { return false; }
+        };
+        const origSubmit = HTMLFormElement.prototype.submit;
+        HTMLFormElement.prototype.submit = function () {
+          if (formIsFile(this)) return;
+          return origSubmit.apply(this, arguments);
+        };
+        if (HTMLFormElement.prototype.requestSubmit) {
+          const origReq = HTMLFormElement.prototype.requestSubmit;
+          HTMLFormElement.prototype.requestSubmit = function () {
+            if (formIsFile(this)) return;
+            return origReq.apply(this, arguments);
+          };
+        }
+
+        // ⑤ 兜底：谁往页面里插 <iframe src=文件地址> 或带 download 的 <a>，
+        //    立刻拿掉——浏览器只要见到就会发起下载并弹「另存为」。
+        try {
+          if (!window.__jlGuardMO) {
+            const mo = new MutationObserver((muts) => {
+              for (const m of muts) {
+                for (const n of (m.addedNodes || [])) {
+                  if (!n || n.nodeType !== 1) continue;
+                  const tag = String(n.tagName || "").toUpperCase();
+                  if (tag === "IFRAME") {
+                    const src = String(n.src || "");
+                    if (looksLikeFile(src) || /export|download/i.test(src)) {
+                      record(src, "");
+                      try { n.remove(); } catch (e) { /* 忽略 */ }
+                    }
+                  } else if (tag === "A") {
+                    const href = String(n.href || "");
+                    if (n.hasAttribute("download") || looksLikeFile(href)) {
+                      record(href, n.getAttribute("download") || "");
+                      try { n.remove(); } catch (e) { /* 忽略 */ }
+                    }
+                  }
+                }
+              }
+            });
+            mo.observe(document.documentElement || document,
+                       { childList: true, subtree: true });
+            window.__jlGuardMO = mo;
+          }
+        } catch (e) { /* 忽略 */ }
       },
     });
     return true;
@@ -3898,11 +4232,17 @@ async function installDownloadGuard(tabId) {
 async function harvestDownload(tabId) {
   let list = [];
   try {
-    const [r] = await chrome.scripting.executeScript({
-      target: { tabId }, world: "MAIN",
+    const rs = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true }, world: "MAIN",
       func: () => (window.__jlDl || []).slice(-6),
     });
-    list = (r && r.result) || [];
+    // 各 frame 各记各的：iframe 里拦到的文件，主文档的 __jlDl 里没有。
+    // 把它们的记录合并起来，并记住来自哪个 frame（取 blob 时要回到那个 frame）。
+    list = [];
+    for (const x of (rs || [])) {
+      if (!x || !Array.isArray(x.result)) continue;
+      for (const it of x.result) list.push(Object.assign({ frameId: x.frameId }, it));
+    }
   } catch (e) { return null; }
   if (!list.length) return null;
 
@@ -3911,7 +4251,7 @@ async function harvestDownload(tabId) {
     if (!it.blob) continue;
     try {
       const [r] = await chrome.scripting.executeScript({
-        target: { tabId }, world: "MAIN",
+        target: it.frameId ? { tabId, frameIds: [it.frameId] } : { tabId }, world: "MAIN",
         func: async (key) => {
           const b = (window.__jlBlobs || {})[key];
           if (!b) return null;
@@ -3941,7 +4281,7 @@ async function harvestDownload(tabId) {
     if (it.blob || !it.href || !/^https?:/i.test(it.href)) continue;
     for (let attempt = 0; attempt < 8; attempt++) {
       try {
-        const resp = await fetch(it.href, { credentials: "include" });
+        const resp = await fetch(it.href, { credentials: "include", signal: AbortSignal.timeout(60000) });
         if (resp.ok) {
           const ct = resp.headers.get("content-type") || "";
           if (!ct.includes("json")) {
@@ -4054,7 +4394,7 @@ async function exportViaApi(kind, host, log, opts = {}) {
   };
 
   chrome.debugger.onEvent.addListener(onEvent);
-  SUPPRESS_DL = true;      // 这个流程里不需要浏览器下载
+  _dlHold(true);           // 这个流程里不需要浏览器下载
   DL_SEEN = [];            // 清空上一轮记下的地址
   // 广告后台（GMV Max）在**后台标签**里不初始化：页面停在卖家后台首页，
   // 一个导出按钮都没有；同一个地址在前台标签打开就正常。所以广告这步必须开前台，
@@ -4228,7 +4568,7 @@ async function exportViaApi(kind, host, log, opts = {}) {
         if (!/^https?:/i.test(d.url || "")) continue;
         for (let attempt = 0; attempt < 10; attempt++) {
           try {
-            const resp = await fetch(d.url, { credentials: "include" });
+            const resp = await fetch(d.url, { credentials: "include", signal: AbortSignal.timeout(60000) });
             if (resp.ok) {
               const ct = resp.headers.get("content-type") || "";
               if (!ct.includes("json")) {
@@ -4264,7 +4604,7 @@ async function exportViaApi(kind, host, log, opts = {}) {
     for (const u of fileUrls.slice(0, 6)) {
       for (let attempt = 0; attempt < 12; attempt++) {
         try {
-          const r = await fetch(u, { credentials: "include" });
+          const r = await fetch(u, { credentials: "include", signal: AbortSignal.timeout(60000) });
           if (r.ok) {
             const ct = r.headers.get("content-type") || "";
             if (!ct.includes("json")) {
@@ -4287,7 +4627,7 @@ async function exportViaApi(kind, host, log, opts = {}) {
     }
     return { error: "文件地址拿到了但下不到内容（平台可能还在生成）" };
   } finally {
-    SUPPRESS_DL = false;
+    _dlHold(false);
     try { chrome.debugger.onEvent.removeListener(onEvent); } catch (e) { /* 忽略 */ }
     if (attached) { try { await chrome.debugger.detach({ tabId }); } catch (e) { /* 忽略 */ } }
     if (tabId && openedByUs) { try { await chrome.tabs.remove(tabId); } catch (e) { /* 忽略 */ } }
@@ -4823,6 +5163,11 @@ async function reuseToday(range) {
 // 不用再切到命令行。核算是同步阻塞的，通常十几秒到一两分钟。
 
 async function calcNow(range, log, opts = {}) {
+  // 停止后不再核算（这条是兜底：runTaskThenCalc 那边已经先拦一道）
+  if (isStoppedRun()) {
+    log("已停止：不核算");
+    return null;
+  }
   const { settings = {} } = await chrome.storage.local.get({ settings: {} });
   const country = opts.country || settings.country || "马来西亚";
   // 店铺决定国家：传了店铺，桥那边会以 config/stores.json 为准解析国家与费率
@@ -4905,10 +5250,14 @@ async function reportProgress(step, state, extra = {}) {
 
 function shortDetail(r) {
   if (!r || typeof r !== "object") return "";
-  const p = r.saved || r.path || "";
+  // 有的任务把结果包在 fetch 里（`return { fetch: r }`），只看最外层会取不到名字，
+  // 卡片上就是「打了勾、右边一片空白」（2026-11-12 13:31 截图）。
+  const f = (r.fetch && typeof r.fetch === "object") ? r.fetch : {};
+  const p = r.saved || r.path || f.saved || f.path || "";
   if (p) return String(p).split(/[\\/]/).pop().slice(0, 40);
-  if (r.rows) return `${r.rows} 行`;
-  if (r.count) return `${r.count} 条`;
+  if (r.files && r.files.length) return String(r.files[0]).split(/[\\/]/).pop().slice(0, 40);
+  if (r.rows || f.rows) return `${r.rows || f.rows} 行`;
+  if (r.count || f.count) return `${r.count || f.count} 条`;
   return "";
 }
 
@@ -4949,6 +5298,19 @@ function throwIfStopped() {
   }
 }
 
+/** 这一轮已经被「停止」掐掉了吗？
+ *
+ *  不能靠 throwIfStopped 抛异常：调用处大多在 catch 里收尾，抛出去会被当成
+ *  「核算失败」，卡片上留一个红叉，比不拦还糟。
+ *
+ *  为什么要拦（2026-11-11 15:36 实测）：点了停止，扩展 0.7 秒就回了执，
+ *  可那时已经提交的导出还在跑，跑完继续登记「等订单」的待补——订单落地后
+ *  桥自己又算了一遍、又出一张表。用户看到的是「明明点了停止，后来又冒出报表」。
+ */
+function isStoppedRun() {
+  return RUN_ABORT === true;
+}
+
 function startStopWatch(shopId) {
   // 每一轮开始都必须复位：上一轮的停止标记留在这儿，会把这一轮开头就掐掉
   // （2026-11-06 18:22 实测：新一轮刚提交导出就报「已手动停止」）。
@@ -4963,6 +5325,16 @@ function startStopWatch(shopId) {
       const j = await r.json();
       if (j && j.stop) {
         RUN_ABORT = true;
+        // 停止就当场把「在跑」标记清掉、停掉保活。
+        //
+        // 为什么必须现在清：收手发生在**下一个检查点**，可有些步骤（等平台生成、
+        // 等下载、等页面跳转）能卡好几分钟。那一轮一直亮着 running，这个浏览器
+        // 就**再也领不到新任务**——consumePending 见到 running 直接 return，
+        // 而保活还在每 20 秒更新 runBeat，连「3 分钟没心跳就清掉」的兜底都永远
+        // 等不到。实测 2026-11-11 16:38：点停止后，MYT-V1 的新任务在队列里躺了
+        // 5 分钟没人领，卡片一直停在「已排上，等浏览器领任务」。
+        try { await skSet({ running: null, runBeat: 0 }); } catch (e) { /* 存不上也得往下走 */ }
+        try { stopKeepAlive(); } catch (e) { /* 没启动过就算了 */ }
         const used = Number(j.elapsed || 0);
         appendTaskLog(`[stop] 收到停止指令，正在收手…（桥已等 ${used.toFixed(1)} 秒）`);
         // 停止就要真停：这家店还挂着的「待补订单」一起撤掉。
@@ -4987,7 +5359,7 @@ function startStopWatch(shopId) {
         } catch (e) { /* 桥不在就算了，主流程已经停了 */ }
       }
     } catch (e) { /* 桥不在就继续跑 */ }
-  }, 1500);
+  }, 1000);   // 1 秒一问：停止的「等浏览器收手」最坏就从 1.5 秒降到 1 秒
 }
 
 function stopStopWatch() {
@@ -5117,7 +5489,15 @@ async function consumePending() {
     // 以前只看任务开始时间，要干等 30 分钟，界面一直是「运行中」。
     const last = Math.max(Number(running.at || 0), Number(runBeat || 0));
     const age = Date.now() - last;
-    if (age < 3 * 60 * 1000) return null;    // 真在跑，等它跑完再领下一个
+    // 再加一道**硬上限**：任务开始超过 15 分钟，不管心跳还在不在，一律清掉重领。
+    // 为什么必须加：保活定时器一旦泄漏（后台被回收又重启，旧的 interval 还在），
+    // runBeat 会被一直刷新，「3 分钟没心跳」那条兜底永远等不到 ——
+    // 这个浏览器就再也不领任务了，界面上看着「在线」，点了运行却纹丝不动。
+    // 实测 2026-11-11 18:06：MYT-V1 的心跳每几秒一次，可它一次都不来领活。
+    const atAge = Date.now() - Number(running.at || 0);
+    if (age < 3 * 60 * 1000 && atAge < 15 * 60 * 1000) {
+      return null;                           // 真在跑，等它跑完再领下一个
+    }
     await skSet({ running: null, runBeat: 0 });
     appendTaskLog(`上次任务没跑完（${Math.round(age / 60000)} 分钟没心跳，`
       + "多半是浏览器回收了后台），已清掉运行标记，继续领任务");
@@ -5331,7 +5711,7 @@ async function apiPostSoft(url, body) {
         if (!k.startsWith("_")) headers[k] = v;
       }
       const r = await fetch(url, {
-        method: "POST", credentials: "include", headers,
+        method: "POST", credentials: "include", signal: AbortSignal.timeout(60000), headers,
         body: JSON.stringify(body || {}),
       });
       return await r.json();
@@ -5417,19 +5797,35 @@ async function resolveAdvId(host, log) {
     return "";
   };
 
-  // ① 学到的 URL 参数里的 aadvid —— 实测账户 ID 是放在 URL 上的，不在请求头
+  // ① 先看「此刻开着的标签页地址」——个别站点会把它放在地址栏。
+  // 注意：**MY / PH 两站实测地址栏里没有 aadvid**，打开广告页后是
+  //   /ads-creation/dashboard?origin=SC_ads_tab_button_PC&mpa=1&type=product&shop_region=PH
+  // 账户 ID 只出现在页面自己发出的 oec_ads 请求查询串上，
+  // 所以这条多数时候不命中。留着是因为有站点确实这么放，成本只有一次 tabs.query。
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const t of tabs) {
+      const m = String(t.url || "").match(/[?&]aadvid=(\d{6,})/);
+      if (m) {
+        if (log) log(`   广告账户（来自当前广告页地址）：${m[1]}`);
+        return m[1];
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+
+  // ② 学到的 URL 参数里的 aadvid（页面发请求时顺手记下来的历史值）
   try {
     const { params = {} } = await chrome.storage.local.get({ params: {} });
     const p = params[host] || {};
     const cand = [p.aadvid, p.adv_id, p.advid, p.advertiser_id]
       .find((v) => v && /^\d{6,}$/.test(String(v)));
     if (cand) {
-      if (log) log(`   广告账户（来自页面 URL 参数 aadvid）：${cand}`);
+      if (log) log(`   广告账户（来自学到的 URL 参数）：${cand}`);
       return String(cand);
     }
   } catch (e) { /* 忽略 */ }
 
-  // ② 店铺档案里的（换电脑后不用重新学）
+  // ③ 店铺档案里的（换电脑后不用重新学）
   try {
     const prof = await getStoreProfile(CURRENT_SHOP.shop_id);
     if (prof && prof.adv_id && /^\d{6,}$/.test(String(prof.adv_id))) {
@@ -5438,7 +5834,7 @@ async function resolveAdvId(host, log) {
     }
   } catch (e) { /* 忽略 */ }
 
-  // ③ 学到的请求头（有的站点放在头里）
+  // ④ 学到的请求头（有的站点放在头里）
   try {
     const { [HEADER_KEY]: hp = {} } = await skGet({ [HEADER_KEY]: {} });
     for (const [k, v] of Object.entries(hp[host] || {})) {
@@ -5449,12 +5845,18 @@ async function resolveAdvId(host, log) {
     }
   } catch (e) { /* 忽略 */ }
 
-  // ② 接口
+  // ⑤ 最后问平台本身（onboard 接口）。
+  // 参数要跟页面一致：抓包里这条请求是
+  //   get_onboard_info?language=zh&locale=zh&oec_seller_id=<店铺ID>
+  // 以前只发了空 body、没带 oec_seller_id，平台很可能不知道该查哪个卖家的
+  // 广告账户，于是拿不到 —— 这是"新店第一次跑"最后一道保险，必须调对。
   try {
+    const extra = { language: "zh", locale: "zh" };
+    if (CURRENT_SHOP && CURRENT_SHOP.shop_id) extra.oec_seller_id = CURRENT_SHOP.shop_id;
     const ob = await apiPostSoft(
-      await buildUrl(host, "/oec_ads/shopping/v1/oec/get_onboard_info"), {});
+      await buildUrl(host, "/oec_ads/shopping/v1/oec/get_onboard_info", extra), {});
     const id = digAdv(ob, 0);
-    if (id && log) log(`   广告账户：${id}`);
+    if (id && log) log(`   广告账户（来自 onboard 接口）：${id}`);
     return id;
   } catch (e) {
     return "";
@@ -5501,7 +5903,40 @@ async function learnAdsHeaders(host, log) {
     attached = true;
     await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
     chrome.debugger.onEvent.addListener(onReq);
-    await sleep(12000);
+    // 别傻等 12 秒：只要学到账户 ID 就立刻收工。
+    //
+    // 这里**不看地址栏**——2026-11-15 抓包核实过：打开广告页后地址栏是
+    //   /ads-creation/dashboard?origin=SC_ads_tab_button_PC&mpa=1&type=product&shop_region=PH
+    // 根本没有 aadvid；`aadvid` 只出现在**页面自己发出的 oec_ads 请求**的
+    // 查询串上（post_product_list_v2?aadvid=...&oec_seller_id=...）。
+    // 所以判断依据是 onReq 有没有把参数学进 storage。
+    const deadline = Date.now() + 12000;
+    let got = "";
+    while (Date.now() < deadline) {
+      await sleep(600);
+      try {
+        const { params = {} } = await chrome.storage.local.get({ params: {} });
+        const v = (params[host] || {}).aadvid;
+        if (v && /^\d{6,}$/.test(String(v))) {
+          got = String(v);
+          if (log) log(`   已学到广告账户：${got}`);
+          break;
+        }
+      } catch (e) { /* 下一轮 */ }
+      // 少数站点地址栏确实会带，顺手也看一眼（成本可忽略）
+      try {
+        const t = await chrome.tabs.get(tabId);
+        const u = String((t && t.url) || "");
+        const m = u.match(/[?&]aadvid=(\d{6,})/);
+        if (m && m[1]) {
+          got = m[1];
+          try { learnParams(u); } catch (e) { /* 忽略 */ }
+          if (log) log(`   地址栏里看到广告账户：${got}`);
+          break;
+        }
+      } catch (e) { /* 标签页在跳转，下一轮再看 */ }
+    }
+    if (!got) await sleep(1500);   // 没拿到就再等一会儿，让请求抓取多跑几轮
     if (log) log("   已从页面学到一批请求头");
     return true;
   } catch (e) {
@@ -5680,8 +6115,11 @@ async function exportAdsByApi(host, log, range) {
   }
   if (!did) throw new Error("所有场景都没能建出导出任务");
 
-  for (let i = 0; i < 30; i++) {
-    await sleep(3000);
+  // 大店（5 万多行）平台生成要 5 分钟。以前只等 90 秒就判失败，
+  // 结果反复重排任务、永远拿不到，还越排越慢（2026-10-31 实测）。
+  // 90 次 × 4 秒 = 6 分钟；中途平台报失败会立刻退出。
+  for (let i = 0; i < 90; i++) {
+    await sleep(4000);
     let r = null;
     try {
       const body = i % 2 === 0
@@ -5704,10 +6142,13 @@ async function exportAdsByApi(host, log, range) {
       return findUrl(o) || "";
     };
     const url = pickUrl(r);
-    if (url && log) log(`   任务状态：${r.task_status || (r.data && r.data.task_status) || "?"}`);
+    // 平台明确说失败了就别接着等，6 分钟白等一轮（一家店卡住会拖住整轮）
+    const tst = String((r && (r.task_status || (r.data && r.data.task_status))) || "").toUpperCase();
+    if (/FAIL|ERROR/.test(tst)) throw new Error(`平台导出任务失败（${tst}）`);
+    if (url && log) log(`   任务状态：${tst || "?"}`);
     if (url) {
       if (log) log("   文件已就绪，开始取…");
-      const resp = await fetch(url, { credentials: "include" });
+      const resp = await fetch(url, { credentials: "include", signal: AbortSignal.timeout(60000) });
       if (resp.ok) {
         const buf = await resp.arrayBuffer();
         if (buf && buf.byteLength > 1024) {
@@ -5724,10 +6165,10 @@ async function exportAdsByApi(host, log, range) {
       }
     }
     if (i % 3 === 2 && log) {
-      log(`   等导出文件…（${(i + 1) * 3} 秒）${JSON.stringify(r).slice(0, 160)}`);
+      log(`   等导出文件…（${(i + 1) * 4} 秒）${JSON.stringify(r).slice(0, 160)}`);
     }
   }
-  throw new Error("导出任务 90 秒内没生成文件");
+  throw new Error("导出任务 6 分钟内没生成文件");
 }
 
 /**
@@ -5740,7 +6181,22 @@ async function exportAdsByApi(host, log, range) {
  *
  * 这是兜底链的最后一层，不依赖国家、不依赖场景名，也不依赖你手动点。
  */
+/** 广告「总览」表不是商品维度，拿它核算等于广告费全丢。
+ *
+ * 2026-11-15 PHT-M2 点导出拿到的是 `Campaign overview data …`：
+ * 按 campaign 聚合，没有商品 ID。落盘后 loader 认不出（找不到 Product ID），
+ * 只会让报表广告费变成 0，还看不出来哪里错了。宁可不收。
+ */
+function adsLooksOverview(name) {
+  const s = String(name || "");
+  if (!s) return false;
+  return /overview|总览|概览/i.test(s);
+}
+
 async function exportAdsByClickFresh(host, log, range) {
+  // 这条路上浏览器随时可能真发起下载（平台的导出不只走 <a>.click），
+  // 不按住就会弹「另存为」，而弹框会把那个标签页整段流程堵死。
+  _dlHold(true);
   let winId = 0;
   try {
     const w = await chrome.windows.getLastFocused();
@@ -5800,16 +6256,31 @@ async function exportAdsByClickFresh(host, log, range) {
     await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
     chrome.debugger.onEvent.addListener(onNet);
 
-    // 等页面真的开始请求（SPA 启动要几秒），再等「导出」按钮出现
-    const ok = await waitForButton(tabId, ["导出", "导出数据", "Export"], 45000, log);
+    // 等页面真的开始请求（SPA 启动要几秒），再等「导出」按钮出现。
+    // 20 秒够了：8 家并行时页面会被节流，等 45 秒只是白占着名额。
+    const ok = await waitForButton(tabId, ["导出", "导出数据", "Export"], 20000, log);
     if (!ok) {
       const vis = await chrome.scripting.executeScript({
         target: { tabId }, func: () => document.visibilityState,
       }).then((r) => (r && r[0] && r[0].result) || "?").catch(() => "?");
       const frames = await frameInfo(tabId);
-      if (log) log(`   等 45 秒没出现「导出」按钮（页面 ${vis}；帧 ${frames.length} 个）`);
+      if (log) log(`   等 20 秒没出现「导出」按钮（页面 ${vis}；帧 ${frames.length} 个）`);
+      if (vis === "hidden") {
+        // 后台标签不渲染，按钮也不会画出来：切到前台再等一次
+        try {
+          await chrome.tabs.update(tabId, { active: true });
+          if (winId) { try { await chrome.windows.update(winId, { focused: true }); } catch (e) {} }
+          await sleep(2500);
+        } catch (e) { /* 忽略 */ }
+      }
     }
     await installDownloadGuard(tabId);
+    // 广告后台默认停在「总览」，那个「导出」导的是 Campaign overview
+    // （按 campaign 聚合，没有商品 ID）——拿来核算等于广告费全丢。
+    // 先切到「商品」维度再点导出（2026-11-15 PHT-M2 导出的就是总览）。
+    const dim = await clickByTextIn(tabId, ["商品", "按商品", "商品维度", "Product"]);
+    if (dim && log) log(`   已切到商品维度：${dim}`);
+    if (dim) await sleep(1500);
     const clicked = await clickByTextIn(tabId, ["导出", "导出数据", "Export"]);
     if (log) log(`   点「导出」：${clicked || "没点到"}`);
     if (!clicked) throw new Error("页面上没有可点的「导出」按钮");
@@ -5821,18 +6292,23 @@ async function exportAdsByClickFresh(host, log, range) {
       const got = await harvestDownload(tabId);
       if (got && got.buf && got.buf.byteLength > 1024) {
         const nm = got.name || `Product campaign data ${new Date().toISOString().slice(0, 10)}.xlsx`;
-        const saved = await uploadToBridge(nm, got.buf, "ads");
-        if (log) log(`   已接住广告导出表：${saved.path}`);
-        return { via: "页面导出", saved: saved.path };
+        if (adsLooksOverview(nm)) {     // 总览没有商品 ID，落盘只会害核算
+          if (log) log(`   拿到的是总览表（${nm}），不是商品维度，丢掉重找`);
+        } else {
+          const saved = await uploadToBridge(nm, got.buf, "ads");
+          if (log) log(`   已接住广告导出表：${saved.path}`);
+          return { via: "页面导出", saved: saved.path };
+        }
       }
       for (const u of urls.slice().reverse()) {
         try {
-          const r = await fetch(u, { credentials: "include" });
+          const r = await fetch(u, { credentials: "include", signal: AbortSignal.timeout(60000) });
           if (!r.ok) continue;
           const buf = await r.arrayBuffer();
           if (!buf || buf.byteLength < 1024) continue;
           const nm = decodeURIComponent((u.split("?")[0].split("/").pop() || ""))
             || `Product campaign data ${new Date().toISOString().slice(0, 10)}.xlsx`;
+          if (adsLooksOverview(nm)) continue;
           const saved = await uploadToBridge(nm, buf, "ads");
           if (log) log(`   已取回广告导出表：${saved.path}`);
           return { via: "页面导出", saved: saved.path };
@@ -5841,6 +6317,7 @@ async function exportAdsByClickFresh(host, log, range) {
     }
     throw new Error("点了导出，但 80 秒内没拿到文件");
   } finally {
+    _dlHold(false);
     if (learnedScene) {
       // 存到「按站点」的表里，全体浏览器共用同一套学习结果
       try {
@@ -5952,7 +6429,7 @@ async function exportAdsByClick(host, log) {
   for (const u of urls.slice().reverse()) {
     for (let attempt = 0; attempt < 6; attempt++) {
       try {
-        const r = await fetch(u, { credentials: "include" });
+        const r = await fetch(u, { credentials: "include", signal: AbortSignal.timeout(60000) });
         if (r.ok) {
           const ct = r.headers.get("content-type") || "";
           if (!ct.includes("json")) {
@@ -6194,53 +6671,89 @@ const TASK_IMPL = {
   // 那种情况不要直接判死：广告还能靠「导出任务」下载用户点过导出的文件，
   // 联盟还能靠页面上的明细接口，所以失败后回退到老的完整实现。
   affiliate: async (range, log) => {
+    // 联盟一取完就自己把状态打上。
+    // 三项（SKU/联盟/广告）是并行跑的，runAllFast 要等**最慢**的那项才统一
+    // 上报；SKU 长区间切 10 段要 5 分钟，联盟 1 分钟就取完了，卡片却一直
+    // 挂「—」，看着像根本没去取（2026-11-12 17:47 用户指出）。
+    const _markDone = async (r) => {
+      try {
+        const f = (r && r.files && r.files[0]) || (r && r.saved) || "";
+        const name = String(f).split(/[\\/]/).pop();
+        await reportProgress("affiliate", "done", { detail: name || "已完成" });
+      } catch (e) { /* 上报失败不影响取数 */ }
+      return r;
+    };
     try {
-      return await runSpecTask("affiliate", range, log);
+      return await _markDone(await runSpecTask("affiliate", range, log));
     } catch (e) {
       log(`   规格接口不可用（${(e && e.message) || e}），改走联盟页面方式…`);
-      return runAffiliate(range, log);
+      return await _markDone(await runAffiliate(range, log));
     }
   },
   ads: async (range, log) => {
-    // 站点档案里标了 ads_spec=false 的（实测菲律宾），别再浪费一轮请求，
-    // 直接去广告页点导出。没标的照常先试规格接口。
+    // 两条取数路，两种导出表，一律「11 列优先，4 列兜底」：
+    //
+    //   ① 11 列「商品维度报表」（Product campaign data …xlsx）
+    //      栏目：商品名称 / 推广系列ID / 广告计划名称 / 商品ID / 成本 /
+    //            成本（联盟）/ SKU 订单数 / 平均下单成本 / 总收入 / ROI / 货币
+    //      货币列写的是**真实币种**（USD / PHP / MYR…），核算不用猜。
+    //   ②  4 列「商品维度花费」（creative data for product campaigns …csv）
+    //      栏目：Product ID / Spend / Currency / Product name
+    //      快，但 Currency 只写 `LOCAL`（账号本位币），得靠配置折算——
+    //      填错就差几倍，2026-11-11 就为这个差点把广告费算成 1/4。
+    //
+    // 以前是反的：马来（ads_spec 默认 true）先走 4 列，菲律宾才走 11 列。
+    // 2026-11-11 起统一成 11 列优先（两个站点都支持），4 列只做兜底。
     let prof = {};
+    let host = "";
     try {
-      prof = await siteProfile(await ensureHost("seller", log));
+      host = await ensureHost("seller", log);
+      prof = await siteProfile(host);
     } catch (e) { /* 拿不到就当默认 */ }
-    if (prof.ads_spec === false) {
-      // 这家站的接口我们复刻不全（平台回「参数无效」），但页面自己能拿到数据。
-      // 先抄页面的：挂调试器刷新广告页、接住响应——不依赖渲染、不依赖导出按钮。
-      const host = await ensureHost("seller", log);
-      log(`   站点 ${String(prof.key || "?").toUpperCase()} 改走「导出任务」接口…`);
+    const mark = String(prof.key || prof.region || "?").toUpperCase();
+
+    // ① 11 列：接口建导出任务 → 等平台生成 → 下载。不通就在页面上点导出。
+    if (host) {
+      log(`   站点 ${mark}：先取 11 列「商品维度报表」（带真实币种）…`);
       try {
         return await exportAdsByApi(host, log, range);
       } catch (e) {
-        log(`   导出接口没成：${(e && e.message) || e}；改在页面上点导出`);
+        log(`   11 列接口没成：${(e && e.message) || e}；改在页面上点导出`);
       }
       try {
         return await exportAdsByClickFresh(host, log, range);
       } catch (e) {
-        log(`   页面导出也没成：${(e && e.message) || e}；改查已完成的导出任务`);
+        log(`   页面导出也没成：${(e && e.message) || e}`);
       }
-      log("   → 这家店的导出方式还没学会：点一次「广告（我自己点导出）」，"
-          + "我会记住它的接口，以后这家店就全自动了");
-      return runAds(range, log, { noDirect: true });
+    } else {
+      log("   没认出站点域名，跳过 11 列导出");
     }
-    try {
-      return await runSpecTask("ads", range, log);
-    } catch (e) {
-      log(`   规格接口不可用（${(e && e.message) || e}），改走「导出任务」接口…`);
-      // 实测：马来西亚的新店（Chroma Home）也回 code=3，跟菲律宾一样——
-      // 说明差别不在国家，而在**这家店是不是 GMV Max 账户**。
-      // 所以「导出任务」这条路对两个国家都先试，最后才退到点页面。
+
+    // ② 4 列兜底。站点档案标了 ads_spec=false 的（实测菲律宾）已知这条路
+    //    复刻不全，别再浪费一轮请求，直接去查已完成的导出任务。
+    if (prof.ads_spec !== false) {
+      log("   改试 4 列「商品维度花费」（快，但币种只写 LOCAL）…");
       try {
-        return await exportAdsByApi(await ensureHost("seller", log), log, range);
-      } catch (e2) {
-        log(`   导出接口也没成：${(e2 && e2.message) || e2}；改在页面上点导出`);
+        return await runSpecTask("ads", range, log);
+      } catch (e) {
+        log(`   4 列规格接口没成：${(e && e.message) || e}`);
       }
-      return runAds(range, log, { noDirect: true });
+      if (host) {
+        try {
+          return await pullAdsDirect(host, range, log);
+        } catch (e) {
+          log(`   4 列页面直取也没成：${(e && e.message) || e}`);
+        }
+      }
+    } else {
+      log(`   站点 ${mark} 不支持 4 列接口（站点档案 ads_spec=false），跳过`);
     }
+
+    // 最后一层跟以前一样：再走一次「通用页面导出」（exportViaApi，和上面
+    // exportAdsByClickFresh 是两套实现，谁通不一定），最后才查已完成的导出任务。
+    // 不能只留查询：菲律宾历史上 11 列就是靠这条通用路径拿到的，砍掉就退化了。
+    log("   最后一次尝试：通用页面导出 / 查已完成的导出任务…");
+    return runAds(range, log, { noDirect: true });
   },
 };
 const TASK_HINT = { orders: "seller", sku: "seller", link: "seller", affiliate: "affiliate", ads: "seller" };
@@ -6525,6 +7038,12 @@ async function runOneTask(task, range, log, opts = {}) {
  *  返回桥的 JSON：ok=true 表示当场就算完了（订单其实已经到了）。
  */
 async function registerPendingCalc(range, log, opts = {}) {
+  // 点了停止就别再登记待补：登记了等于「停止无效」——订单一落地桥自动算，
+  // 用户会看到一张凭空冒出来的报表。
+  if (isStoppedRun()) {
+    log("已停止：不登记待补（订单落地也不会自动算）");
+    return { ok: false, stopped: true, error: "已停止" };
+  }
   const { settings = {} } = await chrome.storage.local.get({ settings: {} });
   const country = opts.country || settings.country || "马来西亚";
   const store = opts.store || settings.store || "";
@@ -6554,6 +7073,13 @@ async function registerPendingCalc(range, log, opts = {}) {
 
 async function runTaskThenCalc(task, range, log, opts = {}) {
   const r = await runTask(task, range, log, opts);
+
+  // 停止之后再往下走全是白费：还会登记待补、订单落地又自动算一遍。
+  // 已经取到手的表不丢（那是真实数据），只是不再自动核算。
+  if (isStoppedRun()) {
+    log("已停止：这一轮到此为止（不核算、不登记待补）");
+    return { fetch: r, stopped: true };
+  }
 
   // 订单还在平台排队：**马上交给桥去等**，不在扩展里干等。
   //
@@ -6864,6 +7390,20 @@ setInterval(flush, 3000);
 
 // 后台每次被唤醒都先看看有没有待办任务
 setTimeout(() => { consumePending().catch(() => {}); }, 1200);
+
+// 空闲时也每 5 秒问一次桥有没有派下来的活。
+//
+// 为什么加：手动点「运行」不经闹钟，以前只能等 pending-watch 那一分钟的闹钟
+// 触发快轮询，实测点完到真正开始取数要等 20~60 秒（2026-11-11 15:35 实测 20 秒）。
+// 界面上又没有任何反馈，用户以为按钮没点上，会连点好几下。
+// consumePending 空闲时只是一次本地 HTTP + 读一次 storage，代价可以忽略；
+// 真在跑的时候它自己会提前返回（running 标记），不会叠加。
+let _idlePollBusy = false;
+setInterval(() => {
+  if (_fastPolling || _idlePollBusy) return;
+  _idlePollBusy = true;
+  consumePending().catch(() => {}).finally(() => { _idlePollBusy = false; });
+}, 5000);
 
 // 启动心跳：用来确认后台脚本已经换到新版本。
 //
