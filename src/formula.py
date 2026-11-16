@@ -410,6 +410,14 @@ def load_config(path: Path) -> dict:
     # None / 空 = 用全部列 + 合计在底部 + 默认标题
     if isinstance(doc.get("report_columns"), list) and doc["report_columns"]:
         out["report_columns"] = [str(x) for x in doc["report_columns"] if str(x).strip()]
+    # 「历来见过哪些列」。少了它，report.merge_report_columns 只能拿勾选结果当
+    # 已见列表 —— 于是用户取消勾选的那些列会被当成「后来新增的列」全加回来，
+    # 表现就是「勾选不生效，改完还是全展示」（2026-11-16 用户反馈）。
+    # 注意这里**允许空列表**：空列表代表「上次保存时一列都没有」，也是有效信息；
+    # 只有键不存在（老配置）才留空让调用方退化处理。
+    if isinstance(doc.get("report_columns_seen"), list):
+        out["report_columns_seen"] = [str(x) for x in doc["report_columns_seen"]
+                                      if str(x).strip()]
     if str(doc.get("report_total_position") or "").strip() in ("top", "bottom", "none"):
         out["report_total_position"] = doc["report_total_position"]
     if isinstance(doc.get("report_titles"), dict) and doc["report_titles"]:
@@ -436,6 +444,9 @@ def country_config(fcfg: dict, country: str) -> dict:
         "exclude_zero_amount": bool(fcfg.get("exclude_zero_amount")),
         # 报表列配置：先继承顶层，某国家单独设了才覆盖（没设的国家用通用那套）
         "report_columns": fcfg.get("report_columns"),
+        # 「历来见过哪些列」必须一起带下去：没有它，核算那边分不清
+        # 「用户取消的列」和「后来新增的列」，会把取消掉的全加回来
+        "report_columns_seen": fcfg.get("report_columns_seen"),
         "report_total_position": fcfg.get("report_total_position", "bottom"),
         "report_titles": fcfg.get("report_titles"),
     }

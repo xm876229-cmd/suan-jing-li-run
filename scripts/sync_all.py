@@ -365,6 +365,29 @@ def sync(build: bool) -> int:
     except Exception as e:  # noqa: BLE001
         print(f"（脚本符号检查跳过：{e}）")
 
+    # 款式编码口径：明细只看本行、汇总只看本期出单。
+    # 2026-11-16 用户定的口径——映射主表是累积表，把「该链接下全部 SKU」
+    # 那一路加回来，已下架的款式就会重新出现在本期报表里。
+    # check_ext 只查扩展，这里是 Python 侧，所以单独挂一支。
+    try:
+        from scripts import check_style_scope
+        if check_style_scope.main() != 0:
+            print("\n款式编码口径没通过，先修完再打包。")
+            return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"（款式编码口径检查跳过：{e}）")
+
+    # 开关类参数必须三份参数表一起生效（超级优惠券）。
+    # 2026-11-16 实测：开关只串到了主计算那份，明细页那份照样按费率算，
+    # 同一张报表里「口径页说关闭、明细却列着 243.96」。
+    try:
+        from scripts import check_switch_flags
+        if check_switch_flags.main() != 0:
+            print("\n开关类参数没串到三份参数表，先修完再打包。")
+            return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"（开关类参数检查跳过：{e}）")
+
     if build:
         print("重打包（exe + 安装包 + 免安装 zip）…")
         r = subprocess.run([sys.executable, "-m", "scripts.build_app"], cwd=str(ROOT))

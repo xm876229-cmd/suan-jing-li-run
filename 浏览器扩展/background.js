@@ -2778,12 +2778,21 @@ async function runAffiliate({ startDate, endDateExclusive, tzOffset }, log) {
   if (rows.length) {
     const csv = affiliateRowsToCsv(rows);
     const bytes = new TextEncoder().encode(csv);
-    // 文件名用**区间末日**，跟 A 路（配置/api_specs.json 里的
-    // {{startDateCompact}}_{{endDateCompact}}）对齐。
-    // 这里以前直接写 endDateExclusive（= 末日 + 1 天），于是同一个区间
-    // 两条路起出两个名字（11-11 / 11-12），核算侧差点把它判成「区间不对」
-    // 整份丢掉（2026-11-12 PHT-B1 实录）。名字起对，核算那边就不用容忍了。
-    const name = `Transaction_Analysis_Product_List_${startDate}_${shiftDate(endDateExclusive, -1)}.csv`;
+    // 文件名用**区间末日**，并且**去掉横线**，跟 api_specs.json 那条路的
+    // {{startDateCompact}}_{{endDateCompact}} 一字不差地对齐。
+    //
+    // 三段历史，别再走回头路：
+    //   ① 最早写成 endDateExclusive（末日 +1），同一个区间两条路起出
+    //      「…11-11」和「…11-12」，核算侧差点判成区间不对整份丢掉
+    //      （2026-11-12 PHT-B1 实录）→ 改成末日后对齐了一半；
+    //   ② 但这边用 ${startDate}（带横线），配置那边用 Compact（不带横线），
+    //      于是又是两个名字：2026-11-01_2026-11-15 / 20261101_20261115。
+    //      目录里留两份内容相同的文件，按文件名匹配的脚本会选错
+    //      （2026-11-16 PHT-M4 就这么走了一次兜底，核对时读到旧文件）；
+    //   ③ 现在两边都去掉横线，真正一码事。
+    const _d8 = (s) => String(s || "").slice(0, 10).replace(/-/g, "");
+    const name = "Transaction_Analysis_Product_List_"
+      + `${_d8(startDate)}_${_d8(shiftDate(endDateExclusive, -1))}.csv`;
     const saved = await uploadToBridge(name, bytes.buffer);
     log(`已保存：${saved.path}（${rows.length} 个商品）`);
     return { saved: saved.path, products: rows.length };

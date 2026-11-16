@@ -72,6 +72,9 @@ class Params:
 
 @dataclass
 class Switches:
+    # 已废弃（2026-11-16）：超级优惠券不再看这个开关，改由参数表的「启用」
+    # 勾选 + 费率本身决定。字段留着只为兼容老配置里还有这个键，读了也不用。
+    # 当初它照抄模板《V1-净利》S 列的 `*0`，等于把"不算"焊死在代码里。
     super_coupon_enabled: bool = False
     only_paid_orders: bool = True
     # 订单实付在订单内各行的分配方式：
@@ -685,10 +688,16 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
             no_pid += 1
         m = buckets.get(pid)
         if m is None:
-            m = ProductMetrics(product_id=pid, style_codes=l.style_codes)
+            m = ProductMetrics(product_id=pid)
             buckets[pid] = m
-        if l.style_codes and not m.style_codes:
-            m.style_codes = l.style_codes
+        # 汇总页的款式编码用「链接级并集」（这条链接本期出过单的款式），
+        # 不能用"取第一行"——一条链接本期出了 M18 和 M4 两个款式时，
+        # 取第一行只会剩下其中一个，另一个就凭空消失了。
+        # 归在「无ID」的行没有链接级并集（拼不出商品ID就谈不上整条链接），
+        # 退回用该行自己的款式。
+        _sc = l.link_styles or l.style_codes
+        if _sc and not m.style_codes:
+            m.style_codes = _sc
         # 商品名只用来显示，不参与归并。
         # 后来出现的覆盖前面的：链接标题被改过时，报表上显示最近一次的叫法。
         if l.product_name:
@@ -782,7 +791,13 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
     # 报表尾部多出几十行全零（2026-11-05 MYT-V1 有 24 行），
     # 把真数据挤到下面，还让人以为「下架的链接也算进本报表」。
     orphans: list[str] = []
-    for pid in set(data.ads) | set(data.commissions):
+    # 排序后再遍历：`set` 的迭代顺序取决于字符串 hash，Python 每个进程
+    # 启动时 hash 种子都不同 → 这些「没出单但有广告费」的链接每次跑出来
+    # 顺序都不一样。它们 GMV 都是 0，下面 products 按 GMV 降序排序时
+    # 对同 key 是稳定排序，于是整段尾部随机洗牌。
+    # 实测（2026-11-16）：同一份数据连跑两次，尾部三行顺序就不一样，
+    # 拿去跟上一版报表对比会以为「数据变了」。这里固定成按商品ID升序。
+    for pid in sorted(set(data.ads) | set(data.commissions)):
         if not pid or pid in buckets:
             continue
         if (abs(float(data.ads.get(pid, ZERO) or ZERO)) < 1e-9
@@ -798,13 +813,18 @@ def _compute_once(data: RawData, params: Params, switches: Switches,
     # 加一项新支出也是加一条，自动参与 net 的计算。
     param_cfg = list(cc["params"])
     net_formulas = cc["formulas"]
-    # 超级优惠券由 switches 控制「算不算」：
-    #   开 = 按费率算；关 = 按 0 计（原表里就是 ×0，费率填了也不生效）。
-    # 以前只写「开的时候启用」，关着的时候参数默认启用 → 费率填多少扣多少，
-    # 和费率页那个开关对不上。现在两个方向都写清楚。
-    for it in param_cfg:
-        if isinstance(it, dict) and it.get("id") == "super_coupon":
-            it["enabled"] = bool(switches.super_coupon_enabled)
+    # 超级优惠券「算不算」只看两处，不再有第三个开关：
+    #   ① 参数表里这一行的「启用」勾选（formulas.json 的 enabled）
+    #   ② 费率本身（填 0 = 不算）
+    #
+    # 2026-11-16 之前这里有一行 `enabled = switches.super_coupon_enabled`，
+    # 那是照抄模板《V1-净利》净利润页公式末尾的 `*0`：模板里「汇率-参数」I2
+    # 填了 1.08%，公式却写成 `SUMIFS(...)*0`，等于白填。程序把这个状态
+    # 固化成"默认关闭"，而且界面上没有任何入口 —— 用户在费率页填的 1.08%
+    # 从来没生效，界面上「计算项」的启用勾还显示是勾着的。
+    # 结果：马来四家店每期少扣约 1.08% GMV，净利虚高
+    # （MYT-J1 一期虚高 3755.54、MYT-V1 虚高 243.96）。
+    # 店主确认这笔费用真实存在，所以去掉这层锁：填了就扣，不想扣就填 0。
 
     # 参数表里这几项有固定去处（报表要按列展示），其余都进「费用明细」。
     # 优先认参数上写的 role；没写就按 id 猜（老配置没有 role）。

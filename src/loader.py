@@ -434,7 +434,14 @@ class OrderLine:
     shipped_time: str = ""
     delivered_time: str = ""
     product_id: str = ""
+    # 本行自己的款式编码（明细页用）。只认这一行：映射里该 SKU 的款式，
+    # 查不到就用本行的 Seller SKU 推。绝不写同链接其它 SKU 的款式——
+    # 那一行明明只卖了一个 SKU，显示成 "M18/M4" 是错的。
     style_codes: str = ""
+    # 整条链接「本期出过单」的款式并集（汇总页用）。
+    # 一条链接本期出了 M18 和 M4，这里就是 "M18/M4"；
+    # 已经下架、本期没出单的款式不会进来（2026-11-16 用户定的口径 A）。
+    link_styles: str = ""
     cost_unit_cny: Optional[float] = None
     refund_amount: float = 0.0
     order_line_count: int = 1
@@ -1164,8 +1171,20 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
                 ambiguous_rows += 1
             else:
                 unresolved[l.seller_sku or l.sku_id] += 1
-        elif style:
-            styles_by_product[pid].update(split_styles(style))
+        # 本行款式：映射里有就用映射的，没有就从**本行**卖家编码推。
+        # 款式编码本来就写在卖家 SKU 里（V27-White-10Pcs → V27，
+        # M15-RoseRed-100P → M15），不需要映射表、也不需要商品 ID。
+        # 以前这条放在最后当兜底，而且只在整行为空时才跑，顺序反了：
+        # 新店没有映射时明细整列空着，看着像"程序没读到"。
+        if not l.style_codes:
+            l.style_codes = "/".join(derive_styles(l.seller_sku))
+        # 链接级并集只收「本期这一行真的带了这个款式」的。
+        # 不去映射表捞该链接下的全部 SKU——映射主表是累积表、只增不删，
+        # 下架的 SKU 会永远留着，汇总页就会冒出早就不存在的款式编码
+        # （2026-11-16 实测：M14-1pc 11-05 已下架，映射里还在，
+        #   让 12 条链接的款式编码多出一个 M14）。
+        if pid and l.style_codes:
+            styles_by_product[pid].update(split_styles(l.style_codes))
     # 卖家编码可以挂在多条链接下（用户明确说过：编码不唯一，只有 SKU ID 唯一），
     # 这种行无法靠编码判定归属，单独说明，不要混进「真的找不到」里。
     if sku_index.conflicts:
@@ -1184,45 +1203,28 @@ def attach_product_ids(lines: list[OrderLine], sku_index: SkuIndex, issues: list
         issues.append(f"「{sku}」找不到商品ID（{n} 行），已归入「无ID」")
     if len(unresolved) > 8:
         issues.append(f"另有 {len(unresolved) - 8} 个 SKU 同样找不到商品ID，未逐条列出")
-    for l in lines:
-        if l.product_id and not l.style_codes:
-            l.style_codes = "/".join(sorted(styles_by_product.get(l.product_id, [])))
 
-    # 款式编码：一条链接一个值，全链接的行必须拿到**同一串**编码。
+    # 汇总页用的「链接级」款式编码：本期出过单的款式并集。
     #
-    # 模板《V1-净利》的算法是：
-    #   TEXTJOIN("/", TRUE, UNIQUE(FILTER(链接资料!A:A, 链接资料!B:B=商品ID, "")))
-    # 也就是「这条链接下全部 SKU 的款式编码」，跟本期有没有出单无关。
+    # 这里与模板《V1-净利》的 TEXTJOIN(链接资料...) **有意不同**：
+    #   模板取的是「这条链接下全部 SKU」的款式，含没出单的、也含已下架的。
+    #   2026-11-16 用户定的口径是「汇总和明细都从订单里提取」，也就是
+    #   只看本期真实出过单的款式。理由很实在：映射主表是累积表、只增不删，
+    #   下架的 SKU 会一直躺在里面，汇总页于是越来越脏
+    #   （实测 12 条链接多出了早就不存在的 M14）。
+    # 要改回模板口径，把 sku_index.styles_of(product_id) 加回来即可，
+    # 但先想清楚：已下架款式该不该出现在本期报表里。
     #
-    # 以前这里只做了一半：能查到映射的行拿到的是整串列表，查不到的行走兜底
-    # 只留自己这一个编码，于是同一条链接里「这行写 MY-J33/J74/J28/J71、
-    # 那行只写 J28」，报表取第一行就成了随机结果。
-    # 现在把三处来源（映射里该链接的全部编码 / 本行映射编码 / 卖家编码推出的编码）
-    # 求并集，再回写给这个链接的每一行，结果跟行的先后无关。
+    # 注意：明细页用的是每一行自己的 style_codes，不受这里影响。
     for l in lines:
-        if not l.product_id:
-            continue
-        codes = styles_by_product[l.product_id]
-        codes.update(split_styles(sku_index.styles_of(l.product_id)))
-        codes.update(derive_styles(l.seller_sku))
-    for l in lines:
-        if not l.product_id:
-            continue
-        codes = styles_by_product.get(l.product_id)
-        if codes:
-            l.style_codes = "/".join(sorted(codes))
+        if l.product_id:
+            codes = styles_by_product.get(l.product_id)
+            if codes:
+                l.link_styles = "/".join(sorted(codes))
 
-    # 最后兜底：商品没认出来的行，款式编码直接从卖家编码推。
-    #
-    # 款式编码本来就写在卖家 SKU 里（V27-White-10Pcs → V27，
-    # M15-RoseRed-100P → M15），不需要映射表也不需要商品 ID。
-    # 以前这条只在映射里查到商品时才顺带带上，新店铺没有映射就整列空着，
-    # 看着像"程序没读到"，其实是顺序反了。
-    for l in lines:
-        if not l.style_codes:
-            derived = "/".join(derive_styles(l.seller_sku))
-            if derived:
-                l.style_codes = derived
+    # 明细行的款式编码在第一循环里就定好了（映射优先 → 本行卖家编码兜底），
+    # 原来这里还有一段"没推出来的再从卖家编码推"的兜底，已经上移，
+    # 免得同一件事写两遍、以后改一处忘另一处。
 
 
 def attach_costs(lines: list[OrderLine], costs: dict[str, float],

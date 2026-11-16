@@ -1345,6 +1345,9 @@ def _mirror_mapping_to_store(store: str, src) -> None:
 
 
 _LOG_APPENDS = 0
+# 内存里保留多少行。原来是 500：8 家并发跑一轮，两分钟就冲掉，
+# 出了事想查「为什么这家走了兜底」已经没日志了（2026-11-16 实录）。
+_LOG_CAP = 5000
 _LOG_MAX_BYTES = 8 * 1024 * 1024
 
 
@@ -1352,10 +1355,22 @@ def _append_log(msg: str) -> None:
     global _LOG_APPENDS
     line = f"{datetime.now():%Y-%m-%d %H:%M:%S}  {msg}"
     TASK_LOG.append(line)
-    if len(TASK_LOG) > 500:
-        del TASK_LOG[:-500]
+    if len(TASK_LOG) > _LOG_CAP:
+        del TASK_LOG[:-_LOG_CAP]
+    _LOG_APPENDS += 1
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # task.log 轮转：以前 _LOG_MAX_BYTES 只定义、从没用过，文件会一直涨。
+        # 每 200 行看一次大小（不是每行都 stat），超了就把旧的挪成 .1 再重开。
+        if _LOG_APPENDS % 200 == 0 and LOG_FILE.is_file() \
+                and LOG_FILE.stat().st_size > _LOG_MAX_BYTES:
+            bak = LOG_FILE.with_name(LOG_FILE.name + ".1")
+            try:
+                if bak.is_file():
+                    bak.unlink()
+                LOG_FILE.replace(bak)
+            except OSError:
+                pass
         with LOG_FILE.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except OSError:
@@ -2101,8 +2116,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/endpoints"):
             _json(self, rebuild_endpoints())
         elif self.path.startswith("/log"):
-            # 500 行：7 个浏览器时，200 行只够 3-4 分钟，一查问题就被冲掉了
-            _json(self, {"ok": True, "lines": TASK_LOG[-500:]})
+            # 5000 行：8 家并发时日志很快，500 行只够两三分钟，
+            # 查「这家为什么走了兜底」时早就被冲掉了（2026-11-16 踩到）。
+            _json(self, {"ok": True, "lines": TASK_LOG[-_LOG_CAP:]})
         elif self.path.startswith("/pending"):
             # 按店铺领任务：扩展轮询时带上自己的 shop_id，只领属于自己的那个。
             #

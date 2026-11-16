@@ -558,17 +558,25 @@ def check_pending_gate() -> list[str]:
 
 
 def check_affiliate_filename() -> list[str]:
-    """联盟佣金表两条路必须起同一个文件名（用区间末日）。
+    """联盟佣金表两条路必须起**同一个**文件名（末日、去横线）。
 
-    2026-11-12 15:55 实录：PHT-B1 的规格接口回 `code=10000`，退回「联盟页面
-    方式」兜底，那份表的文件名是 `..._2026-11-05_2026-11-12.csv` —— 因为
-    background.js 当时直接用 `endDateExclusive`（末日 + 1 天）命名，而 A 路
-    （配置/api_specs.json）用的是 `{{endDateCompact}}`（末日）。同一个区间两个
-    名字，核算侧 `_pick_latest` 要求一字不差，于是判成「区间不对」→ 整份不用
-    → 报「都不覆盖这次报表区间」，整家店不出表。
+    三次踩坑，一次比一次隐蔽：
 
-    修法是把名字起对（B 路也用末日），而不是在核算侧容忍 +1 天：容忍会让
-    「真拿错邻月表」这种事故静默通过（2026-11-12 用户明确要求不留容忍）。
+    ① 2026-11-12 15:55 PHT-B1：规格接口回 `code=10000`，退回兜底，
+       那份表叫 `..._2026-11-05_2026-11-12.csv` —— B 路当时用
+       `endDateExclusive`（末日 + 1），A 路用 `{{endDateCompact}}`（末日）。
+       同一个区间两个名字，核算侧要求一字不差 → 判成「区间不对」→ 整份不用
+       → 报「都不覆盖这次报表区间」，整家店不出表。
+       当时把 B 路改成末日，但只对齐了一半。
+
+    ② 2026-11-16 14:35 PHT-M4：走了兜底，名字是
+       `Transaction_Analysis_Product_List_2026-11-01_2026-11-15.csv`，
+       而 A 路是 `20261101_20261115`（不带横线）。
+       目录里留两份内容相同的文件，按文件名匹配的脚本会选错 ——
+       核对时就读到了十几分钟前的旧文件，差点误判成「这轮没重新导」。
+
+    ③ 现在：**两条路都去掉横线**，跟 `{{startDateCompact}}_{{endDateCompact}}`
+       一字不差。这个检查盯住「别再改回带横线」。
     """
     import json
     import tempfile
@@ -576,15 +584,21 @@ def check_affiliate_filename() -> list[str]:
 
     bad: list[str] = []
 
-    # ① 扩展侧：B 路命名必须用末日，不许裸 endDateExclusive
+    # ① 扩展侧：B 路必须「末日 + 去横线」
     js = (ROOT / "浏览器扩展" / "background.js").read_text(encoding="utf-8")
-    if "Transaction_Analysis_Product_List_${startDate}_${shiftDate(endDateExclusive, -1)}.csv" not in js:
-        bad.append("B 路联盟表文件名没用区间末日（应 shiftDate(endDateExclusive, -1)，"
-                   "否则又比 A 路多一天）")
+    need_compact = ("_d8(startDate)" in js
+                    and "_d8(shiftDate(endDateExclusive, -1))" in js)
+    if not need_compact:
+        bad.append("B 路联盟表文件名没同时做到「区间末日 + 去横线」"
+                   "（应 _d8(startDate) / _d8(shiftDate(endDateExclusive, -1))，"
+                   "否则跟 A 路的 20261101_20261115 对不上）")
+    if "Transaction_Analysis_Product_List_${startDate}_" in js:
+        bad.append("B 路联盟表文件名又用回了带横线的 ${startDate}"
+                   "（会跟 A 路起出两个名字）")
     if "Transaction_Analysis_Product_List_${startDate}_${endDateExclusive}" in js:
         bad.append("B 路联盟表文件名还在直接用 endDateExclusive（末日 + 1）")
 
-    # ② 规格侧：A 路必须仍然用「末日」
+    # ② 规格侧：A 路必须仍然用「末日 + Compact」
     try:
         specs = json.loads((ROOT / "配置" / "api_specs.json").read_text(encoding="utf-8"))
     except Exception as e:  # noqa: BLE001
@@ -1151,7 +1165,7 @@ def main() -> int:
     targets.append(("计算项表格分清值与费率", check_param_chips()))
     targets.append(("试算必须手动触发", check_trial_manual()))
     targets.append(("并发闸门不挡占位", check_pending_gate()))
-    targets.append(("联盟表两条路同名（末日）", check_affiliate_filename()))
+    targets.append(("联盟表两条路同名（末日·去横线）", check_affiliate_filename()))
     targets.append(("SKU 接口优先 + 导出用总条数", check_sku_chain()))
     targets.append(("注入函数不许跨作用域", check_injected_scope()))
     targets.append(("报表核心列不许丢", check_report_columns()))

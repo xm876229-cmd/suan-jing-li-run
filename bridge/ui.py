@@ -2852,7 +2852,10 @@ function auditFees(){
     Object.keys(map).forEach(pid => {
       const v = Number(c[map[pid]] || 0);
       if(!v) return;
-      if(pid === 'super_coupon' && !c.__sc_on) return;   // 开关关着＝按 0 计
+      // 2026-11-16：超级优惠券原来这里有个 `!c.__sc_on` 的豁免，但 __sc_on
+      // 全代码从来没被赋值过，等于让这条提醒对超级优惠券永远不触发 ——
+      // 马来填了 1.08% 一直没算，界面一声不响。那个隐藏开关已经删了
+      // （填了就扣，不想扣填 0），这里也不该再豁免。
       if(!have.has(pid)){
         const t = names[pid] + '（' + country + ' ' + (v * 100).toFixed(2) + '%）';
         if(!missed.includes(t)) missed.push(t);
