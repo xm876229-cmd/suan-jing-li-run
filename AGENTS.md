@@ -42,7 +42,21 @@ Windows 打包成 `jingli.exe`（安装版 / 免安装版），macOS 走 GitHub 
 
 ### 1.1 改一处 = 同步所有版本
 
-同一份代码存在四份，**必须保持一致**：
+**先看在哪台机器、哪种模式上改。**
+
+数据根由 `src/paths.py::_data_root()` 决定，规则只有三条：
+
+| 情况 | 数据 / 配置 / 报表在哪 |
+|---|---|
+| 任意平台设了 `JINGLI_HOME` | 就用它（开发、跑测试时最常用） |
+| **macOS + 打包版**（`is_frozen()` 为真） | `~/Library/Application Support/JingLiHelper/` |
+| 其他（Windows 打包版 / 任意平台源码模式） | 程序目录本身（打包版是 `release\净利助手\` 或 `%LOCALAPPDATA%\JingLiHelper\`；源码模式是项目根） |
+
+macOS 打包版为什么要单独放：`.app` 在 `/Applications` 是只读的，未签名应用从「下载」
+双击还会被系统搬到随机只读路径（App Translocation），所以数据必须放用户库。
+目录名用 `JingLiHelper`（纯 ASCII）。**但源码模式不受这条影响，数据就在项目目录。**
+
+**Windows 上有四份必须一致**：
 
 | # | 位置 | 说明 |
 |---|---|---|
@@ -59,10 +73,18 @@ python -m scripts.sync_all --build    # 先重打包 exe/安装包再同步
 
 **改了 Python 必须 `--build`**。打包版代码冻在 `jingli.exe` 里，只拷扩展没用。
 
-### 1.2 配置正本是 `release\净利助手\配置\`
+### 1.2 配置正本：先确认数据根在哪
 
-不是项目根的 `配置\`。0.24.44 起数据跟着程序目录走。
-改项目根那份 = 没改，`sync_all` 还会说"已一致"。
+`配置\` 永远在**数据根的下一层**（见 1.1 的三条规则）。所以：
+
+- **Windows 打包版**：`release\净利助手\配置\` 或 `%LOCALAPPDATA%\JingLiHelper\配置\`
+  不是项目根的 `配置\`。0.24.44 起数据跟着程序目录走，改项目根那份 = 没改，
+  `sync_all` 还会说"已一致"。
+- **macOS 打包版**：`~/Library/Application Support/JingLiHelper/配置/`
+- **源码模式（任意平台）**：项目根的 `配置\`
+
+这一条最容易踩：在 Mac 上照 Windows 的说法去找 `release/净利助手/配置`，那里根本不存在；
+而你 clone 源码跑的时候，生效的是项目根那份。
 
 ### 1.3 三处版本号必须同时改
 
