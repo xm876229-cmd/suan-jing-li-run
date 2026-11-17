@@ -2403,12 +2403,17 @@ class Handler(BaseHTTPRequestHandler):
             from bridge import config_page
             _json(self, config_page.order_headers())
         elif self.path.startswith("/api/manual"):
-            # 手动核算：按店铺（+临时）分抽屉，跟店铺收件箱完全隔开
+            # 手动核算：按店铺（+通用）分抽屉，跟店铺收件箱完全隔开
             from bridge import manual_api
             # running：哪几家正在算。界面刷新后也要能显示「计算中…」和停止按钮，
             # 不能只靠前端那次点击留下的内存状态。
+            # countries / default_country：通用卡的国家下拉用。清单来自
+            # rates.json——新加一个国家，下拉里自动就有，不用改前端。
+            _ct = manual_api.countries()
             _json(self, {"ok": True, "spaces": manual_api.list_spaces(),
-                         "running": manual_api.running_keys()})
+                         "running": manual_api.running_keys(),
+                         "countries": _ct["countries"],
+                         "default_country": _ct["default_country"]})
         elif self.path.startswith("/api/batches"):
             # 取数批次：这家店每次「同一天 + 同一区间」取的那几类表。
             # 界面用它画「用这批重算」——只有按批次重算才 100% 复现某一次取数。

@@ -12,8 +12,12 @@
 自动核算只读「收件箱」，所以手动数据天然不会掺进去；反过来，
 手动核算也只读「手动导入」，不会把自动取的数据算进来。
 
-另外给一个「临时」抽屉（`数据/手动核算/临时/`），放不属于任何店铺的表
-（供应商对账、别人电脑拷来的一批）。它的报表落在 `报表/临时手动/`。
+另外给一个「通用」抽屉（`数据/手动核算/通用/`），放不属于任何店铺的表
+（供应商对账、别人电脑拷来的一批）。它的报表落在 `报表/手动/通用/`。
+
+通用抽屉是给「装不了扩展、认不出店铺」的电脑用的：不需要扩展认店，
+在界面上自己选核算国家（马来西亚/菲律宾/泰国…）就能导表、算净利，
+费率口径跟那家店无关，只跟选的国家有关。
 
 「批次」这个概念去掉了：同一家店的手动数据就是一个抽屉，文件累积、
 按区间挑（跟自动取数一个逻辑），传错了单个删。
@@ -37,8 +41,10 @@ ALLOWED_SUFFIX = {".xlsx", ".xls", ".csv", ".txt", ".json"}
 MAX_FILE = 60 * 1024 * 1024          # 单文件 60MB，和「导入数据」保持一致
 
 STORE_SUB = "手动导入"                # 店铺目录下手动数据的位置
-TMP_KEY = "_tmp"                     # 临时抽屉的 key
-TMP_DIR = "临时"
+TMP_KEY = "_tmp"                     # 通用抽屉的 key（内部标识，不写进任何路径）
+TMP_DIR = "通用"                      # 数据目录名：数据\手动核算\通用\
+TMP_LABEL = "通用"                    # 报表目录/分组名：报表\手动\通用\
+TMP_TITLE = "通用（不绑店铺）"         # 卡片上显示的名字
 RECORD = "手动记录.json"              # 每次算完记一笔（净利/报表名）
 
 # 记录文件的读-改-写要串起来：连传多个文件时（页面是并发的）
@@ -194,7 +200,10 @@ def describe(key: str, known: list[str] | None = None) -> dict:
     d = space_dir(k)
     doc = load_record(d)
     if k == TMP_KEY:
-        name, shop_name, region, country = "临时（不属于店铺）", "", "", doc.get("country") or ""
+        # 通用抽屉：没有店铺档案，国家只能由用户自己选（记录里存上次选的那个）
+        name, shop_name, region = TMP_TITLE, "", ""
+        country = str(doc.get("country") or "")
+        rep_group = TMP_LABEL
     else:
         meta = _meta(k)
         # 卡片标题用「店目录名」（用户起的别名，也是报表文件夹名），
@@ -203,6 +212,9 @@ def describe(key: str, known: list[str] | None = None) -> dict:
         shop_name = str(meta.get("shop_name") or "")
         region = str(meta.get("region") or "")
         country = str(meta.get("country") or doc.get("country") or "")
+        # 报表分组名 = 报表目录名（paths.store_reports_dir 用它建子目录）。
+        # 前端「点报表名跳过去」要按它筛，用卡片标题会筛不到（两者不一定同名）。
+        rep_group = name
     files = _file_records(d, doc)
     # 记录文件丢了（重装、被清理、或者有人直接往「手动导入」里拷表）时，
     # 四类表会全显示「缺」——文件明明在，人却以为没数据，不敢点计算。
@@ -228,6 +240,7 @@ def describe(key: str, known: list[str] | None = None) -> dict:
         "shop_name": shop_name,
         "region": region,
         "country": country,
+        "rep_group": rep_group,
         "dir": str(d),
         "files": files,
         "count": len(files),
@@ -240,7 +253,7 @@ def describe(key: str, known: list[str] | None = None) -> dict:
 
 
 def list_spaces() -> list[dict]:
-    """所有店铺的抽屉，顺序固定按店名（跟驾驶舱一致）。
+    """所有店铺的抽屉 + 末尾那张「通用」卡，店铺部分顺序固定按店名。
 
     以前是「有手动数据的排前面」——导完一批表，那张卡就跳到第一位，
     人刚记住的位置就没了。现在顺序只跟店名有关，导入、计算都不动位置。
@@ -253,9 +266,41 @@ def list_spaces() -> list[dict]:
         item = describe(k, known)
         if item:
             out.append(item)
-    # 只列店铺：手动核算在界面上就是「这家店的手动数据」。
-    # 临时抽屉（不属于任何店）先不摆出来，接口还留着，以后要加再说。
+    # 「通用」抽屉（不属于任何店）摆出来：装不了扩展、认不出店铺的电脑
+    # 就靠它导表核算。永远排在最后一张、空着也显示——不然「没有店铺」
+    # 在界面上就等于「什么都干不了」，正是这条路要解决的问题。
+    tmp = describe(TMP_KEY, known)
+    if tmp:
+        out.append(tmp)
     return out
+
+
+def countries() -> dict:
+    """「通用」卡能选哪些核算国家、默认选哪个。
+
+    清单来自 `配置/rates.json` 的 countries，**保持文件里的顺序**——
+    马来西亚/菲律宾/泰国本来就在前面，是常用的那几个；按字母排会把
+    印尼、德国顶上来，选一次要多找半天。
+
+    默认国家取 stores.json 的 defaults.country，没配置就取清单第一个。
+    不这样做的话，通用卡第一次打开是空值，`--country` 不传会退到
+    cli 的「马来西亚」，界面上却什么都没显示——看着像没选，实际按马来算。
+    """
+    names: list[str] = []
+    default = ""
+    try:
+        doc = safeio.read_json(paths.RATES_FILE, default={}) or {}
+        names = [str(x) for x in (doc.get("countries") or {})]
+    except Exception:  # noqa: BLE001
+        names = []
+    try:
+        st = safeio.read_json(paths.STORES_FILE, default={}) or {}
+        default = str((st.get("defaults") or {}).get("country") or "")
+    except Exception:  # noqa: BLE001
+        default = ""
+    if default not in names:
+        default = names[0] if names else ""
+    return {"countries": names, "default_country": default}
 
 
 # ---------------- 文件 ----------------
@@ -321,7 +366,10 @@ def save_file(key: str, filename: str, data: bytes, country: str = "") -> dict:
         files.append({"name": target.name, "kind": kind,
                       "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
         doc["files"] = files
-        if country and not doc.get("country"):
+        # 传了国家就以这次为准：通用卡的用户可能选错了国家、改过来重导一次，
+        # 只在「记录里本来没有国家」时才写的话，卡片会一直显示上次那个错的。
+        # 店铺卡传的是 meta 里的国家，写进记录也不影响显示（describe 里 meta 优先）。
+        if country:
             doc["country"] = country
         try:
             save_record(d, doc)
@@ -396,11 +444,18 @@ def clear_space(key: str) -> dict:
 
 # ---------------- 计算 ----------------
 
-def _report_target(key: str, label: str) -> tuple[Path, str]:
-    """手动报表放哪：`报表\\手动\\<店名>\\`，临时数据放 `报表\\手动\\临时\\`。"""
+def _report_target(key: str, label: str, country: str = "") -> tuple[Path, str]:
+    r"""手动报表放哪：`报表\手动\<店名>\`，通用数据放 `报表\手动\通用\`。
+
+    通用那份的文件名是「通用_国家_区间_手动」：**国家必须进文件名**。
+    同一批表换成菲律宾再算一次，如果还叫「通用_区间_手动」，
+    会把马来西亚那份直接覆盖掉——报表页只剩一份，而人无从知道
+    它到底是哪国的口径。带上国家，两个国家各存一份，正好能对比。
+    """
     if key == TMP_KEY:
-        out_dir = paths.report_room_dir("manual") / "临时"
-        base = f"临时_{label}_手动"
+        out_dir = paths.report_room_dir("manual") / TMP_LABEL
+        head = f"{TMP_LABEL}_{country}_" if country else f"{TMP_LABEL}_"
+        base = f"{head}{label}_手动"
     else:
         out_dir = paths.store_reports_dir(key, "manual")
         name = paths.store_display_name(key)
@@ -445,7 +500,8 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
         return {"ok": False, "error": "不认识的店铺"}
     d = space_dir(k)
     if not d.is_dir():
-        return {"ok": False, "error": "这家店还没有手动数据，先点「导入」传表"}
+        who = "通用" if k == TMP_KEY else "这家店"
+        return {"ok": False, "error": f"{who}还没有手动数据，先点「导入」传表"}
 
     from src import loader as _ld
 
@@ -454,13 +510,14 @@ def run(key: str, country: str = "", dfrom: str = "", dto: str = "",
     except Exception:  # noqa: BLE001
         has_orders = True
     if not has_orders:
-        return {"ok": False, "error": "这家店的手动数据里没有订单表。先传一份订单导出（表头要带 Order ID 和金额列）"}
+        who = "这批表里" if k == TMP_KEY else "这家店的手动数据里"
+        return {"ok": False, "error": f"{who}没有订单表。先传一份订单导出（表头要带 Order ID 和金额列）"}
 
     a, b = str(dfrom or ""), str(dto or "")
     if a and b and b < a:
         a, b = b, a
     label = f"{a}_{b}" if (a and b) else "全部"
-    out_dir, base = _report_target(k, label)
+    out_dir, base = _report_target(k, label, country)
     # 先算到临时文件，成功了才顶掉旧报表（见 safeio.swap_report）。
     # 以前的 _unique_report 是「开算之前就把旧的挪走」——算失败时
     # 报表页上少一份，用户还以为算成功了、只是数字没变。

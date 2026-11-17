@@ -885,6 +885,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
     border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--text)}
 
   .mn-rep{color:var(--accent);cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}
+  /* 通用卡的国家下拉：摆在 4 类表上面——导表前就得选对，表头靠它认 */
+  .mn-cty{display:flex;align-items:center;gap:8px;padding:2px 0 9px;
+    border-bottom:1px dashed var(--line-soft);margin-bottom:6px}
+  .mn-cty .nm{font-size:12.5px;color:var(--text-2)}
+  .mn-cty select{font:inherit;font-size:12.5px;padding:4px 8px;border-radius:7px;
+    border:1px solid var(--line);background:var(--panel);color:var(--text);max-width:150px}
   .manual-grid .sc-foot button.stop{background:#fff4f3;border-color:#f0c2bc;color:#b42318}
   .manual-grid .sc-foot button.stop:hover{background:#ffe9e6;border-color:#e6a79f}
   .mn-link{margin-top:6px;font-size:12.5px;color:var(--accent);cursor:pointer;user-select:none}
@@ -4256,7 +4262,7 @@ function rowsOf(){ const c = cur(); return (c && Array.isArray(c.params)) ? c.pa
 /* ---------------- 手动核算（按店铺的卡片墙） ----------------
    一家店一张卡：这家店自己传的表放 数据\店铺\<店名>\手动导入\，
    算出来的报表放 报表\<店名>\手动\。跟驾驶舱那条线（收件箱）完全不交叉。 */
-const MN = {spaces: [], busy: {}};
+const MN = {spaces: [], busy: {}, countries: [], defCountry: ''};
 let MN_RANGE = null;                 // null = 全部（不按日期过滤）
 
 function mnSpace(key){ return MN.spaces.find(x => x.key === key) || null; }
@@ -4295,19 +4301,34 @@ function mnCardHtml(s){
             : (s.count ? '还没算过' : '还没导入'));
   // 「报表」这一行说结果：出没出、叫什么名字。点一下去报表的手动房间
   const repTxt = last && last.report ? String(last.report) : '还没有';
-  // 跟驾驶舱一样的身份行：平台店名 + ID 后 8 位 + 站点
-  const meta = [
-    (s.shop_name && s.shop_name !== s.name) ? s.shop_name : '',
-    'ID ' + String(s.key || '').slice(-8),
-    s.region || s.country || ''
-  ].filter(Boolean).join(' · ');
+  // 通用卡（kind === 'tmp'）：没有店铺档案，核算国家只能自己选。
+  // 上传认表头、核算取费率都要这个国家，所以选国家放在卡片最上面。
+  const isTmp = (s.kind === 'tmp');
+  const curCountry = s.country || MN.defCountry || '';
+  const countrySel = (isTmp && MN.countries.length)
+    ? `<div class="mn-cty"><span class="nm">核算国家</span>
+         <select data-mn-country="${esc(s.key)}">
+           ${MN.countries.map(c =>
+             `<option value="${esc(c)}"${c === curCountry ? ' selected' : ''}>${esc(c)}</option>`
+           ).join('')}
+         </select></div>`
+    : '';
+  // 跟驾驶舱一样的身份行：平台店名 + ID 后 8 位 + 站点。
+  // 通用卡没有这些东西，直白写「不绑店铺」，别摆一个假 ID 让人误会。
+  const meta = isTmp
+    ? '不绑店铺 · 自己选核算国家'
+    : [
+        (s.shop_name && s.shop_name !== s.name) ? s.shop_name : '',
+        'ID ' + String(s.key || '').slice(-8),
+        s.region || s.country || ''
+      ].filter(Boolean).join(' · ');
   return `<div class="sc" data-mn-card="${esc(s.key)}">
     <div class="sc-head">
       <div class="sc-title"><div class="n">${esc(s.name || s.key)}</div>
         <div class="m">${esc(meta || '—')}</div></div>
       <span class="sc-state"><i class="dot ${s.count ? 'on' : 'off'}"></i>${s.count ? '有数据' : '空'}</span>
     </div>
-    <div class="sc-body">${rows}
+    <div class="sc-body">${countrySel}${rows}
       <div class="step ${busy ? 'run' : (last ? 'done' : '')}">
         <span class="ic">${busy ? '<span style="color:#3b82d6">◐</span>'
           : (last ? '<span style="color:#12a382">✓</span>' : '<span style="color:#c9c7bd">○</span>')}</span>
@@ -4318,17 +4339,19 @@ function mnCardHtml(s){
         <span class="nm">报表</span>
         <span class="dt ${last && last.report ? 'mn-rep' : ''}"
               title="${last && last.report ? '点一下去「报表 → 手动报表」看这份报表' : esc(repTxt)}"
-              data-mn-rep="${last && last.report ? esc(s.key) : ''}">${esc(repTxt)}</span></div>
+              data-mn-rep="${last && last.report ? esc(s.key) : ''}"
+              data-mn-group="${esc(s.rep_group || s.name || '')}">${esc(repTxt)}</span></div>
       ${s.count ? `<div class="mn-link" data-mn-files="${esc(s.key)}">查看 / 清空文件（${s.count}）›</div>` : ''}
     </div>
     <div class="sc-foot">
-      <div class="last">${esc(s.count ? ('最后导入 ' + (s.last_file || '')) : '也可以把表直接拖到卡片上')}</div>
+      <div class="last">${esc(s.count ? ('最后导入 ' + (s.last_file || ''))
+        : (isTmp ? '把表拖到卡片上，或点「导入」' : '也可以把表直接拖到卡片上'))}</div>
       <button class="ghost" data-mn-imp="${esc(s.key)}" ${busy ? 'disabled' : ''}>导入</button>
       ${busy
         ? `<button class="stop" data-mn-stop="${esc(s.key)}"
              title="掐掉这次的核算。算到一半的临时文件会被清掉，报表不受影响">停止</button>`
         : `<button class="primary" data-mn-run="${esc(s.key)}"
-             title="用这家店的手动数据算。改了佣金费率就再点一次">计算</button>`}
+             title="${isTmp ? '按上面选的核算国家算这批表' : '用这家店的手动数据算。改了佣金费率就再点一次'}">计算</button>`}
     </div>
   </div>`;
 }
@@ -4340,19 +4363,24 @@ async function loadManual(){
   try{
     const j = await (await fetch('/api/manual')).json();
     MN.spaces = j.spaces || [];
+    // 通用卡的国家下拉：清单来自 rates.json，新加国家不用改前端
+    MN.countries = j.countries || [];
+    MN.defCountry = j.default_country || '';
     // 服务端说哪家在算就按哪家显示「计算中…」——刷新页面也能看到，
     // 不会因为前端内存清空就变成「还没算过」。
     (j.running || []).forEach(k => { MN.busy[k] = 1; });
   }catch(e){ MN.spaces = []; down = true; }
   if(!MN.spaces.length){
     // 「服务没连上」和「真没有店铺」要分开说：
-    // 都写成「还没识别到店铺」会让人去重新登录店铺，白折腾一圈
+    // 都写成「还没识别到店铺」会让人去重新登录店铺，白折腾一圈。
+    // 现在「通用」卡永远在，列表不可能因为「没店铺」而空——
+    // 空了只可能是接口出错，所以第二种情况直说刷新。
     grid.innerHTML = down
       ? '<div class="sc-empty"><b style="display:block;margin-bottom:6px;font-size:14px">取数服务没连上</b>'
         + '手动核算也要靠它读写文件。<br><br>'
         + '<button class="ghost" style="width:auto;padding:7px 16px;margin:0" '
         + 'onclick="go(\'debug\')">去调试页启动 →</button></div>'
-      : '<div class="sc-empty">还没识别到店铺。<br>在浏览器里打开店铺后台，扩展会自动认出是哪家店。</div>';
+      : '<div class="sc-empty">没读到数据区，刷新一下试试。</div>';
     return;
   }
   const done = MN.spaces.filter(x => x.count).length;
@@ -4394,7 +4422,9 @@ function bindMnCards(grid){
     if(!el.dataset.mnRep) return;
     el.onclick = () => {
       const sp = mnSpace(el.dataset.mnRep);
-      openReports('manual', sp ? sp.name : '');
+      // 按「报表目录名」筛，不是卡片标题：通用卡的标题是「通用（不绑店铺）」，
+      // 报表目录叫「通用」，用标题去筛会一份都筛不到。
+      openReports('manual', el.dataset.mnGroup || (sp ? (sp.rep_group || sp.name) : ''));
     };
   });
   grid.querySelectorAll('[data-mn-files]').forEach(b => {
@@ -4432,7 +4462,10 @@ async function mnUpload(key, files){
         body: JSON.stringify({key, name: f.name, b64, country})})).json();
       if(j.ok){
         lines.push(`✓ ${esc(f.name)} → <b>${esc(j.label || '未识别')}</b>`
-          + (j.kind ? '' : ' <span style="color:#B45309">（表头没认出来，确认下是不是这类表）</span>'));
+          + (j.kind ? '' : ' <span style="color:#B45309">（表头没认出来：'
+             + (s.kind === 'tmp' ? '先在上面选对核算国家，再重新导入一次'
+                                 : '确认下是不是这类表')
+             + '）</span>'));
       }else{
         lines.push(`✕ ${esc(f.name)} → <span style="color:#C0392B">${esc(j.error || '失败')}</span>`);
       }
@@ -4457,6 +4490,20 @@ async function mnRun(key){
   }
   const cs = document.querySelector('[data-mn-country="' + key + '"]');
   const country = (cs && cs.value) || s.country || '';
+  // 通用卡没有店铺档案，「本店不投广告」这类声明无从谈起，所以缺哪类表
+  // 必须先问一句再算。报表上「没有广告表」和「广告费 0」长得一模一样，
+  // 静默按 0 算出来的净利偏高，而人不会主动去翻「口径」页。
+  // 只对通用卡问：店铺卡走的是原来那条路，不改它的行为。
+  if(s.kind === 'tmp'){
+    const kd = s.kinds || {};
+    const miss = [];
+    if(!kd.ads) miss.push('广告表');
+    if(!kd.affiliate) miss.push('联盟佣金表');
+    if(miss.length && !confirm(
+        '这批表里没有「' + miss.join('」「') + '」。\n\n'
+      + '这两项会按 0 计，算出来的净利会偏高，报表「口径」页会写明。\n\n'
+      + '仍然要算吗？')) return;
+  }
   const rg = MN_RANGE;
   // 卡片上立刻显示「计算中…」，不然点了没反应，人会以为没点上
   MN.busy[key] = 1;
